@@ -174,7 +174,9 @@ of "myNimProc": return myNimProc(params[0].getInt,params[0].getFloat,params[0].g
 Going back to our first example, when `index.html` is served, Javascript will call the `echoThis` procedure and pass "Hello from Javascript!" as the param. This echo the string in the terminal. immediately, Nim will call the `logThis` function and pass "Hello from Nim!". Neel handles the JSON conversion, calls the function and passes in the param. Now open the console in Chrome developer tools and you should see "Hello from Nim!".
 
 ## Documentation
+coming soon
 ## Examples
+coming soon
 ## Future Work
 
 I have a huge vision for this library. Eventually, the goal is to have this as full-fledged as Electron for Nim. I believe this has the potential for developing commercial applications and perhaps even rival Electron as a framework.
