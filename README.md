@@ -164,7 +164,7 @@ The first thing you'll notice is we've included a script tag containing `neel.js
 
 frontend call to backend:
 ```javascript
-callProc("myNimProc",1,3.14,["some stuff",666,9000])
+neel.callProc("myNimProc",1,3.14,["some stuff",666,9000])
 ```
 must match the result of the `exposeProcs` macro:
 ```nim
