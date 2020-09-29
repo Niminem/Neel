@@ -53,7 +53,7 @@ webAssetsFolder/    <---- Web assets folder
 
 #### Nim / Backend
 
-We'll begin with a simple example, from there I'll explain the process and each part in detail.
+We'll begin with a very simple example, from there I'll explain the process and each part in detail.
 
 (main.nim)
 ```nim
@@ -71,23 +71,29 @@ start("index.html","assets",appMode=true) #4
 
 When importing neel, several modules are automatically exported into the calling module. `exposedProcs` and `start` is a macro and template that require these modules in order to work properly.
 
-One of the modules includes `json`, which is needed should you have a params in your procedures that are of type `seq` or `table`. More on this below.
+One of the modules includes `json`, which is needed should you have params in your procedures that are of type `seq` or `table`. More on this below.
 
 ##### #2 exposeProcs
 
-`exposeProcs` is a macro that *exposes* specific procedures for javascript to be able to call from the frontend. When the macro is expanded, it creates a procedure `callProc` which contains **all exposed procedures** and will call a specified procedure based on frontend data, and passing in the appropriate params (should there be any).
+`exposeProcs` is a macro that *exposes* specific procedures for javascript to be able to call from the frontend. When the macro is expanded, it creates a procedure `callProc` which contains **all exposed procedures** and will call a specified procedure based on frontend data, passing in the appropriate params (should there be any).
 
-The data being received is initially **JSON** and needs to be converted into the appropriate types for each param in a procedure. This is also handled by the macro. Unfortunately, due to Nim's type system I'm limited on what's able to be converted.
+The data being received is initially **JSON** and needs to be converted into the appropriate types for each param in a procedure. This is also handled by the macro. Unfortunately, due to Nim's type system there's a limit on what's able to be converted programmatically.
 
-Accepted types for any *exposed procedures* are:
+Accepted param types for all *exposed procedures* are:
 * string, int, float, bool
 * seq[JsonNode]
 * OrderedTable[string, JsonNode]
 
+Don't worry, you're still able to pass complex data as your params if need be, such as a `seq` within a `seq` containing a `table` of arbitrary types. Just have that param be either of type `seq[JsonNode]` or `OrderedTable[string, JsonNode]` and manually convert them within your procedure. Converting JSON is very simple, refer to the [documentation](https://nim-lang.org/docs/json.html).
 
-
-
-
+I'm sure this is obvious, but it's much cleaner to have your exposed procedures call procedures from other modules.
+Example:
+```nim
+exposeProcs:
+    proc proc1(param :seq[JsonNode]) =
+        doStuff(param)
+```
+Just make sure that **ALL** procedures that stem from an exposed procedure is of type `Option[JsonNode]` *unless* the final procedure **WILL NOT** be calling javascript. This will make more sense below.
 
 
 
