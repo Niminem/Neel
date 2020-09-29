@@ -115,7 +115,7 @@ Just make sure that **ALL** procedures that stem from an exposed procedure is of
 callJs("myJavascriptFunc",1,3.14,["some stuff",666,9000])
 ```
 
-The above code gets converted into JSON and returned via the `some()` procedure (part of the Options module). All procedures that stem from an exposed procedure need to be of type `Option[JsonNode]` **if** the the final procedure is calling javascript.
+The above code gets converted into JSON and returned via the `some()` procedure (part of the [Options module](https://nim-lang.org/docs/options.html)). All procedures that stem from an exposed procedure need to be of type `Option[JsonNode]` **if** the the final procedure is calling javascript.
 
 ##### #5 startApp
 
