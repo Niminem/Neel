@@ -1,6 +1,6 @@
 # Neel | HTML/JS GUI Library for Nim
 
-Neel is a Nim library for making Electron-like HTML/JS GUI apps, with full access to Nim capabilities and targets any of the C, C++, or Objective-C backends.
+Neel is a Nim library for making lightweight Electron-like HTML/JS GUI apps, with full access to Nim capabilities and targets any of the C, C++, or Objective-C backends.
 
 > As of v0.0.1: Neel opens a new Chrome session in app mode and allows the Nim backend and HTML/JS frontend to communicate via JSON and websockets.
 
@@ -51,4 +51,28 @@ webAssetsFolder/    <---- Web assets folder
 
 ```
 
-### Starting the Application
+### Developing the Application
+
+#### Nim / Backend
+
+We'll begin with a simple example and I'll explain each part in detail.
+
+main.nim
+```nim
+
+import neel
+
+exposeProcs:
+    proc echoThis(jsMsg :string) =
+        echo jsMsg
+        callJs("logThis",
+
+start("index.html","assets")
+```
+
+
+
+
+
+
+
