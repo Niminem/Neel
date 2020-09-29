@@ -62,9 +62,9 @@ import neel #1
 exposeProcs: #2
     proc echoThis(jsMsg :string) =
         echo "got this from frontend: " & jsMsg
-        callJs("logThis", "hello from Nim!"
+        callJs("logThis", "hello from Nim!" #3
 
-start("index.html","assets",appMode=true) #3
+start("index.html","assets",appMode=true) #4
 ```
 
 ##### #1 import neel
@@ -75,5 +75,20 @@ One of the modules includes `json`, which is needed should you have a params in 
 
 ##### #2 exposeProcs
 
-`exposeProcs` is a macro that 
+`exposeProcs` is a macro that *exposes* specific procedures for javascript to be able to call from the frontend. When the macro is expanded, it creates a procedure `callProc` which contains **all exposed procedures** and will call a specified procedure based on frontend data, and passing in the appropriate params (should there be any).
+
+The data being received is initially **JSON** and needs to be converted into the appropriate types for each param in a procedure. This is also handled by the macro. Unfortunately, due to Nim's type system I'm limited on what's able to be converted.
+
+Accepted types for any *exposed procedures* are:
+* string, int, float, bool
+* seq[JsonNode]
+* OrderedTable[string, JsonNode]
+
+
+
+
+
+
+
+
 
