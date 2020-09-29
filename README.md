@@ -22,7 +22,7 @@ Currently, Nim’s options for writing GUI applications are quite limited, and i
 
 Neel is still in its infancy, so as of right now I don’t think it’s suitable for making full-blown commercial applications like Slack or Twitch. It is, however, very suitable for making all kinds of other projects and tools.
 
-The best visualization libraries that exist are in Javascript and the most powerful capabilities of software can be harnessed with Nim- math, machine learning, etc. The goal of Neel is to combine the two languages and assist you in creating killer applications.
+The best visualization libraries that exist are in Javascript and the most powerful capabilities of software can be harnessed with Nim- math, machine learning, etc. The goal of Neel is to combine the two languages and assist you in creating some killer applications.
 
 ## Installation
 
@@ -33,4 +33,22 @@ Install from nimble:
 
 ### Directory Structure
 
-Neel applications consist of
+Neel applications consist of various web assets (html,css,js,etc.) and various Nim files.
+
+All of the web assets need to be placed in a single directory (they can be further divided into folders inside it if necessary). **Make sure your directory is not named "public" as this does not play well with Jester.**
+
+```
+
+main.nim            <---- Nim files
+database.nim
+other.nim
+webAssetsFolder/    <---- Web assets folder
+  index.html
+  css/
+    style.css
+  js/
+    main.js
+
+```
+
+### Starting the Application
