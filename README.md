@@ -10,6 +10,7 @@ Neel is designed to take all the hassle out of writing GUI applications. Current
 * automatic routes
 * automatic type conversions (from JSON to each proc’s param types)
 * simple interface for backend/frontend communication
+* cross-platform (physically tested on Mac, Windows, and Linux)
 ... this is just the beginning!
 
 Neel is inspired by [Eel](https://github.com/samuelhwilliams/Eel), the Python library equivalent.
@@ -35,7 +36,7 @@ Install from nimble:
 
 Neel applications consist of various web assets (html, css, js, etc.) and various Nim files.
 
-All of the web assets need to be placed in a single directory (they can be further divided into folders inside it if necessary). **Make sure your directory is not named "public" as this does not play well with Jester.**
+All of the web assets need to be placed in a single directory (they can be further divided into folders inside it if necessary). **Make sure your directory is not named "public" as this does not play well with the Jester module.**
 
 ```
 main.nim            <---- Nim files
@@ -64,7 +65,7 @@ exposeProcs: #2
         echo "got this from frontend: " & jsMsg
         callJs("logThis", "hello from Nim!" #3
 
-start("index.html","assets",appMode=true) #4
+startApp("index.html","assets",appMode=true) #4
 ```
 
 ##### #1 import neel
@@ -84,7 +85,7 @@ Accepted param types for all *exposed procedures* are:
 * seq[JsonNode]
 * OrderedTable[string, JsonNode]
 
-This is result of the above macro:
+This above macro produces this result:
 
 ```nim
 proc callProc(jsData :JsonNode) :Option[JsonNode] =
@@ -108,13 +109,26 @@ Just make sure that **ALL** procedures that stem from an exposed procedure is of
 
 ##### #3 callJs
 
-callJs is a template that takes in at least one value, a `string`, and it's *the name of the javascript function you want to call*. Any other value will be passed into that javascript function call on the frontend. You may pass in any amount like so:
+`callJs` is a template that takes in at least one value, a `string`, and it's *the name of the javascript function you want to call*. Any other value will be passed into that javascript function call on the frontend. You may pass in any amount like so:
 
 ```nim
 callJs("myJavascriptFunc",1,3.14,["some stuff",666,9000])
 ```
 
-The above code gets converted into JSON and returned via the `some()` procedure (part of the Options module). All procedures that stem from an exposed procedure need to be of type `Option[JsonNode]` *if* the the final procedure is ca
+The above code gets converted into JSON and returned via the `some()` procedure (part of the Options module). All procedures that stem from an exposed procedure need to be of type `Option[JsonNode]` **if** the the final procedure is calling javascript.
+
+##### #5 startApp
+
+`startApp` is a template that handles server logic, routing, and Chrome web browser. As of v0.0.1, the `startApp` template takes 3 params:
+```nim
+startApp(startURL,assetsDir :string, appMode :bool = true)
+```
+`startURL` is the name of the file you want Chrome to open
+`assetsDir` is the name of your web assets folder
+`appMode` if "true" (default) Chrome will open a new session/window in App mode, or if "false" a new tab will be opened in your **current default browser** - which can be very useful for debugging.
+
+
+As of v0.0.1, Neel will start a local webserver at http://0.0.0.0:5000/ (option to change ports coming v0.0.2)
 
 
 
