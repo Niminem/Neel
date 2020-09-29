@@ -166,13 +166,15 @@ frontend call to backend:
 ```javascript
 callProc("myNimProc",1,3.14,["some stuff",666,9000])
 ```
-must match:
+must match the result of the `exposeProcs` macro:
 ```nim
 of "myNimProc": return myNimProc(params[0].getInt,params[0].getFloat,params[0].getElems)
 ```
 
 Going back to our first example, when `index.html` is served, Javascript will call the `echoThis` procedure and pass "Hello from Javascript!" as the param. This echo the string in the terminal. immediately, Nim will call the `logThis` function and pass "Hello from Nim!". Neel handles the JSON conversion, calls the function and passes in the param. Now open the console in Chrome developer tools and you should see "Hello from Nim!".
 
-
+## Documentation
+## Examples
+## Future Work
 
 
