@@ -54,7 +54,7 @@ webAssetsFolder/    <---- Web assets folder
 
 #### Nim / Backend
 
-We'll begin with a very simple example, from there I'll explain the process and each part in detail.
+We begin with a very simple example, from there I'll explain the process and each part in detail.
 
 (main.nim)
 ```nim
@@ -125,10 +125,37 @@ startApp(startURL,assetsDir :string, appMode :bool = true)
 ```
 `startURL` is the name of the file you want Chrome to open
 `assetsDir` is the name of your web assets folder
-`appMode` if "true" (default) Chrome will open a new session/window in App mode, or if "false" a new tab will be opened in your **current default browser** - which can be very useful for debugging.
+`appMode` if "true" (default) Chrome will open a new session/window in App mode, if "false" a new tab will be opened in your **current default browser** - which can be very useful for debugging.
 
 
 As of v0.0.1, Neel will start a local webserver at http://0.0.0.0:5000/ (option to change ports coming v0.0.2)
 
+#### Javascript / Frontend
 
+The Javascript aspect of a Neel app isn't nearly as complex. Let's build the frontend for the example above:
+
+(index.html)
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neel App Example</title>
+    <script src="neel.js"></script> <!-- always include neel.js in your <head>! -->
+</head>
+<body>
+    <h1>My First Neel App</h1>
+    <script src="main.js"></script>
+</body>
+</html>
+```
+(main.js)
+```javascript
+neel.callProc("echoThis","Hello from Javascript!")
+
+function logThis(param){
+    console.log(param)
+}
+```
 
