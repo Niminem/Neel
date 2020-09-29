@@ -6,10 +6,10 @@ Neel is a Nim library for making Electron-like HTML/JS GUI apps, with full acces
 
 Neel is designed to take all the hassle out of writing GUI applications. Current Features:
 
-*eliminate boilerplate code
-*automatic routes
-*automatic type conversions (from JSON to each proc’s param types)
-*simple interface for backend/frontend communication
+* eliminate boilerplate code
+* automatic routes
+* automatic type conversions (from JSON to each proc’s param types)
+* simple interface for backend/frontend communication
 ... this is just the beginning!
 
 Neel is inspired by [Eel](https://github.com/samuelhwilliams/Eel), the Python library equivalent.
