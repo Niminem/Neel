@@ -63,7 +63,7 @@ import neel #1
 exposeProcs: #2
     proc echoThis(jsMsg :string) =
         echo "got this from frontend: " & jsMsg
-        callJs("logThis", "hello from Nim!" #3
+        callJs("logThis", Hello from Nim!" #3
 
 startApp("index.html","assets",appMode=true) #4
 ```
@@ -158,4 +158,21 @@ function logThis(param){
     console.log(param)
 }
 ```
+The first thing you'll notice is we've included a script tag containing `neel.js` in the <head> section of our HTML page. This allows Neel to handle all of the logic on the frontend for websocket connections and function/procedure calls.
+
+`callProc` is a function that takes in at least one value, a `string`, and it's *the name of the Nim procedure you want to call*. Any other value will be passed into that Nim procedure call on the backend. **You must pass in the correct number of params for that proc, in order, and of the correct types.**. Example: 
+
+frontend call to backend:
+```javascript
+callProc("myNimProc",1,3.14,["some stuff",666,9000])
+```
+must match:
+```nim
+of "myNimProc": return myNimProc(params[0].getInt,params[0].getFloat,params[0].getElems)
+```
+
+Going back to our first example, when `index.html` is served, Javascript will call the `echoThis` procedure and pass "Hello from Javascript!" as the param. This echo the string in the terminal. immediately, Nim will call the `logThis` function and pass "Hello from Nim!". Neel handles the JSON conversion, calls the function and passes in the param. Now open the console in Chrome developer tools and you should see "Hello from Nim!".
+
+
+
 
