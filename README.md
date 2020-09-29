@@ -84,6 +84,17 @@ Accepted param types for all *exposed procedures* are:
 * seq[JsonNode]
 * OrderedTable[string, JsonNode]
 
+This is result of the above macro:
+
+```nim
+proc callProc(jsData :JsonNode) :Option[JsonNode] =
+    var
+        procName = jsData["procName"].getStr
+        params = jsData["params"].getElems
+    case procName
+    of "echoThis": return echoThis(params[0].getStr)
+```
+
 Don't worry, you're still able to pass complex data as your params if need be, such as a `seq` within a `seq` containing a `table` of arbitrary types. Just have that param be either of type `seq[JsonNode]` or `OrderedTable[string, JsonNode]` and manually convert them within your procedure. Converting JSON is very simple, refer to the [documentation](https://nim-lang.org/docs/json.html).
 
 I'm sure this is obvious, but it's much cleaner to have your exposed procedures call procedures from other modules.
@@ -95,6 +106,4 @@ exposeProcs:
 ```
 Just make sure that **ALL** procedures that stem from an exposed procedure is of type `Option[JsonNode]` *unless* the final procedure **WILL NOT** be calling javascript. This will make more sense below.
 
-
-
-
+##### #3 callJs
