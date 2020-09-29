@@ -33,12 +33,11 @@ Install from nimble:
 
 ### Directory Structure
 
-Neel applications consist of various web assets (html,css,js,etc.) and various Nim files.
+Neel applications consist of various web assets (html, css, js, etc.) and various Nim files.
 
 All of the web assets need to be placed in a single directory (they can be further divided into folders inside it if necessary). **Make sure your directory is not named "public" as this does not play well with Jester.**
 
 ```
-
 main.nim            <---- Nim files
 database.nim
 other.nim
@@ -48,31 +47,33 @@ webAssetsFolder/    <---- Web assets folder
     style.css
   js/
     main.js
-
 ```
 
 ### Developing the Application
 
 #### Nim / Backend
 
-We'll begin with a simple example and I'll explain each part in detail.
+We'll begin with a simple example, from there I'll explain the process and each part in detail.
 
-main.nim
+(main.nim)
 ```nim
+import neel #1
 
-import neel
-
-exposeProcs:
+exposeProcs: #2
     proc echoThis(jsMsg :string) =
-        echo jsMsg
-        callJs("logThis",
+        echo "got this from frontend: " & jsMsg
+        callJs("logThis", "hello from Nim!"
 
-start("index.html","assets")
+start("index.html","assets",appMode=true) #3
 ```
 
+##### #1 import neel
 
+When importing neel, several modules are automatically exported into the calling module. `exposedProcs` and `start` is a macro and template that require these modules in order to work properly.
 
+One of the modules includes `json`, which is needed should you have a params in your procedures that are of type `seq` or `table`. More on this below.
 
+##### #2 exposeProcs
 
-
+`exposeProcs` is a macro that 
 
