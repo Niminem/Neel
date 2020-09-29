@@ -104,6 +104,17 @@ exposeProcs:
     proc proc1(param :seq[JsonNode]) =
         doStuff(param)
 ```
-Just make sure that **ALL** procedures that stem from an exposed procedure is of type `Option[JsonNode]` *unless* the final procedure **WILL NOT** be calling javascript. This will make more sense below.
+Just make sure that **ALL** procedures that stem from an exposed procedure is of type `Option[JsonNode]` *unless* the final procedure **will not** be calling javascript. This will make more sense below.
 
 ##### #3 callJs
+
+callJs is a template that takes in at least one value, a `string`, and it's *the name of the javascript function you want to call*. Any other value will be passed into that javascript function call on the frontend. You may pass in any amount like so:
+
+```nim
+callJs("myJavascriptFunc",1,3.14,["some stuff",666,9000])
+```
+
+The above code gets converted into JSON and returned via the `some()` procedure (part of the Options module). All procedures that stem from an exposed procedure need to be of type `Option[JsonNode]` *if* the the final procedure is ca
+
+
+
