@@ -177,4 +177,8 @@ Going back to our first example, when `index.html` is served, Javascript will ca
 ## Examples
 ## Future Work
 
+I have a huge vision for this library. Eventually, the goal is to have this as full-fledged as Electron for Nim. I believe this has the potential for developing commercial applications and perhaps even rival Electron as a framework.
 
+In my opinion, Nim is the best programming language in existence at the moment. My hope is also that while Neel improves in its development, Nim can get exposure that it rightfully deserves.
+
+Neel will receive updates at least once per month, beginning with v0.0.2 by the end of October with plenty of improvements and added features.
