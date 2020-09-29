@@ -1,8 +1,8 @@
-#Neel | HTML/JS GUI Library for Nim
+# Neel | HTML/JS GUI Library for Nim
 
 Neel is a Nim library for making Electron-like HTML/JS GUI apps, with full access to Nim capabilities and targets any of the C, C++, or Objective-C backends.
 
->As of v0.0.1: Neel opens a new Chrome session in app mode and allows the Nim backend and HTML/JS frontend to communicate via JSON and websockets.
+> As of v0.0.1: Neel opens a new Chrome session in app mode and allows the Nim backend and HTML/JS frontend to communicate via JSON and websockets.
 
 Neel is designed to take all the hassle out of writing GUI applications. Current Features:
 
@@ -16,7 +16,7 @@ Neel is inspired by [Eel](https://github.com/samuelhwilliams/Eel), the Python li
 
 ----------------------
 
-##Introduction
+## Introduction
 
 Currently, Nim’s options for writing GUI applications are quite limited, and if you wanted to use HTML/JS instead, there’s a lot of boilerplate code and Nim’s type system doesn’t make things any easier.
 
@@ -24,13 +24,13 @@ Neel is still in its infancy, so as of right now I don’t think it’s suitable
 
 The best visualization libraries that exist are in Javascript and the most powerful capabilities of software can be harnessed with Nim- math, machine learning, etc. The goal of Neel is to combine the two languages and assist you in creating killer applications.
 
-##Installation
+## Installation
 
 Install from nimble:
 `nimble install neel`
 
-##Usage
+## Usage
 
-###Directory Structure
+### Directory Structure
 
 Neel applications consist of
