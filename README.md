@@ -6,11 +6,11 @@ Neel is a Nim library for making lightweight Electron-like HTML/JS GUI apps, wit
 
 Neel is designed to take all the hassle out of writing GUI applications. Current Features:
 
-* eliminate boilerplate code
-* automatic routes
-* automatic type conversions (from JSON to each proc’s param types)
-* simple interface for backend/frontend communication
-* cross-platform (physically tested on Mac, Windows, and Linux)
+* Eliminate boilerplate code
+* Automatic routes
+* Automatic type conversions (from JSON to each proc’s param types)
+* Simple interface for backend/frontend communication
+* Cross-platform (physically tested on Mac, Windows, and Linux)
 ... this is just the beginning!
 
 Neel is inspired by [Eel](https://github.com/samuelhwilliams/Eel), the Python library equivalent.
@@ -29,12 +29,14 @@ The best visualization libraries that exist are in Javascript and the most power
 
 Install from nimble:
 `nimble install neel`
+`nimble install jester`
+`nimble install ws`
 
 ## Usage
 
 ### Directory Structure
 
-Neel applications consist of various web assets (html, css, js, etc.) and various Nim files.
+Neel applications consist of various web assets (HTML,CSS,JS, etc.) and various Nim files.
 
 All of the web assets need to be placed in a single directory (they can be further divided into folders inside it if necessary). **Make sure your directory is not named "public" as this does not play well with the Jester module.**
 
@@ -63,7 +65,7 @@ import neel #1
 exposeProcs: #2
     proc echoThis(jsMsg :string) =
         echo "got this from frontend: " & jsMsg
-        callJs("logThis", Hello from Nim!" #3
+        callJs("logThis", "Hello from Nim!") #3
 
 startApp("index.html","assets",appMode=true) #4
 ```
@@ -112,7 +114,7 @@ Just make sure that **ALL** procedures that stem from an exposed procedure is of
 `callJs` is a template that takes in at least one value, a `string`, and it's *the name of the javascript function you want to call*. Any other value will be passed into that javascript function call on the frontend. You may pass in any amount like so:
 
 ```nim
-callJs("myJavascriptFunc",1,3.14,["some stuff",666,9000])
+callJs("myJavascriptFunc",1,3.14,["some stuff",1,9000])
 ```
 
 The above code gets converted into JSON and returned via the `some()` procedure (part of the [Options module](https://nim-lang.org/docs/options.html)). All procedures that stem from an exposed procedure need to be of type `Option[JsonNode]` **if** the the final procedure is calling javascript.
@@ -128,7 +130,7 @@ startApp(startURL,assetsDir :string, appMode :bool = true)
 `appMode` if "true" (default) Chrome will open a new session/window in App mode, if "false" a new tab will be opened in your **current default browser** - which can be very useful for debugging.
 
 
-As of v0.0.1, Neel will start a local webserver at http://0.0.0.0:5000/ (option to change ports coming v0.0.2)
+As of v0.0.1, Neel will start a local webserver at http://localhost:5000/ (option to change ports coming v0.0.2)
 
 #### Javascript / Frontend
 
@@ -164,7 +166,7 @@ The first thing you'll notice is we've included a script tag containing `neel.js
 
 frontend call to backend:
 ```javascript
-neel.callProc("myNimProc",1,3.14,["some stuff",666,9000])
+neel.callProc("myNimProc",1,3.14,["some stuff",1,9000])
 ```
 must match the result of the `exposeProcs` macro:
 ```nim
