@@ -128,7 +128,7 @@ startApp(startURL,assetsDir :string, appMode :bool = true)
 `assetsDir` is the name of your web assets folder.
 `appMode` if "true" (default) Chrome will open a new session/window in App mode, if "false" a new tab will be opened in your **current default browser** - which can be very useful for debugging.
 
-As of v0.1.0, Neel will start a local webserver at http://localhost:5000/ (option to change ports coming v0.0.2)
+As of v0.1.0, Neel will start a local webserver at http://localhost:5000/ (option to change ports coming v0.2.0)
 
 #### Javascript / Frontend
 
@@ -191,4 +191,4 @@ I have a huge vision for this library. Eventually, the goal is to have this as f
 
 In my opinion, Nim is the best programming language in existence at the moment. My hope is also that while Neel improves in its development, Nim can get exposure that it rightfully deserves.
 
-Neel will receive updates at least once per month, beginning with v0.0.2 by the end of October with plenty of improvements and added features.
+Neel will receive updates at least once per month, beginning with v0.2.0 by the end of October with plenty of improvements and added features.
