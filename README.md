@@ -175,6 +175,14 @@ of "myNimProc": return myNimProc(params[0].getInt,params[1].getFloat,params[2].g
 
 Going back to our first example, when `index.html` is served, Javascript will call the `echoThis` procedure and pass "Hello from Javascript!" as the param. This echo the string in the terminal. immediately, Nim will call the `logThis` function and pass "Hello from Nim!". Neel handles the JSON conversion, calls the function and passes in the param. Now open the console in Chrome developer tools and you should see "Hello from Nim!".
 
+#### Compilation Process
+
+When compiling your Neel application, make sure you compile with `--threads:on`
+example:
+```nim
+nim c -r --threads:on main.nim
+```
+
 ## Documentation
 coming soon
 ## Examples
