@@ -11,9 +11,8 @@ Neel is designed to take all the hassle out of writing GUI applications. Current
 * Automatic type conversions (from JSON to each proc’s param types)
 * Simple interface for backend/frontend communication
 * Cross-platform (physically tested on Mac, Windows, and Linux)
-... this is just the beginning!
 
-Neel is inspired by [Eel](https://github.com/samuelhwilliams/Eel), the Python library equivalent.
+Neel is inspired by [Eel](https://github.com/samuelhwilliams/Eel), its Python cousin.
 
 ----------------------
 
