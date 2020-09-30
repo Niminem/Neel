@@ -29,8 +29,6 @@ The best visualization libraries that exist are in Javascript and the most power
 
 Install from nimble:
 `nimble install neel`
-`nimble install jester`
-`nimble install ws`
 
 ## Usage
 
