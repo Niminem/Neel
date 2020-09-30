@@ -57,7 +57,7 @@ We begin with a very simple example, from there I'll explain the process and eac
 
 (main.nim)
 ```nim
-import neel #1
+import Neel #Make sure this is an uppercase N   #1
 
 exposeProcs: #2
     proc echoThis(jsMsg :string) =
