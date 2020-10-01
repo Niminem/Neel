@@ -18,7 +18,7 @@ Neel is inspired by [Eel](https://github.com/samuelhwilliams/Eel), its Python co
 
 ## Introduction
 
-Currently, Nim’s options for writing GUI applications are quite limited, and if you wanted to use HTML/JS instead, there’s a lot of boilerplate code and Nim’s type system doesn’t make things any easier.
+Currently, Nim’s options for writing GUI applications are quite limited and if you wanted to use HTML/JS instead you can expect quite a bit of boilerplate code and headaches.
 
 Neel is still in its infancy, so as of right now I don’t think it’s suitable for making full-blown commercial applications like Slack or Twitch. It is, however, very suitable for making all kinds of other projects and tools.
 
@@ -87,7 +87,7 @@ Accepted param types for all *exposed procedures* are:
 This above macro produces this result:
 
 ```nim
-proc callProc(jsData :JsonNode) :Option[JsonNode] =
+proc callProc(jsData: JsonNode): Option[JsonNode] =
     var
         procName = jsData["procName"].getStr
         params = jsData["params"].getElems
@@ -101,7 +101,7 @@ I'm sure this is obvious, but it's much cleaner to have your exposed procedures 
 Example:
 ```nim
 exposeProcs:
-    proc proc1(param :seq[JsonNode]) =
+    proc proc1(param: seq[JsonNode]) =
         doStuff(param)
 ```
 Just make sure that **ALL** procedures that stem from an exposed procedure is of type `Option[JsonNode]` *unless* the final procedure **will not** be calling javascript. This will make more sense below.
@@ -120,7 +120,7 @@ The above code gets converted into JSON and returned via the `some()` procedure 
 
 `startApp` is a template that handles server logic, routing, and Chrome web browser. As of v0.1.0, the `startApp` template takes 3 params:
 ```nim
-startApp(startURL,assetsDir :string, appMode :bool = true)
+startApp(startURL,assetsDir: string, appMode: bool = true)
 ```
 
 `startURL` is the name of the file you want Chrome to open.
