@@ -42,31 +42,17 @@ var neel = {
     }
 }"""
 
-#this will eventually be used (via string concat w/ NEELJS) to prevent dev tools from opening, copy/paste, etc.
-#in order to at least mimic a desktop application such as Slack
-const PRODJS* = """
-window.oncontextmenu = function () {
-    console.log("soemting is happneing herer....")
-    return false;
-}
-document.onkeydown = function (e) {
-    if (window.event.keyCode == 123 || e.button == 2)
-        return false;
-    //elseif (window.event.keyCode == 123 || e.button==2)
-    //return false;
-}"""
-
 
 
 # ------------- TRANSFORMATIONS & TYPE CONVERSION LOGIC ----------------
 
 const PARAMTYPES* = ["string","int","float","bool","OrderedTable[string, JsonNode]", "seq[JsonNode]"]
 
-macro callJs*(funcName :string, params :varargs[typed]) :untyped =
+macro callJs*(funcName: string, params: varargs[typed]): untyped =
     quote do:
         some(%*{"funcName":`funcName`,"params":`params`})
    
-proc validation*(procs :NimNode) =
+proc validation*(procs: NimNode) =
 
     for procedure in procs.children:
 
@@ -85,7 +71,7 @@ proc validation*(procs :NimNode) =
                             error "param type: " & param[i-1].repr & """ invalid. accepted types:
                                  string, int, float, bool, OrderedTable[string, JsonNode], seq[JsonNode]"""
 
-proc exposedProcs*(procs :NimNode) :NimNode =
+proc exposedProcs*(procs: NimNode): NimNode =
     
     for procedure in procs.children:
         #setting the return type
@@ -95,7 +81,7 @@ proc exposedProcs*(procs :NimNode) :NimNode =
             )
     result = procs   
 
-proc ofStatements*(procedure :NimNode) :NimNode =
+proc ofStatements*(procedure: NimNode): NimNode =
 
     if procedure[3].len == 1:#handles procedure w/ empty params (formalParams has one child of kind nnkEmpty)
         result = nnkOfBranch.newTree(
@@ -153,11 +139,11 @@ proc ofStatements*(procedure :NimNode) :NimNode =
 
                 inc paramIndex
 
-        returnStatement.add procCall #testing
-        statementList.add returnStatement#statementList.add procCall
+        returnStatement.add procCall
+        statementList.add returnStatement
         result.add statementList
 
-proc caseStatement*(procs :NimNode) :NimNode =
+proc caseStatement*(procs: NimNode): NimNode =
 
     result = nnkCaseStmt.newTree()
     result.add newIdentNode("procName")
@@ -167,7 +153,7 @@ proc caseStatement*(procs :NimNode) :NimNode =
    
     #add an else statement for invalid/unkown proc calls later
 
-macro exposeProcs*(procs :untyped) = #macro has to be untyped, otherwise the callJs expands & causes a type error
+macro exposeProcs*(procs: untyped) = #macro has to be untyped, otherwise callJs() expands & causes a type error
     procs.validation() #validates procs passed into the macro
         
     result = nnkProcDef.newTree(
@@ -218,14 +204,14 @@ macro exposeProcs*(procs :untyped) = #macro has to be untyped, otherwise the cal
 
 # ----------------------- BROWSER LOGIC --------------------------------
 
-proc findChromeMac* :string =
+proc findChromeMac*: string =
     const defaultPath :string = r"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     if fileExists(absolutePath(defaultPath)):
         result = defaultPath.replace(" ", r"\ ")
     else: # include a recursive search in future version to account for any location
         raise newException(CustomError, "could not find Chrome in Applications directory")
 
-proc findChromeWindows* :string =
+proc findChromeWindows*: string =
     #const defaultPath = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" # for registery
     const defaultPath = r"\Program Files (x86)\Google\Chrome\Application\chrome.exe"
     if fileExists(absolutePath(defaultPath)):
@@ -233,7 +219,7 @@ proc findChromeWindows* :string =
     else: # include registry search in future versions to account for any location
         raise newException(CustomError, "could not find Chrome in Program Files (x86) directory")
 
-proc findPath* :string =
+proc findPath*: string =
     when hostOS == "macosx":
         result = findChromeMac()
     elif hostOS == "windows":
@@ -244,9 +230,9 @@ proc findPath* :string =
     else:
         raise newException(CustomError, "unkown OS in findPath() for neel.nim")
 
-proc openChrome*(portNo :int) =
+proc openChrome*(portNo: int) =
     let
-        arg = " --app=http://localhost:" & portNo.intToStr & "/ --disable-http-cache --new-window" #--new-window #--disable-application-cache
+        arg = " --app=http://localhost:" & portNo.intToStr & "/ --disable-http-cache --new-window"
         test = findPath() & arg
     if execCmd(test) != 0:
         raise newException(CustomError,"could not open Chrome browser")
@@ -258,14 +244,14 @@ proc openChrome*(portNo :int) =
 # ---------------------------- SERVER LOGIC ----------------------------
 
 # *** TO-DO: ADD JESTER SETTINGS TO ALLOW A DIFFERENT PORT NUMBER *** 9/29/20
-template startApp*(startURL,assetsDir :string, appMode :bool = true) =
+template startApp*(startURL,assetsDir: string, appMode: bool = true) =
 
     const NOCACHE_HEADER = @[("Cache-Control","no-store")]
     var openSockets :bool
     var portNo = 5000 #make this a param for the startApp template
 
     proc detectShutdown =
-        sleep(1000)#1500 #what is the best time?
+        sleep(1000)#what is the best time?
         if not openSockets:
             quit()
 
@@ -284,8 +270,9 @@ template startApp*(startURL,assetsDir :string, appMode :bool = true) =
                 var ws = await newWebSocket(request)
                 while ws.readyState == Open:
                     openSockets = true
-                    let jsData = await ws.receiveStrPacket
-                    let nimData = callProc(jsData.parseJson)
+                    let
+                        jsData = await ws.receiveStrPacket
+                        nimData = callProc(jsData.parseJson)
                     if not nimData.isNone:
                         await ws.send($nimData.get)
             except WebSocketError:
@@ -294,7 +281,7 @@ template startApp*(startURL,assetsDir :string, appMode :bool = true) =
 
         get "/@path": #get re".*": #can't use re within a templates/macro here, why?
             try:
-                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / assetsDir / request.path)) #is this serving fast enough?
+                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / assetsDir / request.path))
             except:
                 raise newException(CustomError, "path: " & request.path & " doesn't exist") #is this proper?
 
