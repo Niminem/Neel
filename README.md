@@ -60,7 +60,7 @@ We begin with a very simple example, from there I'll explain the process and eac
 import Neel #Make sure this is an uppercase N   #1
 
 exposeProcs: #2
-    proc echoThis(jsMsg :string) =
+    proc echoThis(jsMsg: string) =
         echo "got this from frontend: " & jsMsg
         callJs("logThis", "Hello from Nim!") #3
 
