@@ -42,17 +42,31 @@ var neel = {
     }
 }"""
 
+#this will eventually be used (via string concat w/ NEELJS) to prevent dev tools from opening, copy/paste, etc.
+#in order to at least mimic a desktop application such as Slack
+const PRODJS* = """
+window.oncontextmenu = function () {
+    console.log("soemting is happneing herer....")
+    return false;
+}
+document.onkeydown = function (e) {
+    if (window.event.keyCode == 123 || e.button == 2)
+        return false;
+    //elseif (window.event.keyCode == 123 || e.button==2)
+    //return false;
+}"""
+
 
 
 # ------------- TRANSFORMATIONS & TYPE CONVERSION LOGIC ----------------
 
 const PARAMTYPES* = ["string","int","float","bool","OrderedTable[string, JsonNode]", "seq[JsonNode]"]
 
-macro callJs*(funcName: string, params: varargs[typed]): untyped =
+macro callJs*(funcName :string, params :varargs[typed]) :untyped =
     quote do:
         some(%*{"funcName":`funcName`,"params":`params`})
    
-proc validation*(procs: NimNode) =
+proc validation*(procs :NimNode) =
 
     for procedure in procs.children:
 
@@ -71,7 +85,7 @@ proc validation*(procs: NimNode) =
                             error "param type: " & param[i-1].repr & """ invalid. accepted types:
                                  string, int, float, bool, OrderedTable[string, JsonNode], seq[JsonNode]"""
 
-proc exposedProcs*(procs: NimNode): NimNode =
+proc exposedProcs*(procs :NimNode) :NimNode =
     
     for procedure in procs.children:
         #setting the return type
@@ -81,7 +95,7 @@ proc exposedProcs*(procs: NimNode): NimNode =
             )
     result = procs   
 
-proc ofStatements*(procedure: NimNode): NimNode =
+proc ofStatements*(procedure :NimNode) :NimNode =
 
     if procedure[3].len == 1:#handles procedure w/ empty params (formalParams has one child of kind nnkEmpty)
         result = nnkOfBranch.newTree(
@@ -139,11 +153,11 @@ proc ofStatements*(procedure: NimNode): NimNode =
 
                 inc paramIndex
 
-        returnStatement.add procCall
-        statementList.add returnStatement
+        returnStatement.add procCall #testing
+        statementList.add returnStatement#statementList.add procCall
         result.add statementList
 
-proc caseStatement*(procs: NimNode): NimNode =
+proc caseStatement*(procs :NimNode) :NimNode =
 
     result = nnkCaseStmt.newTree()
     result.add newIdentNode("procName")
@@ -153,7 +167,7 @@ proc caseStatement*(procs: NimNode): NimNode =
    
     #add an else statement for invalid/unkown proc calls later
 
-macro exposeProcs*(procs: untyped) = #macro has to be untyped, otherwise the callJs expands & causes a type error
+macro exposeProcs*(procs :untyped) = #macro has to be untyped, otherwise the callJs expands & causes a type error
     procs.validation() #validates procs passed into the macro
         
     result = nnkProcDef.newTree(
@@ -197,14 +211,14 @@ macro exposeProcs*(procs: untyped) = #macro has to be untyped, otherwise the cal
             exposedProcs(procs), #performs transformations on procs defined in this macro
             caseStatement(procs) #converts types into proper json parsing & returns case statement logic
             ))
-        
+
 # ----------------------------------------------------------------------
 
 
 
 # ----------------------- BROWSER LOGIC --------------------------------
 
-proc findChromeMac*: string =
+proc findChromeMac* :string =
     const defaultPath :string = r"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     if fileExists(absolutePath(defaultPath)):
         result = defaultPath.replace(" ", r"\ ")
@@ -219,7 +233,7 @@ proc findChromeWindows* :string =
     else: # include registry search in future versions to account for any location
         raise newException(CustomError, "could not find Chrome in Program Files (x86) directory")
 
-proc findPath*: string =
+proc findPath* :string =
     when hostOS == "macosx":
         result = findChromeMac()
     elif hostOS == "windows":
@@ -230,7 +244,7 @@ proc findPath*: string =
     else:
         raise newException(CustomError, "unkown OS in findPath() for neel.nim")
 
-proc openChrome*(portNo: int) =
+proc openChrome*(portNo :int) =
     let
         arg = " --app=http://localhost:" & portNo.intToStr & "/ --disable-http-cache --new-window" #--new-window #--disable-application-cache
         test = findPath() & arg
@@ -244,7 +258,7 @@ proc openChrome*(portNo: int) =
 # ---------------------------- SERVER LOGIC ----------------------------
 
 # *** TO-DO: ADD JESTER SETTINGS TO ALLOW A DIFFERENT PORT NUMBER *** 9/29/20
-template startApp*(startURL,assetsDir: string, appMode: bool = true) =
+template startApp*(startURL,assetsDir :string, appMode :bool = true) =
 
     const NOCACHE_HEADER = @[("Cache-Control","no-store")]
     var openSockets :bool
@@ -270,9 +284,8 @@ template startApp*(startURL,assetsDir: string, appMode: bool = true) =
                 var ws = await newWebSocket(request)
                 while ws.readyState == Open:
                     openSockets = true
-                    let
-                        jsData = await ws.receiveStrPacket
-                        nimData = callProc(jsData.parseJson)
+                    let jsData = await ws.receiveStrPacket
+                    let nimData = callProc(jsData.parseJson)
                     if not nimData.isNone:
                         await ws.send($nimData.get)
             except WebSocketError:
