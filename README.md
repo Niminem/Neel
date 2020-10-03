@@ -69,7 +69,7 @@ startApp("index.html","assets",appMode=true) #4
 
 ##### #1 import Neel
 
-When you `import Neel`, several modules are automatically exported into the calling module. `exposedProcs` and `start` is a macro and template that require these modules in order to work properly.
+When you `import neel`, several modules are automatically exported into the calling module. `exposedProcs` and `start` is a macro and template that require these modules in order to work properly.
 
 One of the modules includes `json`, which is needed should you have params in your procedures that are of type `seq` or `table`. More on this below.
 
