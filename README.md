@@ -67,7 +67,7 @@ exposeProcs: #2
 startApp("index.html","assets",appMode=true) #4
 ```
 
-##### #1 import Neel
+##### #1 import neel
 
 When you `import neel`, several modules are automatically exported into the calling module. `exposedProcs` and `start` is a macro and template that require these modules in order to work properly.
 
