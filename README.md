@@ -132,7 +132,7 @@ startApp(startURL="index.html",assetsDir="web",portNo=8000,
 * `assetsDir` : name of your web assets folder.
 * `portNo` : specifies the port for serving your application (default is 5000)
 * `position` : positions the *top* and *left* side of your application window (default is 500 x 150)
-* `size` : sets the size of your application window (default is 600 x 600)
+* `size` : sets the size of your application window by *width* and *height*(default is 600 x 600)
 * `chromeFlags` : passes any additional flags to chrome
 * `appMode` : if "true" (default) Chrome will open a new session/window in App mode, if "false" a new tab will be opened in your **current default browser** - which can be very useful for debugging.
 
