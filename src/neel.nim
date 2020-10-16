@@ -6,44 +6,6 @@ type
     CustomError* = object of Exception
 
 
-#javascript websocket & functions logic
-const NEELJS* = r"""
-var ws = new WebSocket("ws://0.0.0.0:5000/ws")
-var connected = false
-
-ws.onmessage = (data) => {
-    try {
-        let x = JSON.parse(data.data)
-        let v = Object.values(x)
-        neel.callJs(v[0], v[1])
-    } catch (err) {
-        let x = JSON.parse(data)
-        let v = Object.values(x)
-        neel.callJs(v[0], v[1])
-    }
-}
-var neel = {
-    callJs: function (func, arr) {
-        window[func].apply(null, arr);
-    },
-    callProc: function (func, ...args) {
-        if (!connected) {
-            function check(func, ...args) { if (ws.readyState == 1) { connected = true; neel.callProc(func, ...args); clearInterval(myInterval); } }
-            var myInterval = setInterval(check,15,func,...args)
-        } else {
-            let paramArray = []
-            for (var i = 0; i < args.length; i++) {
-                paramArray.push(args[i])
-            }
-            let data = JSON.stringify({ "procName": func, "params": paramArray })
-
-            ws.send(data)
-        }
-    }
-}"""
-
-
-
 # ------------- TRANSFORMATIONS & TYPE CONVERSION LOGIC ----------------
 
 const PARAMTYPES* = ["string","int","float","bool","OrderedTable[string, JsonNode]", "seq[JsonNode]"]
@@ -151,7 +113,7 @@ proc caseStatement*(procs: NimNode): NimNode =
     for procedure in procs:
         result.add ofStatements(procedure) #converts proc param types for parsing json data & returns "of" statements
    
-    #add an else statement for invalid/unkown proc calls later
+    #add an else statement for invalid/unkown proc calls in future iteration
 
 macro exposeProcs*(procs: untyped) = #macro has to be untyped, otherwise callJs() expands & causes a type error
     procs.validation() #validates procs passed into the macro
@@ -230,11 +192,13 @@ proc findPath*: string =
     else:
         raise newException(CustomError, "unkown OS in findPath() for neel.nim")
 
-proc openChrome*(portNo: int) =
-    let
-        arg = " --app=http://localhost:" & portNo.intToStr & "/ --disable-http-cache --new-window"
-        test = findPath() & arg
-    if execCmd(test) != 0:
+proc openChrome*(portNo: int, chromeFlags: seq[string]) =
+    var chromeStuff = " --app=http://localhost:" & portNo.intToStr & "/ --disable-http-cache"
+    if chromeFlags != @[""]:
+        for flag in chromeFlags:
+            chromeStuff = chromeStuff & " " & flag.strip
+    let command = findPath() & chromeStuff
+    if execCmd(command) != 0:
         raise newException(CustomError,"could not open Chrome browser")
 
 # ----------------------------------------------------------------------
@@ -243,92 +207,113 @@ proc openChrome*(portNo: int) =
 
 # ---------------------------- SERVER LOGIC ----------------------------
 
-# *** TO-DO: ADD JESTER SETTINGS TO ALLOW A DIFFERENT PORT NUMBER *** 9/29/20
-template startApp*(startURL,assetsDir: string, appMode: bool = true) =
+macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
+                    position: array[2, int] = [500,150], size: array[2, int] = [600,600],
+                        chromeFlags: seq[string] = @[""], appMode: bool = true) =
 
-    const NOCACHE_HEADER = @[("Cache-Control","no-store")]
-    var openSockets :bool
-    var portNo = 5000 #make this a param for the startApp template
+    quote do:
 
-    proc detectShutdown =
-        sleep(1000)#what is the best time?
-        if not openSockets:
-            quit()
+        const NOCACHE_HEADER = @[("Cache-Control","no-store")]
+        var openSockets: bool
 
-    if not appMode:
-        spawn openDefaultBrowser("http://localhost:" & portNo.intToStr & "/")
-    else:
-        spawn openChrome(portNo)
+        proc detectShutdown =
+            sleep(1200)#what is the best time?
+            if not openSockets:
+                quit()
 
-    routes:
-        get "/":
-            resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / assetsDir / startURL))
-        get "/neel.js":
-            resp NEELJS
-        get "/ws":
-            try:
-                var ws = await newWebSocket(request)
-                while ws.readyState == Open:
-                    openSockets = true
-                    let
-                        jsData = await ws.receiveStrPacket
-                        nimData = callProc(jsData.parseJson)
-                    if not nimData.isNone:
-                        await ws.send($nimData.get)
-            except WebSocketError:
-                openSockets = false
-                spawn detectShutdown()
+        if not `appMode`:
+            spawn openDefaultBrowser("http://localhost:" & $`portNo` & "/")
+        else:
+            spawn openChrome(portNo=`portNo`, chromeFlags=`chromeFlags`)
 
-        get "/@path": #get re".*": #can't use re within a templates/macro here, why?
-            try:
-                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / assetsDir / request.path))
-            except:
-                raise newException(CustomError, "path: " & request.path & " doesn't exist") #is this proper?
+        router myrouter:
+            get "/":
+                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / `startURL`))#is this most efficient?
+            get "/neel.js":
+                resp "window.moveTo(" & $`position`[0] & "," & $`position`[1] & ")\n" &
+                        "window.resizeTo(" & $`size`[0] & "," & $`size`[1] & ")\n" &
+                        "var ws = new WebSocket(\"ws://0.0.0.0:" & $`portNo` & "/ws\")\n" &
+                        """var connected = false
+                        ws.onmessage = (data) => {
+                            try {
+                                let x = JSON.parse(data.data)
+                                let v = Object.values(x)
+                                neel.callJs(v[0], v[1])
+                            } catch (err) {
+                                let x = JSON.parse(data)
+                                let v = Object.values(x)
+                                neel.callJs(v[0], v[1])
+                            }
+                        }
+                        var neel = {
+                            callJs: function (func, arr) {
+                                window[func].apply(null, arr);
+                            },
+                            callProc: function (func, ...args) {
+                                if (!connected) {
+                                    function check(func, ...args) { if (ws.readyState == 1) { connected = true; neel.callProc(func, ...args); clearInterval(myInterval); } }
+                                    var myInterval = setInterval(check,15,func,...args)
+                                } else {
+                                    let paramArray = []
+                                    for (var i = 0; i < args.length; i++) {
+                                        paramArray.push(args[i])
+                                    }
+                                    let data = JSON.stringify({ "procName": func, "params": paramArray })
+                                    ws.send(data)
+                                }
+                            }
+                        }"""
+                        
+            get "/ws":
+                try:
+                    var ws = await newWebSocket(request)
+                    while ws.readyState == Open:
+                        openSockets = true
+                        let
+                            jsData = await ws.receiveStrPacket
+                            nimData = callProc(jsData.parseJson)
+                        if not nimData.isNone:
+                            await ws.send($nimData.get)
+                except WebSocketError:
+                    openSockets = false
+                    spawn detectShutdown()
 
-        # below are exact copies of route above, supporting static files up to 10 levels deep
-        # ***review later for better implementation & reduce code duplication***
-        get "/@path/@path2":
-            try:
-                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / assetsDir / request.path))
-            except:
-                raise newException(CustomError, request.path & " doesn't exist")
-        get "/@path/@path2/@path3":
-            try:
-                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / assetsDir / request.path))
-            except:
-                raise newException(CustomError, request.path & " doesn't exist")
-        get "/@path/@path2/@path3/@path4":
-            try:
-                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / assetsDir / request.path))
-            except:
-                raise newException(CustomError, request.path & " doesn't exist")
-        get "/@path/@path2/@path3/@path4/@path5":
-            try:
-                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / assetsDir / request.path))
-            except:
-                raise newException(CustomError, request.path & " doesn't exist")
-        get "/@path/@path2/@path3/@path4/@path5/@path6":
-            try:
-                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / assetsDir / request.path))
-            except:
-                raise newException(CustomError, request.path & " doesn't exist")
-        get "/@path/@path2/@path3/@path4/@path5/@path6/@path7":
-            try:
-                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / assetsDir / request.path))
-            except:
-                raise newException(CustomError, request.path & " doesn't exist")
-        get "/@path/@path2/@path3/@path4/@path5/@path6/@path7/@path8":
-            try:
-                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / assetsDir / request.path))
-            except:
-                raise newException(CustomError, request.path & " doesn't exist")
-        get "/@path/@path2/@path3/@path4/@path5/@path6/@path7/@path8/@path9":
-            try:
-                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / assetsDir / request.path))
-            except:
-                raise newException(CustomError, request.path & " doesn't exist")
-        get "/@path/@path2/@path3/@path4/@path5/@path6/@path7/@path8/@path9/@path10":
-            try:
-                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / assetsDir / request.path))
-            except:
-                raise newException(CustomError, request.path & " doesn't exist")
+            get "/@path": #get re".*": #can't use re within a templates/macro here, why?
+                try:
+                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / request.path))
+                except:
+                    raise newException(CustomError, "path: " & request.path & " doesn't exist") #is this proper?
+            # below are exact copies of route above, supporting static files up to 5 directories deep
+            # ***review later for better implementation & reduce code duplication***
+            get "/@path/@path2":
+                try:
+                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / request.path))
+                except:
+                    raise newException(CustomError, request.path & " doesn't exist")
+            get "/@path/@path2/@path3":
+                try:
+                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / request.path))
+                except:
+                    raise newException(CustomError, request.path & " doesn't exist")
+            get "/@path/@path2/@path3/@path4":
+                try:
+                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / request.path))
+                except:
+                    raise newException(CustomError, request.path & " doesn't exist")
+            get "/@path/@path2/@path3/@path4/@path5":
+                try:
+                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / request.path))
+                except:
+                    raise newException(CustomError, request.path & " doesn't exist")
+            get "/@path/@path2/@path3/@path4/@path5/@path6":
+                try:
+                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / request.path))
+                except:
+                    raise newException(CustomError, request.path & " doesn't exist")
+        
+        proc main =
+            let settings = newSettings(`portNo`.Port)
+            var jester = initJester(myrouter, settings=settings)
+            jester.serve
+        
+        main()
