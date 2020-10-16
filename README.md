@@ -2,15 +2,15 @@
 
 Neel is a Nim library for making lightweight Electron-like HTML/JS GUI apps, with full access to Nim capabilities and targets any of the C, C++, or Objective-C backends.
 
-> As of v0.1.0: Neel opens a new Chrome session in app mode and allows the Nim backend and HTML/JS frontend to communicate via JSON and websockets.
+> As of v0.2.0: Neel opens a new Chrome session in app mode and allows the Nim backend and HTML/JS frontend to communicate via JSON and websockets.
 
 Neel is designed to take all the hassle out of writing GUI applications. Current Features:
 
-* Eliminate boilerplate code
+* Eliminate 99% of boilerplate code
 * Automatic routes
 * Automatic type conversions (from JSON to each proc’s param types)
 * Simple interface for backend/frontend communication
-* Cross-platform (physically tested on Mac, Windows, and Linux)
+* Cross-platform (tested on Mac, Windows, and Linux)
 
 Neel is inspired by [Eel](https://github.com/samuelhwilliams/Eel), its Python cousin.
 
@@ -18,7 +18,7 @@ Neel is inspired by [Eel](https://github.com/samuelhwilliams/Eel), its Python co
 
 ## Introduction
 
-Currently, Nim’s options for writing GUI applications are quite limited and if you wanted to use HTML/JS instead you can expect quite a bit of boilerplate code and headaches.
+Currently, Nim’s options for writing GUI applications are quite limited and if you wanted to use HTML/JS instead you can expect a lot of boilerplate code and headaches.
 
 Neel is still in its infancy, so as of right now I don’t think it’s suitable for making full-blown commercial applications like Slack or Twitch. It is, however, very suitable for making all kinds of other projects and tools.
 
@@ -35,7 +35,7 @@ Install from nimble:
 
 Neel applications consist of various web assets (HTML,CSS,JS, etc.) and various Nim files.
 
-All of the web assets need to be placed in a single directory (they can be further divided into folders inside it if necessary). **Make sure your directory is not named "public" as this does not play well with the Jester module.**
+All of the web assets need to be placed in a single directory (they can be further divided into folders inside it if necessary). **As of v0.2.0, Neel serves static files up to 5 directories deep.**
 
 ```
 main.nim            <---- Nim files
@@ -57,27 +57,27 @@ We begin with a very simple example, from there I'll explain the process and eac
 
 (main.nim)
 ```nim
-import neel   #1
+import neel
 
 exposeProcs: #2
     proc echoThis(jsMsg: string) =
         echo "got this from frontend: " & jsMsg
         callJs("logThis", "Hello from Nim!") #3
 
-startApp("index.html","assets",appMode=true) #4
+startApp(startURL="index.html",assetsDir="web") #4
 ```
 
 ##### #1 import neel
 
-When you `import neel`, several modules are automatically exported into the calling module. `exposedProcs` and `start` is a macro and template that require these modules in order to work properly.
+When you `import neel`, several modules are exported into the calling module. `exposedProcs` and `startApp` are macros that require these modules in order to work properly.
 
-One of the modules includes `json`, which is needed should you have params in your procedures that are of type `seq` or `table`. More on this below.
+One of the exported modules includes `json`, which is needed should you have params in your procedures that are of type `seq` or `table`. More on this below.
 
 ##### #2 exposeProcs
 
 `exposeProcs` is a macro that *exposes* specific procedures for javascript to be able to call from the frontend. When the macro is expanded, it creates a procedure `callProc` which contains **all exposed procedures** and will call a specified procedure based on frontend data, passing in the appropriate params (should there be any).
 
-The data being received is initially **JSON** and needs to be converted into the appropriate types for each param in a procedure. This is also handled by the macro. Unfortunately, due to Nim's type system there's a limit on what's able to be converted programmatically.
+The data being received is initially **JSON** and needs to be converted into the appropriate types for each param in a procedure. This is also handled by the macro. Unfortunately, due to Nim's static type system there's a limit on what's able to be converted programmatically.
 
 Accepted param types for all *exposed procedures* are:
 * string, int, float, bool
@@ -108,7 +108,7 @@ Just make sure that **ALL** procedures that stem from an exposed procedure is of
 
 ##### #3 callJs
 
-`callJs` is a template that takes in at least one value, a `string`, and it's *the name of the javascript function you want to call*. Any other value will be passed into that javascript function call on the frontend. You may pass in any amount like so:
+`callJs` is a macro that takes in at least one value, a `string`, and it's *the name of the javascript function you want to call*. Any other value will be passed into that javascript function call on the frontend. You may pass in any amount like so:
 
 ```nim
 callJs("myJavascriptFunc",1,3.14,["some stuff",1,9000])
@@ -116,18 +116,25 @@ callJs("myJavascriptFunc",1,3.14,["some stuff",1,9000])
 
 The above code gets converted into JSON and returned via the `some()` procedure (part of the [Options module](https://nim-lang.org/docs/options.html)). All procedures that stem from an exposed procedure need to be of type `Option[JsonNode]` **if** the the final procedure is calling javascript.
 
+**Currently, `callJs` only works as a return value after a procedure is called from the frontend.**
+
 ##### #5 startApp
 
-`startApp` is a template that handles server logic, routing, and Chrome web browser. As of v0.1.0, the `startApp` template takes 3 params:
+`startApp` is a macro that handles server logic, routing, and Chrome web browser. As of v0.2.0, `startApp` takes 7 params.
+example:
 ```nim
-startApp(startURL,assetsDir: string, appMode: bool = true)
+startApp(startURL="index.html",assetsDir="web",portNo=8000,
+            position= [500,150], size= [600,600], chromeFlags= @["--force-dark-mode"], appMode= true)
+            # left, top          # width, height
 ```
 
-`startURL` is the name of the file you want Chrome to open.
-`assetsDir` is the name of your web assets folder.
-`appMode` if "true" (default) Chrome will open a new session/window in App mode, if "false" a new tab will be opened in your **current default browser** - which can be very useful for debugging.
-
-As of v0.1.0, Neel will start a local webserver at http://localhost:5000/ (option to change ports coming v0.2.0)
+* `startURL` : name of the file you want Chrome/Browser to open.
+* `assetsDir` : name of your web assets folder.
+* `portNo` : specifies the port for serving your application (default is 5000)
+* `position` : positions the *top* and *left* side of your application window (default is 500 x 150)
+* `size` : sets the size of your application window (default is 600 x 600)
+* `chromeFlags` : passes any additional flags to chrome
+* `appMode` : if "true" (default) Chrome will open a new session/window in App mode, if "false" a new tab will be opened in your **current default browser** - which can be very useful for debugging.
 
 #### Javascript / Frontend
 
@@ -159,7 +166,7 @@ function logThis(param){
 ```
 The first thing you'll notice is we've included a script tag containing `neel.js` in the <head> section of our HTML page. This allows Neel to handle all of the logic on the frontend for websocket connections and function/procedure calls.
 
-`callProc` is a function that takes in at least one value, a `string`, and it's *the name of the Nim procedure you want to call*. Any other value will be passed into that Nim procedure call on the backend. **You must pass in the correct number of params for that proc, in order, and of the correct types.**. Example: 
+`callProc` is a function that takes in at least one value, a `string`, and it's *the name of the Nim procedure you want to call*. Any other value will be passed into that Nim procedure call on the backend. **You must pass in the correct number of params for that proc, in order, and of the correct types.** Example: 
 
 frontend call to backend:
 ```javascript
@@ -170,7 +177,9 @@ must match the result of the `exposeProcs` macro:
 of "myNimProc": return myNimProc(params[0].getInt,params[1].getFloat,params[2].getElems)
 ```
 
-Going back to our first example, when `index.html` is served, Javascript will call the `echoThis` procedure and pass "Hello from Javascript!" as the param. This echo the string in the terminal. immediately, Nim will call the `logThis` function and pass "Hello from Nim!". Neel handles the JSON conversion, calls the function and passes in the param. Now open the console in Chrome developer tools and you should see "Hello from Nim!".
+Going back to our first example, when `index.html` is served, Javascript will call the `echoThis` procedure and pass "Hello from Javascript!" as the param. This will echo the string in the terminal. Then, Nim will call the `logThis` function and pass "Hello from Nim!". Neel handles the JSON conversion, calls the function and passes in the param.
+
+Now open the console in Chrome developer tools and you should see "Hello from Nim!".
 
 #### Compilation Step
 
@@ -186,8 +195,8 @@ coming soon
 coming soon
 ## Future Work
 
-I have a huge vision for this library. Eventually, the goal is to have this as full-fledged as Electron for Nim. I believe this has the potential for developing commercial applications and perhaps even rival Electron as a framework.
+The vision for this library is to eventually have this as full-fledged as Electron for Nim. I believe it has the potential for developing commercial applications and maybe one day even rival Electron as a framework.
 
-In my opinion, Nim is the best programming language in existence at the moment. My hope is also that while Neel improves in its development, Nim can get exposure that it rightfully deserves.
+Overall, Nim is the best programming language in existence. My hope is that while Neel improves in its development, Nim can get exposure that it rightfully deserves.
 
-Neel will receive updates at least once per month, beginning with v0.2.0 by the end of October with plenty of improvements and added features.
+Neel will receive updates once per month, beginning with v0.3.0 by the end of November with plenty of improvements and added features.
