@@ -2,7 +2,7 @@
 
 Neel is a Nim library for making lightweight Electron-like HTML/JS GUI apps, with full access to Nim capabilities and targets any of the C, C++, or Objective-C backends.
 
-> As of v0.2.0: Neel opens a new Chrome session in app mode and allows the Nim backend and HTML/JS frontend to communicate via JSON and websockets.
+> As of v0.2.2: Neel opens a new Chrome session in app mode and allows the Nim backend and HTML/JS frontend to communicate via JSON and websockets.
 
 Neel is designed to take all the hassle out of writing GUI applications. Current Features:
 
@@ -35,7 +35,7 @@ Install from nimble:
 
 Neel applications consist of various web assets (HTML,CSS,JS, etc.) and various Nim files.
 
-All of the web assets need to be placed in a single directory (they can be further divided into folders inside it if necessary). **As of v0.2.0, Neel serves static files up to 5 directories deep.**
+All of the web assets need to be placed in a single directory (they can be further divided into folders inside it if necessary). **As of v0.2.2, Neel serves static files up to 5 directories deep.**
 
 ```
 main.nim            <---- Nim files
@@ -120,7 +120,7 @@ The above code gets converted into JSON and returned via the `some()` procedure 
 
 ##### #5 startApp
 
-`startApp` is a macro that handles server logic, routing, and Chrome web browser. As of v0.2.0, `startApp` takes 7 params.
+`startApp` is a macro that handles server logic, routing, and Chrome web browser. As of v0.2.2, `startApp` takes 7 params.
 example:
 ```nim
 startApp(startURL="index.html",assetsDir="web",portNo=8000,
