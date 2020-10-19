@@ -232,7 +232,7 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
             get "/neel.js":
                 resp "window.moveTo(" & $`position`[0] & "," & $`position`[1] & ")\n" &
                         "window.resizeTo(" & $`size`[0] & "," & $`size`[1] & ")\n" &
-                        "var ws = new WebSocket(\"ws://0.0.0.0:" & $`portNo` & "/ws\")\n" &
+                        "var ws = new WebSocket(\"ws://localhost:" & $`portNo` & "/ws\")\n" &
                         """var connected = false
                         ws.onmessage = (data) => {
                             try {
