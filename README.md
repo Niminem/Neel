@@ -192,7 +192,11 @@ nim c -r --threads:on main.nim
 ## Documentation
 coming soon
 ## Examples
-coming soon
+
+A simple Neel app that picks a random filename out of a given folder (something impossible from a browser):
+
+[Random File Picker](https://github.com/Niminem/Neel/tree/master/examples)
+
 ## Future Work
 
 The vision for this library is to eventually have this as full-fledged as Electron for Nim. I believe it has the potential for developing commercial applications and maybe one day even rival Electron as a framework.
