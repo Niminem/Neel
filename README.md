@@ -57,7 +57,7 @@ We begin with a very simple example, from there I'll explain the process and eac
 
 (main.nim)
 ```nim
-import neel
+import neel #1
 
 exposeProcs: #2
     proc echoThis(jsMsg: string) =
