@@ -3,6 +3,6 @@ function sendDir() {
     neel.callProc("filePicker",directory)
 }
 
-function showText(text) {
-    document.getElementById("text").innerHTML = text
+function showText(fileName) {
+    document.getElementById("fileName").innerHTML = fileName
 }
