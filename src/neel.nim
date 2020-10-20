@@ -10,9 +10,9 @@ type
 
 const PARAMTYPES* = ["string","int","float","bool","OrderedTable[string, JsonNode]", "seq[JsonNode]"]
 
-macro callJs*(funcName: string, params: varargs[typed]): untyped =
+macro callJs*(funcName: string, params: varargs[untyped]): untyped =
     quote do:
-        some(%*{"funcName":`funcName`,"params":`params`})
+        some(%*{"funcName":`funcName`,"params":[`params`]})
    
 proc validation*(procs: NimNode) =
 
