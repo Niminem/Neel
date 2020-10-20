@@ -8,7 +8,7 @@ exposeProcs:
         if dirExists(absPathDir):
             randomize() 
 
-            var files :seq[string]
+            var files: seq[string]
             for kind, path in absPathDir.walkDir:
                 files.add(path)
 
