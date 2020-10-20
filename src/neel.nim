@@ -217,7 +217,7 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
         var openSockets: bool
 
         proc detectShutdown =
-            sleep(1200)#what is the best time?
+            sleep(1200)#add this as optional param in startApp, for js/css heavy apps
             if not openSockets:
                 quit()
 
@@ -226,11 +226,11 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
         else:
             spawn openChrome(portNo=`portNo`, chromeFlags=`chromeFlags`)
 
-        router myrouter:
+        router theRouter:
             get "/":
                 resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / `startURL`))#is this most efficient?
             get "/neel.js":
-                resp "window.moveTo(" & $`position`[0] & "," & $`position`[1] & ")\n" &
+                resp(Http200, NOCACHE_HEADER,"window.moveTo(" & $`position`[0] & "," & $`position`[1] & ")\n" &
                         "window.resizeTo(" & $`size`[0] & "," & $`size`[1] & ")\n" &
                         "var ws = new WebSocket(\"ws://localhost:" & $`portNo` & "/ws\")\n" &
                         """var connected = false
@@ -262,7 +262,7 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
                                     ws.send(data)
                                 }
                             }
-                        }"""
+                        }""")
                         
             get "/ws":
                 try:
@@ -313,7 +313,7 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
         
         proc main =
             let settings = newSettings(`portNo`.Port)
-            var jester = initJester(myrouter, settings=settings)
+            var jester = initJester(theRouter, settings=settings)
             jester.serve
         
         main()
