@@ -181,13 +181,20 @@ proc findChromeWindows*: string =
     else: # include registry search in future versions to account for any location
         raise newException(CustomError, "could not find Chrome in Program Files (x86) directory")
 
+proc findChromeLinux*: string =
+    const chromeNames = ["google-chrome", "chromium-browser", "chromium"]
+    for name in chromeNames:
+        if execCmd("which " & name) == 0:
+            return name
+    raise newException(CustomError, "could not find Chrome in PATH")
+
 proc findPath*: string =
     when hostOS == "macosx":
         result = findChromeMac()
     elif hostOS == "windows":
         result = findChromeWindows()
     elif hostOS == "linux":
-        result = "google-chrome "
+        result = findChromeLinux()
         # include a search in future version to account for the other possible locations for linux
     else:
         raise newException(CustomError, "unkown OS in findPath() for neel.nim")
