@@ -203,4 +203,4 @@ The vision for this library is to eventually have this as full-fledged as Electr
 
 Overall, Nim is the best programming language in existence. My hope is that while Neel improves in its development, Nim can get exposure that it rightfully deserves.
 
-Neel will receive updates once per month, beginning with v0.3.0 by the end of November with plenty of improvements and added features.
+Neel will receive updates around once per month, v0.3.0 can be expected January 2021 with plenty of improvements and added features.
