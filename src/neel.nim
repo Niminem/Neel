@@ -1,4 +1,4 @@
-import macros, jester, os, strutils, ws, ws/jester_extra, osproc, options, json, threadpool, browsers
+import macros, jester, os, strutils, ws, ws/jester_extra, osproc, options, json, threadpool, browsers, asyncdispatch
 export jester, os, strutils, ws, osproc, options, json, threadpool, browsers
 
 
@@ -223,6 +223,11 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
         const NOCACHE_HEADER = @[("Cache-Control","no-store")]
         var openSockets: bool
 
+        proc handleMsg(msg:string,ws:WebSocket) {.async.} =
+            let nimData = callProc(msg.parseJson)
+            if not nimData.isNone:
+                await ws.send($nimData.get)
+
         proc detectShutdown =
             sleep(1200)#add this as optional param in startApp, for js/css heavy apps
             if not openSockets:
@@ -276,11 +281,8 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
                     var ws = await newWebSocket(request)
                     while ws.readyState == Open:
                         openSockets = true
-                        let
-                            jsData = await ws.receiveStrPacket
-                            nimData = callProc(jsData.parseJson)
-                        if not nimData.isNone:
-                            await ws.send($nimData.get)
+                        let jsData = await ws.receiveStrPacket
+                        spawn asyncCheck handleMsg(jsData,ws)
                 except WebSocketError:
                     openSockets = false
                     spawn detectShutdown()
