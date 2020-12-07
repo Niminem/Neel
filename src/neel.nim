@@ -1,5 +1,5 @@
 import macros, jester, os, strutils, ws, ws/jester_extra, osproc, options, json, threadpool, browsers, asyncdispatch
-export jester, os, strutils, ws, osproc, options, json, threadpool, browsers
+export jester, os, strutils, ws, osproc, options, json, threadpool, browsers, asyncdispatch
 
 
 type
