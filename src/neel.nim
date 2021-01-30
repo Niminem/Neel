@@ -1,4 +1,5 @@
 import macros, jester, os, strutils, ws, ws/jester_extra, osproc, options, json, threadpool, browsers, asyncdispatch
+from sequtils import keepItIf
 export jester, os, strutils, ws, osproc, options, json, threadpool, browsers, asyncdispatch
 
 
@@ -168,9 +169,19 @@ macro exposeProcs*(procs: untyped) = #macro has to be untyped, otherwise callJs(
 
 proc findChromeMac*: string =
     const defaultPath :string = r"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    if fileExists(absolutePath(defaultPath)):
-        result = defaultPath.replace(" ", r"\ ")
-    else: # include a recursive search in future version to account for any location
+    const name = "Google Chrome.app"
+
+    try:
+        if fileExists(absolutePath(defaultPath)):
+            result = defaultPath.replace(" ", r"\ ")
+        else: # Recursive search as implemented in the eel project
+            var alternate_dirs = execProcess("mdfind", args = [name], options = {poUsePath}).split("\n")
+            alternate_dirs.keepItIf(it.contains(name))
+        
+            if alternate_dirs == @[]:
+                result = alternate_dirs[0] & "/Contents/MacOS/Google Chrome"
+
+    except:
         raise newException(CustomError, "could not find Chrome in Applications directory")
 
 proc findChromeWindows*: string =
