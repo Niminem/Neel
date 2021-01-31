@@ -178,8 +178,10 @@ proc findChromeMac*: string =
             var alternate_dirs = execProcess("mdfind", args = [name], options = {poUsePath}).split("\n")
             alternate_dirs.keepItIf(it.contains(name))
         
-            if alternate_dirs == @[]:
+            if alternate_dirs != @[]:
                 result = alternate_dirs[0] & "/Contents/MacOS/Google Chrome"
+            else:
+              raise newException(CustomError, "could not find Chrome")
 
     except:
         raise newException(CustomError, "could not find Chrome in Applications directory")
