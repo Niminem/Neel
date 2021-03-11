@@ -176,8 +176,11 @@ proc findChromeMac*: string =
 proc findChromeWindows*: string =
     #const defaultPath = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" # for registery
     const defaultPath = r"\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+    const backupPath = r"\Program Files\Google\Chrome\Application\chrome.exe"
     if fileExists(absolutePath(defaultPath)):
         result = defaultPath
+    if fileExists(absolutePath(backupPath)):
+        result = backupPath
     else: # include registry search in future versions to account for any location
         raise newException(CustomError, "could not find Chrome in Program Files (x86) directory")
 
