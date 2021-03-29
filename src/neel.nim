@@ -13,7 +13,7 @@ const PARAMTYPES* = ["string","int","float","bool","OrderedTable[string, JsonNod
 macro callJs*(funcName: string, params: varargs[untyped]): untyped =
     quote do:
         some(%*{"funcName":`funcName`,"params":[`params`]})
-   
+
 proc validation*(procs: NimNode) =
 
     for procedure in procs.children:
@@ -23,7 +23,7 @@ proc validation*(procs: NimNode) =
         procedure[4].expectKind(nnkEmpty) #there should be no pragma
 
         for param in procedure.params: #block below checks type of each param, should match w/ string in PARAMTYPES
-            
+
             if param.kind != nnkEmpty:
                 for i in 0 .. param.len-1:
                     if param[i].kind == nnkEmpty:
@@ -34,14 +34,14 @@ proc validation*(procs: NimNode) =
                                  string, int, float, bool, OrderedTable[string, JsonNode], seq[JsonNode]"""
 
 proc exposedProcs*(procs: NimNode): NimNode =
-    
+
     for procedure in procs.children:
         #setting the return type
         procedure[3][0] = nnkBracketExpr.newTree(
                 newIdentNode("Option"),
                 newIdentNode("JsonNode")
             )
-    result = procs   
+    result = procs
 
 proc ofStatements*(procedure: NimNode): NimNode =
 
@@ -74,7 +74,7 @@ proc ofStatements*(procedure: NimNode): NimNode =
                         inc typeQuantity
                     else:
                         paramsData.add (paramType:child.repr, typeQuantity:typeQuantity)
-        
+
         var paramIndex :int
         for i in 0 .. paramsData.high:
             for count in 1 .. paramsData[i].typeQuantity:
@@ -112,12 +112,12 @@ proc caseStatement*(procs: NimNode): NimNode =
 
     for procedure in procs:
         result.add ofStatements(procedure) #converts proc param types for parsing json data & returns "of" statements
-   
+
     #add an else statement for invalid/unkown proc calls in future iteration
 
 macro exposeProcs*(procs: untyped) = #macro has to be untyped, otherwise callJs() expands & causes a type error
     procs.validation() #validates procs passed into the macro
-        
+
     result = nnkProcDef.newTree(
             newIdentNode("callProc"),
             newEmptyNode(),
@@ -278,7 +278,7 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
                                 }
                             }
                         }""")
-                        
+
             get "/ws":
                 try:
                     var ws = await newWebSocket(request)
@@ -292,40 +292,40 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
 
             get "/@path": #get re".*": #can't use re within a templates/macro here, why?
                 try:
-                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / request.path))
+                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / path(request)))
                 except:
-                    raise newException(CustomError, "path: " & request.path & " doesn't exist") #is this proper?
+                    raise newException(CustomError, "path: " & path(request) & " doesn't exist") #is this proper?
             # below are exact copies of route above, supporting static files up to 5 directories deep
             # ***review later for better implementation & reduce code duplication***
             get "/@path/@path2":
                 try:
-                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / request.path))
+                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / path(request)))
                 except:
-                    raise newException(CustomError, request.path & " doesn't exist")
+                    raise newException(CustomError, path(request) & " doesn't exist")
             get "/@path/@path2/@path3":
                 try:
-                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / request.path))
+                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / path(request)))
                 except:
-                    raise newException(CustomError, request.path & " doesn't exist")
+                    raise newException(CustomError, path(request) & " doesn't exist")
             get "/@path/@path2/@path3/@path4":
                 try:
-                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / request.path))
+                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / path(request)))
                 except:
-                    raise newException(CustomError, request.path & " doesn't exist")
+                    raise newException(CustomError, path(request) & " doesn't exist")
             get "/@path/@path2/@path3/@path4/@path5":
                 try:
-                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / request.path))
+                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / path(request)))
                 except:
-                    raise newException(CustomError, request.path & " doesn't exist")
+                    raise newException(CustomError, path(request) & " doesn't exist")
             get "/@path/@path2/@path3/@path4/@path5/@path6":
                 try:
-                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / request.path))
+                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / path(request)))
                 except:
-                    raise newException(CustomError, request.path & " doesn't exist")
-        
+                    raise newException(CustomError, path(request) & " doesn't exist")
+
         proc main =
             let settings = newSettings(`portNo`.Port)
             var jester = initJester(theRouter, settings=settings)
             jester.serve
-        
+
         main()
