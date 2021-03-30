@@ -181,7 +181,7 @@ proc findChromeMac*: string =
             if alternate_dirs != @[]:
                 result = alternate_dirs[0] & "/Contents/MacOS/Google Chrome"
             else:
-              raise newException(CustomError, "could not find Chrome")
+                raise newException(CustomError, "could not find Chrome")
 
     except:
         raise newException(CustomError, "could not find Chrome in Applications directory")
