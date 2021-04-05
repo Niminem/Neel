@@ -3,6 +3,8 @@ from sequtils import keepItIf
 export jester, os, strutils, ws, osproc, options, json, threadpool, browsers, asyncdispatch
 
 
+{.warning[InheritFromException]: off.} #for annoying CustomError warning
+
 type
     CustomError* = object of Exception
 
@@ -11,9 +13,12 @@ type
 
 const PARAMTYPES* = ["string","int","float","bool","OrderedTable[string, JsonNode]", "seq[JsonNode]"]
 
-macro callJs*(funcName: string, params: varargs[untyped]): untyped =
+var wsVar* {.threadvar.} :WebSocket
+
+macro callJs*(funcName: string, params: varargs[untyped]) =
     quote do:
-        some(%*{"funcName":`funcName`,"params":[`params`]})
+        asynccheck wsVar.send($(%*{"funcName":`funcName`,"params":[`params`]}))
+
 
 proc validation*(procs: NimNode) =
 
@@ -34,15 +39,6 @@ proc validation*(procs: NimNode) =
                             error "param type: " & param[i-1].repr & """ invalid. accepted types:
                                  string, int, float, bool, OrderedTable[string, JsonNode], seq[JsonNode]"""
 
-proc exposedProcs*(procs: NimNode): NimNode =
-
-    for procedure in procs.children:
-        #setting the return type
-        procedure[3][0] = nnkBracketExpr.newTree(
-                newIdentNode("Option"),
-                newIdentNode("JsonNode")
-            )
-    result = procs
 
 proc ofStatements*(procedure: NimNode): NimNode =
 
@@ -50,16 +46,14 @@ proc ofStatements*(procedure: NimNode): NimNode =
         result = nnkOfBranch.newTree(
                 newLit(procedure[0].repr), #name of proc
                 nnkStmtList.newTree(
-                    nnkReturnStmt.newTree(
-                            nnkCall.newTree(
-                                newIdentNode(procedure[0].repr) #name of proc
-                    ))))
+                        nnkCall.newTree(
+                            newIdentNode(procedure[0].repr) #name of proc
+                    )))
     else:
         result = nnkOfBranch.newTree()
         result.add newLit(procedure[0].repr) #name of proc
         var
             statementList = nnkStmtList.newTree()
-            returnStatement = nnkReturnStmt.newTree()
             procCall = nnkCall.newTree()
             paramsData :seq[tuple[paramType:string,typeQuantity:int]]
 
@@ -90,9 +84,9 @@ proc ofStatements*(procedure: NimNode): NimNode =
                 of "float":
                     paramId.add "getFloat"
                 of "seq[JsonNode]":
-                    paramId.add "getElems"
+                    paramId.add "getElems" #will this cause an issue if the types are different? 4/5/21
                 of "OrderedTable[string, JsonNode]":
-                    paramId.add "getFields"
+                    paramId.add "getFields" #will this cause an issue if the types are different? 4/5/21
 
                 procCall.add nnkDotExpr.newTree(
                     nnkBracketExpr.newTree(
@@ -102,8 +96,7 @@ proc ofStatements*(procedure: NimNode): NimNode =
 
                 inc paramIndex
 
-        returnStatement.add procCall
-        statementList.add returnStatement
+        statementList.add procCall
         result.add statementList
 
 proc caseStatement*(procs: NimNode): NimNode =
@@ -124,10 +117,7 @@ macro exposeProcs*(procs: untyped) = #macro has to be untyped, otherwise callJs(
             newEmptyNode(),
             newEmptyNode(),
             nnkFormalParams.newTree(
-            nnkBracketExpr.newTree(
-                newIdentNode("Option"),
-                newIdentNode("JsonNode")
-            ),
+            newEmptyNode(),
             nnkIdentDefs.newTree(
                 newIdentNode("jsData"),
                 newIdentNode("JsonNode"),
@@ -157,9 +147,11 @@ macro exposeProcs*(procs: untyped) = #macro has to be untyped, otherwise callJs(
                     ),
                     newIdentNode("getElems")
                 ))),
-            exposedProcs(procs), #performs transformations on procs defined in this macro
+            procs,
             caseStatement(procs) #converts types into proper json parsing & returns case statement logic
             ))
+    
+    #echo result.repr #for testing macro expansion
 
 # ----------------------------------------------------------------------
 
@@ -192,7 +184,7 @@ proc findChromeWindows*: string =
     const backupPath = r"\Program Files\Google\Chrome\Application\chrome.exe"
     if fileExists(absolutePath(defaultPath)):
         result = defaultPath
-    if fileExists(absolutePath(backupPath)):
+    elif fileExists(absolutePath(backupPath)): #was originally an if 4/5/21 (testing)
         result = backupPath
     else: # include registry search in future versions to account for any location
         raise newException(CustomError, "could not find Chrome in Program Files (x86) directory")
@@ -211,7 +203,6 @@ proc findPath*: string =
         result = findChromeWindows()
     elif hostOS == "linux":
         result = findChromeLinux()
-        # include a search in future version to account for the other possible locations for linux
     else:
         raise newException(CustomError, "unkown OS in findPath() for neel.nim")
 
@@ -239,13 +230,11 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
         const NOCACHE_HEADER = @[("Cache-Control","no-store")]
         var openSockets: bool
 
-        proc handleMsg(msg:string,ws:WebSocket) {.async.} =
-            let nimData = callProc(msg.parseJson)
-            if not nimData.isNone:
-                await ws.send($nimData.get)
+        proc handleFrontEndData*(frontEndData :string) {.async, gcsafe.} =
+            callProc(frontEndData.parseJson)
 
         proc detectShutdown =
-            sleep(1200)#add this as optional param in startApp, for js/css heavy apps
+            sleep(1200) #add this as optional param in startApp, for js/css heavy apps as the time requirement will vary
             if not openSockets:
                 quit()
 
@@ -295,19 +284,21 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
             get "/ws":
                 try:
                     var ws = await newWebSocket(request)
+                    wsVar = ws #test
                     while ws.readyState == Open:
                         openSockets = true
-                        let jsData = await ws.receiveStrPacket
-                        spawn asyncCheck handleMsg(jsData,ws)
+                        let frontEndData = await ws.receiveStrPacket
+                        spawn asyncCheck handleFrontEndData(frontEndData)
                 except WebSocketError:
                     openSockets = false
                     spawn detectShutdown()
 
-            get "/@path": #get re".*": #can't use re within a templates/macro here, why?
+            get "/@path":
                 try:
                     resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / path(request)))
                 except:
                     raise newException(CustomError, "path: " & path(request) & " doesn't exist") #is this proper?
+
             # below are exact copies of route above, supporting static files up to 5 directories deep
             # ***review later for better implementation & reduce code duplication***
             get "/@path/@path2":
