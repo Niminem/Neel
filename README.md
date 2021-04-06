@@ -129,7 +129,7 @@ callJs("myJavascriptFunc",1,3.14,["some stuff",1,9000])
 
 The above code gets converted into stringified JSON and sent to the frontend via websocket
 
-**As of v0.3.0, `callJs` does not solely act as a return value for a procedure. You may freely make frontend calls where you want, and as many times as you want within your procedures**
+**As of v0.3.0, `callJs` does not act as a return value for a procedure. You may freely make frontend calls where you want, and as many times as you want within your procedures**
 
 
 ##### #5 startApp
