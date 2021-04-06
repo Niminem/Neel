@@ -104,8 +104,10 @@ exposeProcs:
     proc proc1(param: seq[JsonNode]) =
         doStuff(param[0].getInt)
 ```
+
 **As of v0.3.0, you may freely call JavaScript within procedures in other modules you are using by simply importing the `callJs` macro**
-**As of v0.3.0, you no longer need to declare `Option[JsonNode]` as the return type of any of your exposed procedures, or procedures calling JavaScript***
+
+**As of v0.3.0, you no longer need to declare `Option[JsonNode]` as the return type of any of your exposed procedures, or procedures calling JavaScript**
 
 Example:
 (othermodule.nim)
