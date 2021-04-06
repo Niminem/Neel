@@ -87,12 +87,12 @@ Accepted param types for all *exposed procedures* are:
 This above macro produces this result:
 
 ```nim
-proc callProc(jsData: JsonNode): Option[JsonNode] =
+proc callProc(jsData: JsonNode) =
     var
         procName = jsData["procName"].getStr
         params = jsData["params"].getElems
     case procName
-    of "echoThis": return echoThis(params[0].getStr)
+    of "echoThis": echoThis(params[0].getStr)
 ```
 
 Don't worry, you're still able to pass complex data as your params if need be, such as a `seq` within a `seq` containing a `table` of arbitrary types. Just have that param be either of type `seq[JsonNode]` or `OrderedTable[string, JsonNode]` and manually convert them within your procedure. Converting JSON is very simple, refer to the [documentation](https://nim-lang.org/docs/json.html).
@@ -102,21 +102,33 @@ Example:
 ```nim
 exposeProcs:
     proc proc1(param: seq[JsonNode]) =
-        doStuff(param)
+        doStuff(param[0].getInt)
 ```
-Just make sure that **ALL** procedures that stem from an exposed procedure is of type `Option[JsonNode]` *unless* the final procedure **will not** be calling javascript. This will make more sense below.
+**As of v0.3.0, you may freely call JavaScript within procedures in other modules you are using by simply importing the `callJs` macro**
+**As of v0.3.0, you no longer need to declare `Option[JsonNode]` as the return type of any of your exposed procedures, or procedures calling JavaScript***
+
+Example:
+(othermodule.nim)
+```nim
+from neel import callJs #you only need to import this macro from Neel :)
+
+proc doStuff(param: int) =
+    var dataForFrontEnd = param + 100
+    callJs("myJavascriptFunc", dataForFrontEnd)
+```
 
 ##### #3 callJs
 
-`callJs` is a macro that takes in at least one value, a `string`, and it's *the name of the javascript function you want to call*. Any other value will be passed into that javascript function call on the frontend. You may pass in any amount like so:
+`callJs` is a macro that takes in at least one value, a `string`, and it's *the name of the javascript function you want to call*. Any other value will be passed into that javascript function call on the frontend. You may pass in any amount to satisfy your function parameters needs like so:
 
 ```nim
 callJs("myJavascriptFunc",1,3.14,["some stuff",1,9000])
 ```
 
-The above code gets converted into JSON and returned via the `some()` procedure (part of the [Options module](https://nim-lang.org/docs/options.html)). All procedures that stem from an exposed procedure need to be of type `Option[JsonNode]` **if** the the final procedure is calling javascript.
+The above code gets converted into stringified JSON and sent to the frontend via websocket
 
-**Currently, `callJs` only works as a return value after a procedure is called from the frontend.**
+**As of v0.3.0, `callJs` does not solely act as a return value for a procedure. You may freely make frontend calls where you want, and as many times as you want within your procedures**
+
 
 ##### #5 startApp
 
@@ -201,6 +213,12 @@ A simple Neel app that picks a random filename out of a given folder (something 
 
 The vision for this library is to eventually have this as full-fledged as Electron for Nim. I believe it has the potential for developing commercial applications and maybe one day even rival Electron as a framework.
 
-Overall, Nim is the best programming language in existence. My hope is that while Neel improves in its development, Nim can get exposure that it rightfully deserves.
+Neel v0.4.0 will be released over the next month or two with plenty of improvements and added features.
 
-Neel will receive updates around once per month, v0.3.0 can be expected January 2021 with plenty of improvements and added features.
+A BIG teaser for what's to come:
+
+### Distributable Applications
+
+Build your Neel app and have it packaged and ready to be shipped. Supporting Windows, Mac, and Linux.
+
+**We're accepting help with the project! Feel free to email me at leon.l.lysak@gmail.com**
