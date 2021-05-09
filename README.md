@@ -215,12 +215,12 @@ A simple Neel app that picks a random filename out of a given folder (something 
 
 The vision for this library is to eventually have this as full-fledged as Electron for Nim. I believe it has the potential for developing commercial applications and maybe one day even rival Electron as a framework.
 
-Neel v0.4.0 will be released over the next month or two with plenty of improvements and added features.
+Neel v0.4.0 will be released as soon as possible with plenty of improvements and added features.
 
 A BIG teaser for what's to come:
 
 ### Distributable Applications
 
-Build your Neel app and have it packaged and ready to be shipped. Supporting Windows, Mac, and Linux.
+Build your Neel app and have it packaged and ready to be shipped- supporting Windows, Mac, and Linux.
 
-**We're accepting help with the project! Feel free to email me at leon.l.lysak@gmail.com**
+**We're accepting help with the project!**
