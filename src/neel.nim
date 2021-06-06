@@ -252,15 +252,14 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
                         "var ws = new WebSocket(\"ws://localhost:" & $`portNo` & "/ws\")\n" &
                         """var connected = false
                         ws.onmessage = (data) => {
-                            try {
-                                let x = JSON.parse(data.data)
-                                let v = Object.values(x)
-                                neel.callJs(v[0], v[1])
-                            } catch (err) {
-                                let x = JSON.parse(data)
-                                let v = Object.values(x)
-                                neel.callJs(v[0], v[1])
-                            }
+                          let x;
+                          try {
+                          x = JSON.parse(data.data)
+                          } catch (err) {
+                            x = JSON.parse(data)
+                          }
+                          let v = Object.values(x)
+                          neel.callJs(v[0], v[1])
                         }
                         var neel = {
                             callJs: function (func, arr) {
