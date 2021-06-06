@@ -190,7 +190,7 @@ proc findChromeWindows*: string =
         raise newException(CustomError, "could not find Chrome in Program Files (x86) directory")
 
 proc findChromeLinux*: string =
-    const chromeNames = ["google-chrome", "chromium-browser", "chromium"]
+    const chromeNames = ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]
     for name in chromeNames:
         if execCmd("which " & name) == 0:
             return name
