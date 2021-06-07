@@ -178,8 +178,10 @@ proc findChromeMac*: string =
     except:
         raise newException(CustomError, "could not find Chrome in Applications directory")
 
+when defined(Windows):
+    import std/registry
+
 proc findChromeWindows*: string =
-    #const defaultPath = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" # for registery
     const defaultPath = r"\Program Files (x86)\Google\Chrome\Application\chrome.exe"
     const backupPath = r"\Program Files\Google\Chrome\Application\chrome.exe"
     if fileExists(absolutePath(defaultPath)):
@@ -187,6 +189,13 @@ proc findChromeWindows*: string =
     elif fileExists(absolutePath(backupPath)): #was originally an if 4/5/21 (testing)
         result = backupPath
     else: # include registry search in future versions to account for any location
+        when defined(Windows):
+            result = getUnicodeValue(
+                path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe",
+                key = "", handle = HKEY_LOCAL_MACHINE)
+        discard
+
+    if result.len == 0:
         raise newException(CustomError, "could not find Chrome in Program Files (x86) directory")
 
 proc findChromeLinux*: string =
