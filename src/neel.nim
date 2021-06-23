@@ -1,12 +1,27 @@
 import macros, jester, os, strutils, ws, ws/jester_extra, osproc, options, json, threadpool, browsers, asyncdispatch
+import build # testing build scripts
 from sequtils import keepItIf
 export jester, os, strutils, ws, osproc, options, json, threadpool, browsers, asyncdispatch
 
-
-{.warning[InheritFromException]: off.} #for annoying CustomError warning
-
 type
-    CustomError* = object of Exception
+    AssetsObj* = object
+        p*,v*: string
+    NeelError* = Exception
+
+# ------------ EMBED STATIC ASSETS LOGIC -----------------------------
+
+proc getAssets*(assetsDir: string) :Table[string,string] =
+    for path in walkDirRec(assetsDir,relative=true):
+        if path == "index.html":
+            result["/"] = staticRead(getProjectPath() / assetsDir / path)
+        else:
+            result["/" & path] = staticRead(getProjectPath() / assetsDir / path)
+
+
+const assets* = getAssets("assets")
+
+
+# ----------------------------------------------------------------------
 
 
 # ------------- TRANSFORMATIONS & TYPE CONVERSION LOGIC ----------------
@@ -166,17 +181,17 @@ proc findChromeMac*: string =
     try:
         if fileExists(absolutePath(defaultPath)):
             result = defaultPath.replace(" ", r"\ ")
-        else: # Recursive search as implemented in the eel project
+        else:
             var alternate_dirs = execProcess("mdfind", args = [name], options = {poUsePath}).split("\n")
             alternate_dirs.keepItIf(it.contains(name))
         
             if alternate_dirs != @[]:
                 result = alternate_dirs[0] & "/Contents/MacOS/Google Chrome"
             else:
-                raise newException(CustomError, "could not find Chrome")
+                raise newException(NeelError, "could not find Chrome")
 
     except:
-        raise newException(CustomError, "could not find Chrome in Applications directory")
+        raise newException(NeelError, "could not find Chrome in Applications directory")
 
 when defined(Windows):
     import std/registry
@@ -186,9 +201,9 @@ proc findChromeWindows*: string =
     const backupPath = r"\Program Files\Google\Chrome\Application\chrome.exe"
     if fileExists(absolutePath(defaultPath)):
         result = defaultPath
-    elif fileExists(absolutePath(backupPath)): #was originally an if 4/5/21 (testing)
+    elif fileExists(absolutePath(backupPath)):
         result = backupPath
-    else: # include registry search in future versions to account for any location
+    else:
         when defined(Windows):
             result = getUnicodeValue(
                 path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe",
@@ -196,14 +211,14 @@ proc findChromeWindows*: string =
         discard
 
     if result.len == 0:
-        raise newException(CustomError, "could not find Chrome in Program Files (x86) directory")
+        raise newException(NeelError, "could not find Chrome in Program Files (x86) directory")
 
 proc findChromeLinux*: string =
     const chromeNames = ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]
     for name in chromeNames:
         if execCmd("which " & name) == 0:
             return name
-    raise newException(CustomError, "could not find Chrome in PATH")
+    raise newException(NeelError, "could not find Chrome in PATH")
 
 proc findPath*: string =
     when hostOS == "macosx":
@@ -213,7 +228,7 @@ proc findPath*: string =
     elif hostOS == "linux":
         result = findChromeLinux()
     else:
-        raise newException(CustomError, "unkown OS in findPath() for neel.nim")
+        raise newException(NeelError, "unkown OS in findPath() for neel.nim")
 
 proc openChrome*(portNo: int, chromeFlags: seq[string]) =
     var chromeStuff = " --app=http://localhost:" & portNo.intToStr & "/ --disable-http-cache"
@@ -222,7 +237,7 @@ proc openChrome*(portNo: int, chromeFlags: seq[string]) =
             chromeStuff = chromeStuff & " " & flag.strip
     let command = findPath() & chromeStuff
     if execCmd(command) != 0:
-        raise newException(CustomError,"could not open Chrome browser")
+        raise newException(NeelError,"could not open Chrome browser")
 
 # ----------------------------------------------------------------------
 
@@ -230,7 +245,7 @@ proc openChrome*(portNo: int, chromeFlags: seq[string]) =
 
 # ---------------------------- SERVER LOGIC ----------------------------
 
-macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
+macro startApp*(portNo: int = 5000,
                     position: array[2, int] = [500,150], size: array[2, int] = [600,600],
                         chromeFlags: seq[string] = @[""], appMode: bool = true) =
 
@@ -254,7 +269,7 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
 
         router theRouter:
             get "/":
-                resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / `startURL`))#is this most efficient?
+                resp(Http200,NOCACHE_HEADER, assets[path(request)])#is this most efficient?
             get "/neel.js":
                 resp(Http200, NOCACHE_HEADER,"window.moveTo(" & $`position`[0] & "," & $`position`[1] & ")\n" &
                         "window.resizeTo(" & $`size`[0] & "," & $`size`[1] & ")\n" &
@@ -303,37 +318,37 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
 
             get "/@path":
                 try:
-                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / path(request)))
+                    resp(Http200,NOCACHE_HEADER,assets[path(request)])
                 except:
-                    raise newException(CustomError, "path: " & path(request) & " doesn't exist") #is this proper?
+                    raise newException(NeelError, "path: " & path(request) & " doesn't exist")
 
-            # below are exact copies of route above, supporting static files up to 5 directories deep
+            # below are exact copies of route above, supporting files up to 5 directories deep
             # ***review later for better implementation & reduce code duplication***
             get "/@path/@path2":
                 try:
-                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / path(request)))
+                    resp(Http200,NOCACHE_HEADER, assets[path(request)])
                 except:
-                    raise newException(CustomError, path(request) & " doesn't exist")
+                    raise newException(NeelError, path(request) & " doesn't exist")
             get "/@path/@path2/@path3":
                 try:
-                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / path(request)))
+                    resp(Http200,NOCACHE_HEADER, assets[path(request)])
                 except:
-                    raise newException(CustomError, path(request) & " doesn't exist")
+                    raise newException(NeelError, path(request) & " doesn't exist")
             get "/@path/@path2/@path3/@path4":
                 try:
-                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / path(request)))
+                    resp(Http200,NOCACHE_HEADER, assets[path(request)])
                 except:
-                    raise newException(CustomError, path(request) & " doesn't exist")
+                    raise newException(NeelError, path(request) & " doesn't exist")
             get "/@path/@path2/@path3/@path4/@path5":
                 try:
-                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / path(request)))
+                    resp(Http200,NOCACHE_HEADER, assets[path(request)])
                 except:
-                    raise newException(CustomError, path(request) & " doesn't exist")
+                    raise newException(NeelError, path(request) & " doesn't exist")
             get "/@path/@path2/@path3/@path4/@path5/@path6":
                 try:
-                    resp(Http200,NOCACHE_HEADER,readFile(getCurrentDir() / `assetsDir` / path(request)))
+                    resp(Http200,NOCACHE_HEADER, assets[path(request)])
                 except:
-                    raise newException(CustomError, path(request) & " doesn't exist")
+                    raise newException(NeelError, path(request) & " doesn't exist")
 
         proc main =
             let settings = newSettings(`portNo`.Port)
@@ -341,3 +356,27 @@ macro startApp*(startURL, assetsDir: string, portNo: int = 5000,
             jester.serve
 
         main()
+
+
+template validateP(cond: untyped): untyped =
+    if not cond:
+        raise ValueError.newException("invalid params or order of params. check documentation")
+
+when isMainModule:
+
+    if paramCount() == 0:
+        quit(0)
+    else:
+        let params = commandLineParams() # temp
+        validateP: params[0] == "build" # temp
+        validateP: "--app:" in params[1] # temp
+        validateP: "--bin:" in params[2] # temp
+        validateP: "--icon:" in params[3] # temp
+
+        when defined(MacOsX):
+            buildMac(params)
+
+        elif defined(Windows):
+            echo "windows not supported for app bundling yet :("
+        else:
+            echo "linux not supported for app bundling yet :("
