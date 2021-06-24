@@ -2,15 +2,17 @@
 
 Neel is a Nim library for making lightweight Electron-like HTML/JS GUI apps, with full access to Nim capabilities and targets any of the C, C++, or Objective-C backends.
 
-> As of v0.2.0: Neel opens a new Chrome session in app mode and allows the Nim backend and HTML/JS frontend to communicate via JSON and websockets.
+> As of v0.2.0: Neel opens a new Chrome session in app mode and allows the Nim backend and HTML/JS frontend to communicate via JSON and websockets. Webview capabilities coming soon.
 
 Neel is designed to take all the hassle out of writing GUI applications. Current Features:
 
 * Eliminate 99% of boilerplate code
 * Automatic routes
+* Embed assets at compiletime
 * Automatic type conversions (from JSON to each proc’s param types)
 * Simple interface for backend/frontend communication
 * Cross-platform (tested on Mac, Windows, and Linux)
+* Package applications with ease (supporting only Mac and Windows as of v0.4.0- Linux support coming soon)
 
 Neel is inspired by [Eel](https://github.com/samuelhwilliams/Eel), its Python cousin.
 
@@ -35,19 +37,21 @@ Install from nimble:
 
 Neel applications consist of various web assets (HTML,CSS,JS, etc.) and various Nim files.
 
-All of the web assets need to be placed in a single directory (they can be further divided into folders inside it if necessary). **As of v0.2.0, Neel serves static files up to 5 directories deep.**
+All of the web assets need to be placed in a single directory (they can be further divided into folders inside it if necessary). **Currently, Neel serves static files up to 5 directories deep.**
 
 ```
 main.nim            <---- Nim files
 database.nim
 other.nim
-webAssetsFolder/    <---- Web assets folder
-  index.html
+assets/    <---- Web assets folder (must be named 'assets')
+  index.html <---- The starting URL for the application (must be named 'index.html')
   css/
     style.css
   js/
     main.js
 ```
+
+The web assets directory **must** be named `assets`. The starting URL must be named `index.html` and reside within the parent `assets` directory. Refer to FilePicker example below.
 
 ### Developing the Application
 
@@ -64,7 +68,7 @@ exposeProcs: #2
         echo "got this from frontend: " & jsMsg
         callJs("logThis", "Hello from Nim!") #3
 
-startApp(startURL="index.html",assetsDir="web") #4
+startApp() #4
 ```
 
 ##### #1 import neel
