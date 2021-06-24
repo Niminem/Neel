@@ -138,16 +138,14 @@ The above code gets converted into stringified JSON and sent to the frontend via
 
 ##### #5 startApp
 
-`startApp` is a macro that handles server logic, routing, and Chrome web browser. As of v0.2.0, `startApp` takes 7 params.
+`startApp` is a macro that handles server logic, routing, and Chrome web browser. As of v0.4.0, `startApp` takes 5 params.
 example:
 ```nim
-startApp(startURL="index.html",assetsDir="web",portNo=8000,
+startApp(portNo=8000,
             position= [500,150], size= [600,600], chromeFlags= @["--force-dark-mode"], appMode= true)
             # left, top          # width, height
 ```
 
-* `startURL` : name of the file you want Chrome/Browser to open.
-* `assetsDir` : name of your web assets folder.
 * `portNo` : specifies the port for serving your application (default is 5000)
 * `position` : positions the *top* and *left* side of your application window (default is 500 x 150)
 * `size` : sets the size of your application window by *width* and *height*(default is 600 x 600)
@@ -206,6 +204,7 @@ example:
 ```nim
 nim c -r --threads:on main.nim
 ```
+When compiling for Windows, also compile with the `--app:gui` flag. This will prevent the app opening up with the terminal.
 
 ## Documentation
 coming soon
