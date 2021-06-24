@@ -26,3 +26,5 @@ before install:
             echo "in order for neel to bundle applications on Windows,"
             echo "rcedit-x86.exe must be downloaded and put in .nimble/bin or PATH"
             echo "reference: https://github.com/electron/rcedit/releases"
+            
+# can before uninstall be added to remove the rcedit binary?  
