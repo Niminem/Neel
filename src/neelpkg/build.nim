@@ -24,6 +24,7 @@ var plistFile = """<?xml version="1.0" encoding="UTF-8"?>
 </plist>"""
 
 proc buildMac*(params: seq[TaintedString]) =
+
     let appName = params[1].replace("--app:","")
     let appBinary = params[2].replace("--bin:","")
     let icon = params[3].replace("--icon:","")
@@ -44,3 +45,21 @@ proc buildMac*(params: seq[TaintedString]) =
     let res = execShellCmd("cp " & appBinary & " " & "\"" & appDir & "/Contents/MacOs/" & appBinary & "\"")
     if res != 0:
         raise OSError.newException("there was a problem moving the binary into the MacOs directory")
+
+
+proc buildWindows*(params: seq[TaintedString]) =
+    let appName = params[1].replace("--app:","")
+    var appBinary = params[2].replace("--bin:","")
+    var icon = params[3].replace("--icon:","")
+    if ".exe" notin appBinary:
+        appBinary = appBinary & ".exe"
+    if ".ico" notin icon:
+        icon = icon & ".ico"
+
+    if execShellCmd("rcedit-x86 " & "\"" & getCurrentDir() / appBinary & "\" " &
+                    "--set-icon " & "\"" & getCurrentDir() / icon & "\"") != 0:
+      echo "unable to build Neel app, check commandline arguments and"
+      echo "ensure icon format is .ico"
+      quit(0)
+    if execShellCmd("Ren " & "\"" & appBinary & "\"" & " \"" & appName & ".exe" & "\"") != 0:
+      echo "unable to rename executable to App Name, you must do this manually"

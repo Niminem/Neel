@@ -1,3 +1,5 @@
+# compile with: --app:gui --threads:on
+
 import neel, os, random
 
 randomize()
@@ -12,7 +14,6 @@ exposeProcs:
                 files.add(path)
             callJs("showText",sample(files))
         else:
-            callJs("showText", "The directory you chose does not exist. Does it stem from the Home Directory?")
-
+            callJs("showText", "The directory you chose does not exist")
 
 startApp(size=[400,250])

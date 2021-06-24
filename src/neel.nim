@@ -1,5 +1,5 @@
 import macros, jester, os, strutils, ws, ws/jester_extra, osproc, options, json, threadpool, browsers, asyncdispatch
-import build # testing build scripts
+import neelpkg/build # testing build scripts
 from sequtils import keepItIf
 export jester, os, strutils, ws, osproc, options, json, threadpool, browsers, asyncdispatch
 
@@ -312,7 +312,7 @@ macro startApp*(portNo: int = 5000,
                         openSockets = true
                         let frontEndData = await ws.receiveStrPacket
                         spawn asyncCheck handleFrontEndData(frontEndData)
-                except WebSocketError:
+                except: #WebSocketError:
                     openSockets = false
                     spawn detectShutdown()
 
@@ -377,6 +377,6 @@ when isMainModule:
             buildMac(params)
 
         elif defined(Windows):
-            echo "windows not supported for app bundling yet :("
+            buildWindows(params)
         else:
-            echo "linux not supported for app bundling yet :("
+            echo "linux not yet supported for `neel build`"
