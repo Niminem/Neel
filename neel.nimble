@@ -12,8 +12,7 @@ skipDirs      = @["examples","windows"]
 # Dependencies
 
 requires "nim >= 1.2.2"
-requires "jester >= 0.5.0"
-requires "ws >= 0.4.2"
+requires "mummy"
 
 import os
 
