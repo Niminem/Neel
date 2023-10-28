@@ -1,11 +1,12 @@
-# compile with: --app:gui --threads:on
+# compile with: --threads:on and --gc:orc if using Nim 1.6.X
+# add --app:gui if on Windows to get prevent terminal from opening (though useful for debugging)
 
-import neel, os, random
+import std/[os, random]
+import neel
 
 randomize()
 
 exposeProcs:
-    
     proc filePicker(directory: string) =
         let absPathDir = absolutePath(directory,root=getHomeDir())
         if dirExists(absPathDir):
@@ -14,6 +15,6 @@ exposeProcs:
                 files.add(path)
             callJs("showText",sample(files))
         else:
-            callJs("showText", "The directory you chose does not exist")
+            callJs("showText", "The directory you chose does not exist.")
 
-startApp(size=[400,250])
+startApp(webDirPath= currentSourcePath.parentDir / "assets") # change path as necessary

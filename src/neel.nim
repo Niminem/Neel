@@ -1,24 +1,18 @@
-import macros, jester, os, strutils, ws, ws/jester_extra, osproc, options, json, threadpool, browsers, asyncdispatch
-import neelpkg/build # testing build scripts
-from sequtils import keepItIf
-export jester, os, strutils, ws, osproc, options, json, threadpool, browsers, asyncdispatch
+import std/[macros, os, strutils, osproc, json, threadpool, browsers, uri, tables]
+from std/sequtils import keepItIf
+import pkg/[mummy, mummy/routers]
+export os, strutils, mummy, osproc, json, threadpool, browsers, routers
 
-type
-    AssetsObj* = object
-        p*,v*: string
-    NeelError* = Exception
+type NeelError* = object of CatchableError
 
 # ------------ EMBED STATIC ASSETS LOGIC -----------------------------
 
-proc getAssets*(assetsDir: string) :Table[string,string] =
-    for path in walkDirRec(assetsDir,relative=true):
+proc getWebFolder*(webDirPath: string) :Table[string,string] {.compileTime.} =
+    for path in walkDirRec(webDirPath,relative=true):
         if path == "index.html":
-            result["/"] = staticRead(getProjectPath() / assetsDir / path)
+            result["/"] = staticRead(webDirPath / path)
         else:
-            result["/" & path] = staticRead(getProjectPath() / assetsDir / path)
-
-
-const assets* = getAssets("assets")
+            result["/" & path] = staticRead(webDirPath / path)
 
 
 # ----------------------------------------------------------------------
@@ -28,11 +22,11 @@ const assets* = getAssets("assets")
 
 const PARAMTYPES* = ["string","int","float","bool","OrderedTable[string, JsonNode]", "seq[JsonNode]"]
 
-var wsVar* {.threadvar.} :WebSocket
+var wsVar*: WebSocket
 
 macro callJs*(funcName: string, params: varargs[untyped]) =
     quote do:
-        asynccheck wsVar.send($(%*{"funcName":`funcName`,"params":[`params`]}))
+        wsVar.send($(%*{"funcName":`funcName`,"params":[`params`]}))
 
 
 proc validation*(procs: NimNode) =
@@ -128,7 +122,7 @@ macro exposeProcs*(procs: untyped) = #macro has to be untyped, otherwise callJs(
     procs.validation() #validates procs passed into the macro
 
     result = nnkProcDef.newTree(
-            newIdentNode("callProc"),
+            newIdentNode("callNim"),
             newEmptyNode(),
             newEmptyNode(),
             nnkFormalParams.newTree(
@@ -182,11 +176,11 @@ proc findChromeMac*: string =
         if fileExists(absolutePath(defaultPath)):
             result = defaultPath.replace(" ", r"\ ")
         else:
-            var alternate_dirs = execProcess("mdfind", args = [name], options = {poUsePath}).split("\n")
-            alternate_dirs.keepItIf(it.contains(name))
+            var alternateDirs = execProcess("mdfind", args = [name], options = {poUsePath}).split("\n")
+            alternateDirs.keepItIf(it.contains(name))
         
-            if alternate_dirs != @[]:
-                result = alternate_dirs[0] & "/Contents/MacOS/Google Chrome"
+            if alternateDirs != @[]:
+                result = alternateDirs[0] & "/Contents/MacOS/Google Chrome"
             else:
                 raise newException(NeelError, "could not find Chrome")
 
@@ -245,33 +239,34 @@ proc openChrome*(portNo: int, chromeFlags: seq[string]) =
 
 # ---------------------------- SERVER LOGIC ----------------------------
 
-macro startApp*(portNo: int = 5000,
+macro startApp*(webDirPath: string, portNo: int = 5000,
                     position: array[2, int] = [500,150], size: array[2, int] = [600,600],
                         chromeFlags: seq[string] = @[""], appMode: bool = true) =
 
     quote do:
+        const
+            assets = getWebFolder(`webDirPath`)
+            NOCACHE_HEADER = @[("Cache-Control","no-store")]
 
-        const NOCACHE_HEADER = @[("Cache-Control","no-store")]
         var openSockets: bool
 
-        proc handleFrontEndData*(frontEndData :string) {.async, gcsafe.} =
-            callProc(frontEndData.parseJson)
+        proc handleFrontEndData*(frontEndData :string) {.gcsafe.} =
+            callNim(frontEndData.parseJson)
 
-        proc detectShutdown =
-            sleep(1200) #add this as optional param in startApp, for js/css heavy apps as the time requirement will vary
-            if not openSockets:
-                quit()
+        proc shutdown =
+            sleep 1000 # *** NEED BETTER IMPLEMENTATION HERE... ***
+            if not openSockets: quit()
 
-        if not `appMode`:
-            spawn openDefaultBrowser("http://localhost:" & $`portNo` & "/")
-        else:
+        if `appMode`:
             spawn openChrome(portNo=`portNo`, chromeFlags=`chromeFlags`)
+        else:
+            spawn openDefaultBrowser("http://localhost:" & $`portNo` & "/")
 
-        router theRouter:
-            get "/":
-                resp(Http200,NOCACHE_HEADER, assets[path(request)])#is this most efficient?
-            get "/neel.js":
-                resp(Http200, NOCACHE_HEADER,"window.moveTo(" & $`position`[0] & "," & $`position`[1] & ")\n" &
+        proc indexHandler(request: Request) =
+            let path = parseUri(request.uri).path
+            request.respond(200, NOCACHE_HEADER, assets[path])
+        proc jsHandler(request: Request) =
+            request.respond(200, NOCACHE_HEADER,"window.moveTo(" & $`position`[0] & "," & $`position`[1] & ")\n" &
                         "window.resizeTo(" & $`size`[0] & "," & $`size`[1] & ")\n" &
                         "var ws = new WebSocket(\"ws://localhost:" & $`portNo` & "/ws\")\n" &
                         """var connected = false
@@ -289,9 +284,9 @@ macro startApp*(portNo: int = 5000,
                             callJs: function (func, arr) {
                                 window[func].apply(null, arr);
                             },
-                            callProc: function (func, ...args) {
+                            callNim: function (func, ...args) {
                                 if (!connected) {
-                                    function check(func, ...args) { if (ws.readyState == 1) { connected = true; neel.callProc(func, ...args); clearInterval(myInterval); } }
+                                    function check(func, ...args) { if (ws.readyState == 1) { connected = true; neel.callNim(func, ...args); clearInterval(myInterval); } }
                                     var myInterval = setInterval(check,15,func,...args)
                                 } else {
                                     let paramArray = []
@@ -304,79 +299,47 @@ macro startApp*(portNo: int = 5000,
                             }
                         }""")
 
-            get "/ws":
-                try:
-                    var ws = await newWebSocket(request)
-                    wsVar = ws #test
-                    while ws.readyState == Open:
-                        openSockets = true
-                        let frontEndData = await ws.receiveStrPacket
-                        spawn asyncCheck handleFrontEndData(frontEndData)
-                except: #WebSocketError:
-                    openSockets = false
-                    spawn detectShutdown()
+        proc wsHandler(request: Request) =
+            let ws = request.upgradeToWebSocket()
+            wsVar = ws
 
-            get "/@path":
-                try:
-                    resp(Http200,NOCACHE_HEADER,assets[path(request)])
-                except:
-                    raise newException(NeelError, "path: " & path(request) & " doesn't exist")
+        proc websocketHandler(
+            websocket: WebSocket,
+            event: WebSocketEvent,
+            message: Message
+          ) =
+            case event:
+            of OpenEvent:
+                when not defined(release):
+                    echo "App opened connection."
+                openSockets = true
+            of MessageEvent:
+                spawn handleFrontEndData(message.data)
+            of ErrorEvent:
+                when not defined(release):
+                    echo "Socket error: ", message
+                spawn shutdown()
+            of CloseEvent:
+                when not defined(release):
+                    echo "Socket closed."
+                openSockets = false
+                spawn shutdown()
 
-            # below are exact copies of route above, supporting files up to 5 directories deep
-            # ***review later for better implementation & reduce code duplication***
-            get "/@path/@path2":
-                try:
-                    resp(Http200,NOCACHE_HEADER, assets[path(request)])
-                except:
-                    raise newException(NeelError, path(request) & " doesn't exist")
-            get "/@path/@path2/@path3":
-                try:
-                    resp(Http200,NOCACHE_HEADER, assets[path(request)])
-                except:
-                    raise newException(NeelError, path(request) & " doesn't exist")
-            get "/@path/@path2/@path3/@path4":
-                try:
-                    resp(Http200,NOCACHE_HEADER, assets[path(request)])
-                except:
-                    raise newException(NeelError, path(request) & " doesn't exist")
-            get "/@path/@path2/@path3/@path4/@path5":
-                try:
-                    resp(Http200,NOCACHE_HEADER, assets[path(request)])
-                except:
-                    raise newException(NeelError, path(request) & " doesn't exist")
-            get "/@path/@path2/@path3/@path4/@path5/@path6":
-                try:
-                    resp(Http200,NOCACHE_HEADER, assets[path(request)])
-                except:
-                    raise newException(NeelError, path(request) & " doesn't exist")
+        proc pathHandler(request: Request) =
+            let path = parseUri(request.uri).path
+            try:
+                request.respond(200,NOCACHE_HEADER,assets[path])
+            except:
+                raise newException(NeelError, "path: " & path & " doesn't exist")
 
+ 
         proc main =
-            let settings = newSettings(`portNo`.Port)
-            var jester = initJester(theRouter, settings=settings)
-            jester.serve
+            var router: Router
+            router.get("/", indexHandler)
+            router.get("/neel.js", jsHandler)
+            router.get("/ws", wsHandler)
+            router.get("/**", pathHandler)
+            let server = newServer(router, websocketHandler)
+            server.serve(Port(`portNo`))
 
         main()
-
-
-template validateP(cond: untyped): untyped =
-    if not cond:
-        raise ValueError.newException("invalid params or order of params. check documentation")
-
-when isMainModule:
-
-    if paramCount() == 0:
-        quit(0)
-    else:
-        let params = commandLineParams() # temp
-        validateP: params[0] == "build" # temp
-        validateP: "--app:" in params[1] # temp
-        validateP: "--bin:" in params[2] # temp
-        validateP: "--icon:" in params[3] # temp
-
-        when defined(MacOsX):
-            buildMac(params)
-
-        elif defined(Windows):
-            buildWindows(params)
-        else:
-            echo "linux not yet supported for `neel build`"

@@ -1,6 +1,6 @@
 function sendDir() {
     const directory = document.getElementById("directory").value
-    neel.callProc("filePicker",directory)
+    neel.callNim("filePicker", directory)
 }
 
 function showText(fileName) {
