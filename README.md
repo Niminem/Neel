@@ -201,6 +201,11 @@ nim c -r --threads:on --gc:orc main.nim
 ```
 When compiling for Windows, also compile with the `--app:gui` flag. This will prevent the app opening up with the terminal.
 
+#### Final Thoughts Before Developing With Neel
+Keep the following in mind when developing you Neel App:
+* All of your frontend assets are embedded into the binary at compile-time. For now you'll need to recompile when modifying/changing static frontend assets.
+* To prevent crashes when users spam refresh or constantly switch between different pages, we implemented a sort of countdown timer for shutting down. Approximately 10 seconds after closing the app window, the server and program is killed if a websocket hasn't reconnected within that time period. Just keep that in mind before doing CTL+C in the terminal during testing.
+
 ## Examples
 
 A simple Neel app that picks a random filename out of a given folder (something impossible from a browser):

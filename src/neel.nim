@@ -1,7 +1,8 @@
 import std/[macros, os, strutils, osproc, json, threadpool, browsers, uri, tables]
 from std/sequtils import keepItIf
 import pkg/[mummy, mummy/routers]
-export os, strutils, mummy, osproc, json, threadpool, browsers, routers
+export os, strutils, osproc, json, threadpool, browsers
+export mummy, routers
 
 type NeelError* = object of CatchableError
 
@@ -12,7 +13,7 @@ proc getWebFolder*(webDirPath: string) :Table[string,string] {.compileTime.} =
         if path == "index.html":
             result["/"] = staticRead(webDirPath / path)
         else:
-            result["/" & path] = staticRead(webDirPath / path)
+            result["/" & path.replace('\\','/')] = staticRead(webDirPath / path)
 
 
 # ----------------------------------------------------------------------
@@ -182,7 +183,7 @@ proc findChromeMac*: string =
             if alternateDirs != @[]:
                 result = alternateDirs[0] & "/Contents/MacOS/Google Chrome"
             else:
-                raise newException(NeelError, "could not find Chrome")
+                raise newException(NeelError, "could not find Chrome using `mdfind`")
 
     except:
         raise newException(NeelError, "could not find Chrome in Applications directory")
@@ -205,14 +206,14 @@ proc findChromeWindows*: string =
         discard
 
     if result.len == 0:
-        raise newException(NeelError, "could not find Chrome in Program Files (x86) directory")
+        raise newException(NeelError, "could not find Chrome")
 
 proc findChromeLinux*: string =
     const chromeNames = ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]
     for name in chromeNames:
         if execCmd("which " & name) == 0:
             return name
-    raise newException(NeelError, "could not find Chrome in PATH")
+    raise newException(NeelError, "could not find Chrome")
 
 proc findPath*: string =
     when hostOS == "macosx":
@@ -242,19 +243,18 @@ proc openChrome*(portNo: int, chromeFlags: seq[string]) =
 macro startApp*(webDirPath: string, portNo: int = 5000,
                     position: array[2, int] = [500,150], size: array[2, int] = [600,600],
                         chromeFlags: seq[string] = @[""], appMode: bool = true) =
-
     quote do:
-        const
-            assets = getWebFolder(`webDirPath`)
-            NOCACHE_HEADER = @[("Cache-Control","no-store")]
 
-        var openSockets: bool
+        const Assets = getWebFolder(`webDirPath`)
+        var openSockets = false
 
         proc handleFrontEndData*(frontEndData :string) {.gcsafe.} =
             callNim(frontEndData.parseJson)
 
-        proc shutdown =
-            sleep 1000 # *** NEED BETTER IMPLEMENTATION HERE... ***
+        proc shutdown = # quick implementation to reduce crashing from users spamming refresh / clicking on new pages
+            for i in 1 .. 10:
+                sleep 1000
+                if openSockets: return
             if not openSockets: quit()
 
         if `appMode`:
@@ -264,9 +264,14 @@ macro startApp*(webDirPath: string, portNo: int = 5000,
 
         proc indexHandler(request: Request) =
             let path = parseUri(request.uri).path
-            request.respond(200, NOCACHE_HEADER, assets[path])
+            var headers: HttpHeaders
+            headers["Cache-Control"] = "no-store"
+            request.respond(200, headers, Assets[path])
         proc jsHandler(request: Request) =
-            request.respond(200, NOCACHE_HEADER,"window.moveTo(" & $`position`[0] & "," & $`position`[1] & ")\n" &
+            var headers: HttpHeaders
+            headers["Cache-Control"] = "no-store"
+            headers["Content-Type"] = "application/javascript"
+            request.respond(200, headers,"window.moveTo(" & $`position`[0] & "," & $`position`[1] & ")\n" &
                         "window.resizeTo(" & $`size`[0] & "," & $`size`[1] & ")\n" &
                         "var ws = new WebSocket(\"ws://localhost:" & $`portNo` & "/ws\")\n" &
                         """var connected = false
@@ -328,7 +333,11 @@ macro startApp*(webDirPath: string, portNo: int = 5000,
         proc pathHandler(request: Request) =
             let path = parseUri(request.uri).path
             try:
-                request.respond(200,NOCACHE_HEADER,assets[path])
+                var headers: HttpHeaders
+                headers["Cache-Control"] = "no-store"
+                if "js" == path.split('.')[^1]: # forcing MIME-type to support JS modules
+                    headers["Content-Type"] = "application/javascript"
+                request.respond(200,headers,Assets[path])
             except:
                 raise newException(NeelError, "path: " & path & " doesn't exist")
 
