@@ -4,11 +4,13 @@ import pkg/[mummy, mummy/routers]
 export os, strutils, osproc, json, threadpool, browsers
 export mummy, routers
 
+
 type NeelError* = object of CatchableError
+
 
 # ------------ EMBED STATIC ASSETS LOGIC -----------------------------
 
-proc getWebFolder*(webDirPath: string) :Table[string,string] {.compileTime.} =
+proc getWebFolder*(webDirPath: string): Table[string,string] {.compileTime.} =
     for path in walkDirRec(webDirPath,relative=true):
         if path == "index.html":
             result["/"] = staticRead(webDirPath / path)
@@ -244,8 +246,8 @@ macro startApp*(webDirPath: string, portNo: int = 5000,
                     position: array[2, int] = [500,150], size: array[2, int] = [600,600],
                         chromeFlags: seq[string] = @[""], appMode: bool = true) =
     quote do:
-
-        const Assets = getWebFolder(`webDirPath`)
+        when defined(release):
+            const Assets = getWebFolder(`webDirPath`)
         var openSockets = false
 
         proc handleFrontEndData*(frontEndData :string) {.gcsafe.} =
@@ -263,10 +265,13 @@ macro startApp*(webDirPath: string, portNo: int = 5000,
             spawn openDefaultBrowser("http://localhost:" & $`portNo` & "/")
 
         proc indexHandler(request: Request) =
-            let path = parseUri(request.uri).path
             var headers: HttpHeaders
             headers["Cache-Control"] = "no-store"
-            request.respond(200, headers, Assets[path])
+            when not defined(release):
+                request.respond(200, headers, readFile(`webDirPath` / "index.html"))
+            else:
+                let path = parseUri(request.uri).path
+                request.respond(200, headers, Assets[path])
         proc jsHandler(request: Request) =
             var headers: HttpHeaders
             headers["Cache-Control"] = "no-store"
@@ -337,7 +342,10 @@ macro startApp*(webDirPath: string, portNo: int = 5000,
                 headers["Cache-Control"] = "no-store"
                 if "js" == path.split('.')[^1]: # forcing MIME-type to support JS modules
                     headers["Content-Type"] = "application/javascript"
-                request.respond(200,headers,Assets[path])
+                when not defined(release):
+                    request.respond(200, headers, readFile(`webDirPath` / path))
+                else:
+                    request.respond(200,headers,Assets[path])
             except:
                 raise newException(NeelError, "path: " & path & " doesn't exist")
 

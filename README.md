@@ -8,7 +8,7 @@ Neel is designed to take all the hassle out of writing GUI applications. Current
 
 * Eliminate 99% of boilerplate code
 * Automatic routes
-* Embeds frontend assets at compiletime
+* Embeds frontend assets at compiletime (on `release` builds)
 * Automatic type conversions (from JSON to each procedure's parameter types)
 * Simple interface for backend/frontend communication
 * Cross-platform (tested on Mac, Windows, and Linux)
@@ -194,23 +194,27 @@ Now open the console in Chrome developer tools and you should see "Hello from Ni
 
 #### Compilation Step
 
-If using nim 1.6.X, compile your Neel application with `--threads:on` and `--gc:orc`. Nim >= 2.0.0 does this by default.
+If using nim 1.6.X, compile your Neel application with `--threads:on` and `--mm:orc`. *Nim >= 2.0.0 does this by default.*
 example:
 ```nim
-nim c -r --threads:on --gc:orc main.nim
+nim c -r --threads:on --mm:orc main.nim
 ```
 When compiling for Windows, also compile with the `--app:gui` flag. This will prevent the app opening up with the terminal.
+example:
+```nim
+nim c -r --threads:on --mm:orc --app:gui main.nim
+```
 
 #### Final Thoughts Before Developing With Neel
 Keep the following in mind when developing you Neel App:
-* All of your frontend assets are embedded into the binary at compile-time. For now you'll need to recompile when modifying/changing static frontend assets.
+* All of your frontend assets are embedded into the binary when compiling a `release` build. Stick to debug builds when needing to modify/change static frontend assets, as you can simply refresh a page and see the updates in real-time.
 * To prevent crashes when users spam refresh or constantly switch between different pages, we implemented a sort of countdown timer for shutting down. Approximately 10 seconds after closing the app window, the server and program is killed if a websocket hasn't reconnected within that time period. Just keep that in mind before doing CTL+C in the terminal during testing.
 
 ## Examples
 
 A simple Neel app that picks a random filename out of a given folder (something impossible from a browser):
 
-[Random File Picker](https://github.com/Niminem/Neel/tree/master/examples)
+[Random File Picker](https://github.com/Niminem/Neel/tree/master/examples/FilePicker)
 
 ## Neel version 1.0.0 Newly Released 10/28/23
 
