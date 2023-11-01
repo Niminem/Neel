@@ -36,7 +36,7 @@ Install from nimble:
 
 Currently, Neel applications consist of various static web assets (HTML,CSS,JS, etc.) and Nim modules.
 
-All of the frontend files need to be placed within a single folder (they can be further divided into folders inside it if necessary). The starting URL must be named `index.html` and placed within the root of the web folder.
+All of the frontend files need to be placed within a single folder (they can be further divided into more folders within it if necessary). The starting URL must be named `index.html` and placed within the root of the web folder.
 
 ```
 main.nim            <----\
@@ -70,50 +70,59 @@ startApp(webDirPath="path-to-web-assets-folder") #4
 
 ##### #1 import neel
 
-When you `import neel`, several modules are exported into the calling module. `exposedProcs` and `startApp` are macros that require these modules in order to work properly.
-
-One of the exported modules includes `json`, which is needed should you have params in your procedures that are of type `seq` or `table`. More on this below.
+When you `import neel`, several modules are exported into the calling module. `exposedProcs` and `startApp` are macros that require these modules in order to work properly. The list below are all of the exported modules. It's not necessary to remember them, and even if you accidently imported the module twice Nim disregards it. This is just for your reference really.
+* `std/os`
+* `std/osproc`
+* `std/strutils`
+* `std/json`
+* `std/threadpool`
+* `std/browsers`
+* `std/jsonutils`
+* `pkg/mummy`
+* `pkg/routers`
 
 ##### #2 exposeProcs
 
 `exposeProcs` is a macro that *exposes* specific procedures for javascript to be able to call from the frontend. When the macro is expanded, it creates a procedure `callNim` which contains **all exposed procedures** and will call a specified procedure based on frontend data, passing in the appropriate parameters (should there be any).
 
-The data being received is initially **JSON** and needs to be converted into the appropriate types for each parameter in a procedure. This is also handled by the macro. Unfortunately, due to Nim's static type system there's a limit on what's able to be converted programmatically. **Update: design in progress that will allow new types, including objects**
+The data being received is initially **JSON** and needs to be converted into the appropriate types for each parameter in a procedure. This is also handled by the macro.
 
-Currently accepted parameter types for all *exposed procedures* are:
-* string, int, float, bool
-* seq[JsonNode]
-* OrderedTable[string, JsonNode]
+As of Neel 1.1.0, you can use virtually any Nim type for parameters in *exposed procedures*. Neel uses `std/jsonutils` to programmatically handle the conversions. Some caveats:
+* Does not support default values for parameters.
+* Does not support generics for parameters.
 
 This above macro produces this result:
 
 ```nim
-proc callNim(jsData: JsonNode) =
-    var
-        procName = jsData["procName"].getStr
-        params = jsData["params"].getElems
+proc callNim(procName: string; params: seq[JsonNode]) =
+    proc echoThis(jsMsg: string) =
+        echo "got this from frontend: " & jsMsg
+        callJs("logThis", "Hello from Nim!")
     case procName
     of "echoThis": echoThis(params[0].getStr)
+    ...
 ```
 
-Don't worry, you're still able to pass complex data as your params if need be, such as a `seq` within a `seq` containing a `table` of arbitrary types. Just have that param be either of type `seq[JsonNode]` or `OrderedTable[string, JsonNode]` and manually convert them within your procedure. Converting JSON is very simple, refer to the [documentation](https://nim-lang.org/docs/json.html).
+NOTE: You *can* pass complex data in a single parameter now if you'd like to. Use Javascript objects or dictionaries and simply create a custom object type to accept it from the Nim side.
 
 I'm sure this is obvious, but it's much cleaner to have your exposed procedures call procedures from other modules.
 
 Example:
 ```nim
 # (main.nim)
+import neel, othermodule
 exposeProcs:
     proc proc1(param: seq[JsonNode]) =
         doStuff(param[0].getInt)
-
+...
 
 # (othermodule.nim)
 from neel import callJs # you only need to import this macro from Neel :)
 
-proc doStuff(param: int) =
+proc doStuff*(param: int) =
     var dataForFrontEnd = param + 100
     callJs("myJavascriptFunc", dataForFrontEnd)
+...
 ```
 
 ##### #3 callJs
@@ -125,7 +134,6 @@ callJs("myJavascriptFunc",1,3.14,["some stuff",1,9000])
 ```
 
 The above code gets converted into stringified JSON and sent to the frontend via websocket.
-
 
 ##### #4 startApp
 
@@ -175,7 +183,7 @@ function logThis(param){
 ```
 The first thing you'll notice is we've included a script tag containing `/neel.js` in the <head> section of our HTML page. This allows Neel to handle all of the logic on the frontend for websocket connections and function/procedure calls.
 
-`callNim` is a function that takes in at least one value, a `string`, and it's *the name of the Nim procedure you want to call*. Any other value will be passed into that Nim procedure call on the backend. **You must pass in the correct number of params for that proc, in order, and of the correct types.** Example: 
+`neel.callNim` is a function that takes in at least one value, a `string`, and it's *the name of the Nim procedure you want to call*. Any other value will be passed into that Nim procedure call on the backend asa parameter. **You must pass in the correct number of params for that proc, in order, and of the correct types for it to be called properly.** Example: 
 
 frontend call to backend:
 ```javascript
@@ -183,32 +191,36 @@ neel.callNim("myNimProc",1,3.14,["some stuff",1,9000])
 ```
 must match the result of the `exposeProcs` macro:
 ```nim
+...
 of "myNimProc": return myNimProc(params[0].getInt,params[1].getFloat,params[2].getElems)
+...
 ```
+
+As of Neel 1.1.0, there is exception handling in place (with a verbose logging in debug builds) for unknown procedure calls and parameter type mismatches.
 
 Going back to our first example, when `index.html` is served, Javascript will call the `echoThis` procedure and pass "Hello from Javascript!" as the param. This will print the string in the terminal. Then, Nim will call the `logThis` function and pass "Hello from Nim!". Neel handles the JSON conversion, calls the function and passes in the param.
 
 Now open the console in Chrome developer tools and you should see "Hello from Nim!".
 
-**IMPORTANT: Be sure to use absolute paths within your HTML files** ex: `<script src="/this_js_module.js></script>`
+**Keep In Mind: absolute paths must be used within your HTML files** ex: `<script src="/this_js_module.js></script>`
 
 #### Compilation Step
 
-If using nim 1.6.X, compile your Neel application with `--threads:on` and `--mm:orc`. *Nim >= 2.0.0 does this by default.*
+If using nim 1.6.X branch, compile your Neel application with `--threads:on` and `--mm:orc`. *Nim >= 2.0.0 does this by default.*
 example:
 ```nim
 nim c -r --threads:on --mm:orc main.nim
 ```
-When compiling for Windows, also compile with the `--app:gui` flag. This will prevent the app opening up with the terminal.
+When compiling for Windows, also pass the `--app:gui` flag on your `release` builds if you want to prevent the app opening up with a terminal.
 example:
 ```nim
-nim c -r --threads:on --mm:orc --app:gui main.nim
+nim c -r --threads:on --mm:orc --app:gui -d:release main.nim
 ```
 
 #### Final Thoughts Before Developing With Neel
 Keep the following in mind when developing you Neel App:
 * All of your frontend assets are embedded into the binary when compiling a `release` build. Stick to debug builds when needing to modify/change static frontend assets, as you can simply refresh a page and see the updates in real-time.
-* To prevent crashes when users spam refresh or constantly switch between different pages, we implemented a sort of countdown timer for shutting down. Approximately 10 seconds after closing the app window, the server and program is killed if a websocket hasn't reconnected within that time period. Just keep that in mind before doing CTL+C in the terminal during testing.
+* To prevent crashes when users spam refresh or constantly switch between different pages, we implemented a sort of countdown timer for shutting down. For debug builds, approximately 3 seconds after closing the app window the server and program is shutdown if a websocket hasn't reconnected within that time period. For release builds that time delay is approximately 10 seconds for some extra cusion.
 
 ## Examples
 
@@ -226,14 +238,14 @@ The vision for this library is to eventually have this as full-fledged as Electr
 
 A BIG teaser for what's to come within the next few releases:
 
-### Arbitrary JavaScript-To-Nim Type Conversions (JSON Parsing)
+- [X] Arbitrary JavaScript-To-Nim Type Conversions (JSON Parsing)
 
-As long as the parameter types from the Javascript side match to the Nim side, use what you want!
+      As long as the parameter types from the Javascript side match to the Nim side, use what you want!
 
-### Webview Capabilities
+- [ ] Webview Capabilities
 
-[Webview](https://github.com/webview/webview) is an MIT licensed cross-platform webview library for C/C++. Uses WebKit (GTK/Cocoa) and Edge WebView2 (Windows). Having a webview target will get us closer to solid framework for shipping commercial builds.
+      [Webview](https://github.com/webview/webview) is an MIT licensed cross-platform webview library for C/C++. Uses WebKit (GTK/Cocoa) and Edge WebView2 (Windows). Having a webview target will get us closer to solid framework for shipping commercial builds.
 
-### Distributable Applications
+- [ ] Distributable Applications
 
-Build your Neel app and have it packaged and ready to be shipped.
+      Build your Neel app and have it packaged and ready to be shipped.
