@@ -3,7 +3,7 @@ import std/[strutils, os, sequtils, osproc]
 type BrowserNotFound = object of CatchableError
 
 
-when hostOS == "macosx":
+when hostOS == "macosx" or defined(macosx):
     proc findChromeMac: string =
         const defaultPath :string = r"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         const name = "Google Chrome.app"
@@ -24,7 +24,7 @@ when hostOS == "macosx":
             raise newException(BrowserNotFound, "could not find Chrome in Applications directory")
 
 
-elif hostOS == "windows":
+elif hostOS == "windows" or defined(windows):
     import std/registry
 
     proc findChromeWindows: string =
@@ -44,7 +44,7 @@ elif hostOS == "windows":
         if result.len == 0:
             raise newException(BrowserNotFound, "could not find Chrome")
 
-elif hostOS == "linux":
+elif hostOS == "linux" or defined(linux):
     proc findChromeLinux: string =
         const chromeNames = ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]
         for name in chromeNames:
