@@ -2,53 +2,55 @@ import std/[strutils, os, sequtils, osproc]
 
 type BrowserNotFound = object of CatchableError
 
-proc findChromeMac: string =
-    const defaultPath :string = r"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    const name = "Google Chrome.app"
 
-    try:
-        if fileExists(absolutePath(defaultPath)):
-            result = defaultPath.replace(" ", r"\ ")
-        else:
-            var alternateDirs = execProcess("mdfind", args = [name], options = {poUsePath}).split("\n")
-            alternateDirs.keepItIf(it.contains(name))
-        
-            if alternateDirs != @[]:
-                result = alternateDirs[0] & "/Contents/MacOS/Google Chrome"
+when hostOS == "macosx":
+    proc findChromeMac: string =
+        const defaultPath :string = r"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        const name = "Google Chrome.app"
+
+        try:
+            if fileExists(absolutePath(defaultPath)):
+                result = defaultPath.replace(" ", r"\ ")
             else:
-                raise newException(BrowserNotFound, "could not find Chrome using `mdfind`")
+                var alternateDirs = execProcess("mdfind", args = [name], options = {poUsePath}).split("\n")
+                alternateDirs.keepItIf(it.contains(name))
+            
+                if alternateDirs != @[]:
+                    result = alternateDirs[0] & "/Contents/MacOS/Google Chrome"
+                else:
+                    raise newException(BrowserNotFound, "could not find Chrome using `mdfind`")
 
-    except:
-        raise newException(BrowserNotFound, "could not find Chrome in Applications directory")
+        except:
+            raise newException(BrowserNotFound, "could not find Chrome in Applications directory")
 
 
-when defined(Windows):
+elif hostOS == "windows":
     import std/registry
 
-proc findChromeWindows: string =
-    const defaultPath = r"\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-    const backupPath = r"\Program Files\Google\Chrome\Application\chrome.exe"
-    if fileExists(absolutePath(defaultPath)):
-        result = defaultPath
-    elif fileExists(absolutePath(backupPath)):
-        result = backupPath
-    else:
-        when defined(Windows):
-            result = getUnicodeValue(
-                path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe",
-                key = "", handle = HKEY_LOCAL_MACHINE)
-        discard
+    proc findChromeWindows: string =
+        const defaultPath = r"\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+        const backupPath = r"\Program Files\Google\Chrome\Application\chrome.exe"
+        if fileExists(absolutePath(defaultPath)):
+            result = defaultPath
+        elif fileExists(absolutePath(backupPath)):
+            result = backupPath
+        else:
+            when defined(Windows):
+                result = getUnicodeValue(
+                    path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe",
+                    key = "", handle = HKEY_LOCAL_MACHINE)
+            discard
 
-    if result.len == 0:
+        if result.len == 0:
+            raise newException(BrowserNotFound, "could not find Chrome")
+
+elif hostOS == "linux":
+    proc findChromeLinux: string =
+        const chromeNames = ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]
+        for name in chromeNames:
+            if execCmd("which " & name) == 0:
+                return name
         raise newException(BrowserNotFound, "could not find Chrome")
-
-
-proc findChromeLinux: string =
-    const chromeNames = ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]
-    for name in chromeNames:
-        if execCmd("which " & name) == 0:
-            return name
-    raise newException(BrowserNotFound, "could not find Chrome")
 
 
 proc findPath: string =
