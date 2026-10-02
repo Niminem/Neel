@@ -1,0 +1,36 @@
+---
+description: Conventions for the neel.js shim and example frontends
+globs: src/neel/neel.js, examples/**/*.js, examples/**/*.html
+alwaysApply: false
+---
+
+# Frontend
+
+## neel.js (the shim)
+- Plain ES2020, no build step, no dependencies, works as a classic `<script>` and
+  when imported from a module.
+- Placeholders substituted at compile time by `src/neel/frontend.nim` use the form
+  `__NEEL_TOKEN__`, `__NEEL_WINDOW_ID__`, `__NEEL_EXPOSED__`. Do not rename them
+  without updating `frontend.nim`.
+- Wire format is defined in `PLAN.md` "Protocol reference": `call` / `ret` / `err`
+  with optional `id`. Keep the shim symmetric with the Nim side.
+- `neel.<name>(...)` returns a Promise; `neel.<name>.send(...)` is fire-and-forget.
+  `neel.expose(fn)` / `neel.expose({name: fn})` registers Nim-callable functions;
+  lookup falls back to `window[name]`.
+- Reject with an `Error` whose `name` is the Nim exception kind and `message` is the
+  Nim message, so `catch (e) { e.name === "ValueError" }` works.
+
+## Examples
+- Use absolute asset paths (`/main.js`, `/style.css`); the server serves the web
+  folder at `/`.
+- Never assign untrusted strings to `innerHTML`; use `textContent`.
+- Prefer self-contained assets over CDN links so release builds embed everything.
+
+```js
+// good
+const name = await neel.filePicker(dir);
+out.textContent = name;
+
+// fire-and-forget
+neel.log.send("clicked");
+```

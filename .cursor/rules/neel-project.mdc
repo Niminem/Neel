@@ -1,0 +1,54 @@
+---
+description: Neel 2.0 project context, constraints, and the one-task-per-session workflow
+alwaysApply: true
+---
+
+# Neel 2.0
+
+Neel is a Nim library for HTML/JS desktop GUI apps (inspired by Python's Eel). It runs
+a local HTTP/WebSocket server, launches a Chromium-family browser in app mode, and
+bridges Nim procs and JS functions with return values in both directions.
+
+Version 2.0 is a from-scratch rewrite on `master`. The 1.x code is gone from the tree
+(preserved at tag `v1.1.0`); do not reintroduce `exposeProcs`, `callJs`, `callNim`,
+Mummy, or `std/threadpool`.
+
+## Source of truth
+
+- `PLAN.md` at the repo root holds all settled decisions, assumptions, the wire
+  protocol, the module layout, and the ordered task list. Read it before any work.
+- If something in the plan conflicts with the code or is unclear, stop and ask; do
+  not silently pick one.
+
+## Session workflow
+
+Each session implements exactly one task from `PLAN.md`.
+
+1. Read `PLAN.md` fully, then the modules the task depends on.
+2. Implement only that task. Do not start the next task or refactor unrelated modules.
+3. Run `nimble test` (and `nim c` on the package) before finishing.
+4. In `PLAN.md`, add `**Status:** done` (or `partial` with what is missing) directly
+   under the task heading, and note any deviation from the plan in one or two lines.
+5. If the task produced facts later tasks need (API shape, spike results, gotchas),
+   record them in `PLAN.md`, not only in chat.
+
+## Hard constraints
+
+- Nim >= 2.2.0 (installed: 2.2.10). ORC and threads are on by default; do not add flags
+  that assume otherwise.
+- Zero external Nimble dependencies. Standard library only. SHA-1 is hand-rolled in
+  `src/neel/sha1.nim`.
+- Server binds `127.0.0.1` only.
+- Never build shell command strings for launching processes; use `startProcess` with
+  an args array.
+- Keep anything written purely for ad-hoc verification out of the repo (use `/tmp`).
+
+## Layout
+
+```
+src/neel.nim          public surface (startApp, re-exports)
+src/neel/*.nim        internal modules (see PLAN.md "Module layout")
+src/neel/neel.js      browser-side shim, staticRead at compile time
+tests/                unit and integration tests, run by `nimble test`
+examples/             runnable example apps
+```

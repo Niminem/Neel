@@ -1,0 +1,29 @@
+---
+description: Test layout and conventions for Neel
+globs: tests/**
+alwaysApply: false
+---
+
+# Tests
+
+- One file per module under test: `tests/test_<module>.nim` (`test_sha1.nim`,
+  `test_websocket.nim`, ...). `nimble test` runs all of them.
+- Use `std/unittest`. Group with `suite` per module and `test` per behavior.
+- Tests must not depend on a browser being installed or on network access beyond
+  `127.0.0.1`. Browser launch logic is tested by injecting discovery results, not by
+  launching anything.
+- Integration tests that start the server use `port = 0` and read the bound port.
+  Always stop the server in a `finally`/teardown so a failing test cannot leave
+  threads running.
+- Protocol and framing tests include at least one malformed-input case each.
+- Macro tests check both that valid input expands and compiles, and that invalid
+  input fails with the intended message (use `compiles(...)` or a `nim check`
+  subprocess for negative cases).
+- Keep fixtures tiny and inline. Reference vectors (RFC 3174 SHA-1, RFC 6455
+  handshake key) go in the test file with a comment citing the source.
+
+```nim
+suite "sha1":
+  test "RFC 3174 vector: abc":
+    check $sha1("abc") == "a9993e364706816aba3e25717850c26c9cd0d89d"
+```

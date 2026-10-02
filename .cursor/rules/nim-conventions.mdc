@@ -1,0 +1,51 @@
+---
+description: Nim coding conventions for Neel source modules
+globs: **/*.nim
+alwaysApply: false
+---
+
+# Nim conventions
+
+## Style
+- 2-space indentation, NEP-1 naming (`camelCase` procs/vars, `PascalCase` types).
+- Prefer `std/[a, b]` grouped imports. Import only what the module uses; do not
+  re-export stdlib modules except deliberately from `src/neel.nim`.
+- Every public symbol gets a `##` doc comment. Every module starts with a `##` header
+  stating its single responsibility.
+- Exceptions are `object of CatchableError` named `Neel<Thing>Error`
+  (`NeelTimeoutError`, `NeelDisconnectedError`, `NeelNoWindowError`).
+
+## Deprecated / forbidden stdlib
+- `std/threadpool` and `spawn`: use `std/typedthreads` + `std/locks` and the pool in
+  `src/neel/pool.nim`.
+- `std/sha1`: use `src/neel/sha1.nim`.
+- `std/asyncdispatch`: Neel is threaded, not async.
+
+## Threading
+- Code that runs on worker or IO threads must be `{.gcsafe.}`. Shared state is
+  either immutable after init, protected by a `Lock`, or passed through a
+  bounded queue. Use `{.cast(gcsafe).}` only on write-once-at-init data and say why
+  in a comment.
+- Never block the IO thread (`server.nim` selectors loop). Anything that can wait,
+  parse large input, or call user code goes to the pool.
+- Every blocking wait has a deadline. No unbounded `sleep` loops for lifecycle logic.
+
+## Macros
+- `expose` and `startApp` are macros; keep generated code small and delegate real
+  work to ordinary procs so it is testable and error messages point at user code.
+- Use `error(msg, node)` with the user's node for compile-time diagnostics.
+- When a macro must reference a symbol from another module, splice the bound
+  `nnkSym` captured by a `typed` macro (see `neelRegister`), never a bare ident.
+
+## Example
+
+```nim
+## websocket.nim - RFC 6455 frame encoding and decoding. No socket IO here.
+
+type
+  NeelFrameError* = object of CatchableError
+    ## Raised on a malformed or oversized frame.
+
+proc decodeFrame*(buf: openArray[byte]; maxLen: int): Frame {.gcsafe.} =
+  ## Decodes one frame from `buf`; raises `NeelFrameError` if invalid.
+```
