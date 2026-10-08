@@ -74,7 +74,9 @@ handled outside this plan.
   - `src/neel/window.nim` - `Window` type, connection mapping, lifecycle
   - `src/neel/assets.nim` - disk and embedded asset serving
 - The frontend shim is kept as a real `.js` file and `staticRead` at compile
-  time with placeholders substituted (token, exposed names, window id).
+  time; the placeholders (token, exposed names, window id) are substituted
+  when `/neel.js` is served, since the token is per launch and the window id
+  per window (settled by Task 10).
 
 ---
 
@@ -1094,6 +1096,173 @@ implementable (see "Spike results"). The wait modifier moves onto the proxy.
   timeout, name-collision escape hatch.
 
 #### Task 10: Frontend `neel.js`
+**Status:** done
+
+Deviations: the placeholders are substituted at *serve* time, not compile
+time - the token is random per launch and the window id differs per window,
+so only the `staticRead` is compile-time; `renderNeelJs` is a pure
+`{.gcsafe.}` proc Task 13 calls per `/neel.js` request. The `static:` block
+asserts the placeholder invariants at compile time instead. A close with
+code 1000 or 1001 is treated as final (no reconnect); the task text's
+"reconnect policy for page refresh" is really "reconnect after an abnormal
+close" - a refresh reloads the shim, which simply connects again with the
+same window id. No JS runtime is installed here (no node/deno/bun), so the
+shim has no Nim unit test; it was verified in the IDE browser against a
+throwaway Task 6 server (details below). The `/ws` path and the query
+parameter names are exported constants so Task 13 and the shim share one
+definition (checked at compile time).
+
+Notes for later tasks:
+- `neel/frontend.nim`: `NeelJsSource*` (the raw shim), `TokenPlaceholder*`
+  / `WindowIdPlaceholder*` / `ExposedPlaceholder*` (`__NEEL_TOKEN__`,
+  `__NEEL_WINDOW_ID__`, `__NEEL_EXPOSED__`), `WsPath* = "/ws"`,
+  `TokenQueryParam* = "token"`, `WindowQueryParam* = "window"`,
+  `jsStringLiteral*(s): string` (JSON string literal via `std/json`, plus
+  `</` -> `<\/`), `jsStringArrayLiteral*(seq[string]): string` (`[]` when
+  empty), and `renderNeelJs*(token: string; windowId: int; exposed:
+  seq[string]): string {.gcsafe.}`: one `multiReplace` pass (a token that
+  contains a placeholder name is emitted verbatim inside its literal),
+  byte-identical for equal arguments, `doAssert windowId > 0`. The `static:`
+  block checks each placeholder occurs exactly once, `__NEEL_` occurs
+  exactly three times, the shim's URL literal uses `/ws?token=` and
+  `&window=`, and a rendered sample has no `__NEEL_` left.
+- Shim connection: `ws://<location.host>/ws?token=<encodeURIComponent(token)>
+  &window=<id>` (`wss:` under `https:`). Task 13 should generate a URL-safe
+  token (hex or base64url) so `req.query` needs no percent-decoding;
+  `std/uri.decodeQuery(req.query)` yields `(key, value)` pairs and decodes
+  anyway. The shim never sends binary frames and never sends `id: null` or
+  `id: 0`; ids are positive integers starting at 1 per connection and are
+  allocated when the frame goes on the wire (so queued calls get fresh ids on
+  the connection that carries them).
+- `neel` object surface (all own, non-writable properties; `typeof neel ===
+  "object"`, installed as `globalThis.neel`, classic script only - module
+  code reads `window.neel`): `neel.<name>(...args): Promise` and
+  `neel.<name>.send(...args): undefined` for every name in `__NEEL_EXPOSED__`
+  (generated at load; `fn.name === name`); `neel.call(name, ...args):
+  Promise` and `neel.send(name, ...args)` for dynamic names (`TypeError` for
+  a non-string name); `neel.expose(fn)` (uses `fn.name`, `TypeError` if
+  anonymous), `neel.expose(name, fn)`, `neel.expose({name: fn, ...})`
+  (`TypeError` if a value is not a function); `neel.ready: Promise` (resolved
+  on the first open, rejected with `NeelDisconnectedError` if the shim gives
+  up or is closed before ever opening; an internal `.catch` prevents an
+  unhandled-rejection report when nobody awaits it); `neel.windowId:
+  number`; `neel.close()`. The names `call`, `send`, `expose`, `ready`,
+  `windowId`, `close` are reserved: an exposed Nim proc with one of those
+  names gets no generated function (a `console.warn` says to use
+  `neel.call(name, ...)`). Loading `neel.js` twice is a no-op with a warning.
+- Error names JS -> app (rejections): an `Error` with `name` and `kind` both
+  set to the wire `kind` and `message` = wire `msg` (`"ValueError"`,
+  `"NeelArgumentError"`, `"NeelUnknownProcError"`, ...);
+  `"NeelDisconnectedError"` for a pending call when the connection closes
+  for any reason (message names the close code), for calls made after the
+  shim is terminated (`"neel: connection is closed"`), and for queued calls
+  when the retries run out (`"neel: gave up reconnecting after 5 attempts"`).
+  Error kinds JS -> Nim (in `err.error`): `e.name` when it is a non-empty
+  string else `"Error"` (a thrown string gives `kind: "Error", msg: <the
+  string>`); `"NeelUnknownFunctionError"` with `msg: "no exposed JS function
+  named '<name>'"` when the name is neither in the registry nor a function
+  on `globalThis`. Lookup order is the `neel.expose` registry first, then
+  `window[name]`; a Nim call to a global like `alert` therefore works.
+  Replies are sent only when the call had an `id`, only on the socket the
+  call arrived on (never queued), and `undefined` results become `null`;
+  thenables are awaited. Without an id, an unknown name or a throw is a
+  `console.warn`. Malformed inbound text (not JSON, non-object, unknown `t`,
+  bad `id`, missing fields - the same set `protocol.decode` rejects, minus
+  the depth limit) and a `ret`/`err` for an unknown id are `console.warn`ed
+  and dropped.
+- Queueing: a call or `.send` issued while the socket is not open (before the
+  first open or during a reconnect) is queued and flushed in order on open;
+  nothing is dropped unless the shim terminates. Replies to Nim are never
+  queued.
+- Reconnect numbers: on a close that is not `neel.close()` and whose code is
+  not 1000 or 1001, in-flight promises are rejected with
+  `NeelDisconnectedError` and the shim retries up to `MAX_RECONNECT_ATTEMPTS
+  = 5` times with delays `250 * 2^(attempt-1)` ms (250, 500, 1000, 2000,
+  4000; 7.75 s total, measured 7.8 s), presenting the same token and window
+  id; a successful open resets the counter and flushes the queue. After the
+  fifth failure the shim is terminated: queued promises are rejected, every
+  later call rejects immediately, `neel.ready` is rejected if it never
+  resolved. A close with code 1000 or 1001 terminates the shim at once (no
+  retry). `neel.close()` sends 1000, rejects pending and queued calls, and
+  terminates. Terminated is permanent for the page; a refresh starts over.
+- For Task 12 (windows): a reconnect presents the *same* window id on a
+  *new* connection (new `ConnId`), as does a page refresh; the window table
+  must re-associate the window with the new connection rather than treat it
+  as a duplicate. The old connection's `onClose` may run after the new
+  connection's upgrade handler (hooks are concurrent), so re-association
+  must be keyed on the `ConnId`: only clear a window's connection in
+  `onClose` if it still points at the closing `ConnId`. During the backoff
+  window the connection count drops by one, so a grace period shorter than
+  the first retry (250 ms) would exit on a transient hiccup; the defaults (3
+  s / 10 s) are fine. When `shutdown` sends 1001, the shim does not
+  reconnect and every later `neel.*` call in that page rejects with
+  `NeelDisconnectedError`; `closeWindow` with 1000 or 1001 behaves the same.
+  Closing with any other code (e.g. 1011) makes the shim reconnect, so use
+  1000/1001 for deliberate closes. A client-side `neel.close()` arrives as a
+  1000 close from the browser and should be treated like a closed window.
+- For Task 13 (wiring): route `GET /neel.js` -> `respond(okResponse(
+  renderNeelJs(token, windowId, exposedNames()), "application/javascript"))`
+  plus `Cache-Control: no-store` (no caching, so a refresh gets a new token
+  if the app restarted; `exposedNames()` is evaluated inside `startApp` after
+  the user's exposed procs); the window id comes from the launch URL (e.g. a
+  query parameter on `/`) or the window table - this task does not decide
+  that. Route `/ws`: `if req.path == WsPath and isWebSocketUpgrade(req)`,
+  parse `req.query` with `std/uri.decodeQuery`, require `TokenQueryParam`
+  equal to the launch token and `WindowQueryParam` to parse as a known
+  positive window id, record the conn <-> window mapping, then `upgrade()`;
+  otherwise `respond(initResponse(403, ...))` (the browser sees a 1006 close
+  and the shim retries, harmlessly, five times). `index.html` must load
+  `<script src="/neel.js">` before the app's own script; module code uses
+  `window.neel`. A token/window mismatch is also what the shim's five
+  refused reconnects look like in the log after a restart with a new token;
+  a refresh fixes it because `/neel.js` is re-rendered.
+- Verified in the IDE browser (Chromium) against a throwaway server under
+  `/tmp` (Task 6 server on a fixed port; `/neel.js` rendered with a known
+  token, window 1, exposed `["add", "fail", ...]`; `/ws` upgraded only with
+  the right token *and* window id; `onMessage` = `decode` + `handleCall`
+  with a hand-written dispatcher; Nim -> JS calls pushed after `onOpen`; the
+  raw wire text logged server-side and read back over HTTP): `await
+  neel.add(2, 3) === 5`; `neel.fail()` rejects with `e.name === "ValueError"`
+  and `e instanceof Error`; `neel.add.send(1, 1)` and `neel.send("add", 7,
+  7)` arrive as `{"t":"call","name":"add","args":[1,1]}` with no `id`;
+  `neel.call("add", 4, 5)`; unknown Nim name -> `NeelUnknownProcError`;
+  arity -> `NeelArgumentError` with the Task 8 message; a call and a `.send`
+  issued synchronously at load (before open) are delivered after open, the
+  `.send` to a raising proc gets no reply; `neel.expose(function jsDouble)`,
+  `expose({jsThrow})`, `expose("jsAsync", fn)` all receive Nim calls and the
+  server got `{"t":"ret","id":1,"value":42}`, `{"t":"err","id":2,"error":
+  {"kind":"RangeError","msg":"out of range"}}`, `{"t":"ret","id":4,
+  "value":6}` (awaited promise), `value: null` for `undefined`, a nested
+  object/array result, `kind: "Error"` for a thrown string; `window[name]`
+  fallback (fire-and-forget) ran; unknown name -> `{"kind":
+  "NeelUnknownFunctionError", ...}`; non-JSON, `{"t":"bogus"}`, `id: 0`, and
+  a `ret` for an unknown id were warned and dropped with the connection
+  intact; wrong token and wrong window id -> 403 -> browser close 1006;
+  server close 1011 -> pending rejects with `NeelDisconnectedError`, a call
+  queued during the backoff resolved after the reconnect (263 ms), ids
+  restarted at 1 on the new connection; server close 1001 -> pending rejects,
+  no reconnect attempt for 1.5 s, later calls reject immediately; with the
+  server refusing every upgrade: exactly 5 retries, 7797 ms, the queued call
+  rejected with "gave up", later calls reject immediately, and (fresh page)
+  `neel.ready` rejected with `NeelDisconnectedError`; `neel.close()` rejects
+  a pending call and later calls; anonymous `neel.expose(fn)` and
+  `expose("x", 42)` throw `TypeError`; `Object.keys(neel)` is exactly the
+  documented surface plus the exposed names. Not verified: `wss:`, binary
+  frames arriving at the shim (the server never sends them), behaviour in
+  non-Chromium browsers, and the fragment/large-message paths (covered by
+  `t_server.nim` at the frame level).
+- Tests (`tests/t_frontend.nim`, 13 cases): literal escaping round-trips
+  through `parseJson` for a token with `"`, `\`, `</script>`, control
+  characters and non-ASCII; no raw `</` in a literal; array literal for
+  empty/one/many/escaped; exact rendering equals an independent
+  `multiReplace`; each literal appears once; hostile token parses back; empty
+  and multi-name exposed lists (counts against the source's own `[]`); no
+  `__NEEL_` left and exactly three in the source; single-pass substitution;
+  purity (byte-identical, and different for each changed argument);
+  `AssertionDefect` for window id 0 / -1; the shared constants appear in the
+  rendered URL; no top-level `import`/`export` and `globalThis.neel = neel`
+  present.
+
 - `src/neel/neel.js` + `neel/frontend.nim` (placeholder substitution at
   compile time).
   - Connects to `/ws` with the launch token and window id.
