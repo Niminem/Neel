@@ -719,6 +719,171 @@ Notes for later tasks:
   timeout, disconnect behavior.
 
 #### Task 8: `expose` pragma and dispatch
+**Status:** done
+
+Deviations: conversions use `std/jsonutils` (`jsonTo` / `toJson`) as the
+module header already said, not `std/json`'s `to` / `%`; see the type list
+below. `expose.nim` re-exports `jsonutils.fromJsonHook` / `toJsonHook` (a
+deliberate exception to the no-stdlib-re-export rule): `jsonutils` finds its
+`Option` / `Table` / `HashSet` hooks by `mixin` lookup in the module that
+instantiates the conversion, which is the user's module, so without the
+re-export `Option[int]` silently converted as a two-field object. Shape
+pre-checks were added in `convertArg` because `jsonutils` reads a non-array
+as an empty `seq` and its `Table` / `HashSet` hooks `assert` (a Defect would
+kill a worker). One `{.cast(gcsafe).}` is used
+around `toJson`: the compiler cannot infer GC-safety for
+`toJson[enum] -> toJson[string]` (recursive generic instantiation); the
+module is global-free, and the comment says so. Nested-proc detection uses
+`macros.owner` (deprecated, warning suppressed locally); the compiler's own
+`'export' is only allowed at top level` appears first at the same line.
+Duplicate names are detected in `generateDispatch` as specified (not at
+`neelRegister`), so a test binary that exposes without dispatching compiles.
+
+Notes for later tasks:
+- Pragma: `{.expose.}` on a top-level `proc` or `func`. Expansion is
+  `nnkStmtList(userProc, wrapper, neelRegister("<name>", <name>NeelSym))`.
+  The user proc is emitted unchanged (the compiler strips the `expose`
+  pragma itself). Wrapper: `proc <name>NeelSym*(args: seq[JsonNode]):
+  JsonNode {.gcsafe.}` built with `newProc`; every generated node carries
+  the user's proc-name lineInfo (`stamp`), so compiler diagnostics about the
+  wrapper (e.g. `'fooNeelSym' is not GC-safe as it calls 'foo'`) point at
+  the user's `proc` line. The wrapper's own parameter is `genSym`'d, all
+  helpers are `bindSym`'d, so a user parameter named `args` or a module
+  that does not import `std/json` both work. Body: `checkArity(name,
+  args.len, minArgs, maxArgs)`; per required parameter `let p =
+  convertArg(args, i, "proc", "p", T)`; per defaulted parameter `var p: T =
+  default; if args.len > i: p = convertArg(..., typeof(p))` (a default may
+  reference an earlier parameter); then `convertResult(f(a, b, c))` or, for
+  void, `f(a, b, c); newJNull()`. `minArgs` = index of the last parameter
+  without a default + 1 (positional semantics), `maxArgs` = parameter
+  count. Multi-name `IdentDefs` are expanded per name.
+- Supported types (everything `jsonutils` handles): `bool`, integers,
+  floats (an integer JSON value is accepted for a float parameter),
+  `string` (JSON `null` becomes `""`, `std/json` behaviour), enums
+  (argument: name or ordinal; result: name via `joptEnumString`), `seq` /
+  `array` / `set` (argument must be a JSON array), tuples, objects (extra
+  keys ignored via `allowExtraKeys`, missing keys are an error), `ref T`
+  (`null` <-> `nil`), `distinct`, `Option[T]` (`null` <-> `none`),
+  `Table[string, V]` / `OrderedTable` (from an object), `HashSet` /
+  `OrderedSet` (from an array), `JsonNode` (passed through; a `nil`
+  `JsonNode` result is `null`). Rejected at compile time with a message at
+  the parameter: `var`, `ptr` / `pointer`, `openArray`, `varargs`, `sink` /
+  `lent`, proc types, `typedesc` / `static` / `auto` / `A | B`. Also
+  rejected: non-proc targets (template, iterator, ...), nested procs,
+  generic procs, operator names (the name becomes `neel.<name>`), forward
+  declarations / bodiless procs, a second `expose`, `compileTime`,
+  `varargs`, and `thread` pragmas. Overloads cannot share an exposed name
+  (the wrapper would be redefined). Exposed procs must be GC-safe (they run
+  on pool workers); a user `fromJsonHook` must raise a `CatchableError`,
+  not `assert`.
+- Registry: `var exposedRegistry {.compileTime.}: seq[ExposedProc]` with
+  `ExposedProc = object(name: string, sym: NimNode, info: LineInfo)`;
+  `neelRegister(name: static string; wrapper: typed)` appends (handles a
+  sym choice by picking the symbol declared in the registering file, checks
+  `nskProc`, the `proc(seq[JsonNode]): JsonNode` shape, and top-level
+  placement). Accessors: `exposedProcs(): seq[ExposedProc] {.compileTime.}`
+  (for other macros) and `macro exposedNames(): untyped`, which expands to
+  a `seq[string]` literal in registration order (`newSeq[string]()` when
+  empty) - this is the list for `__NEEL_EXPOSED__`. Registration order is
+  semantic-check order: imported modules first, then the current module
+  top to bottom.
+- Dispatch: `generateDispatch(ident)` expands to `proc ident(name: string;
+  args: seq[JsonNode]): JsonNode {.gcsafe.}` = `case name of "a": return
+  aNeelSym(args) ... else: raiseUnknownProc(name)` with the stored
+  `nnkSym`s spliced (works from a module that imports neither the exposing
+  module nor its wrapper; non-exported wrappers resolve too). Empty
+  registry -> body is just the raise. Duplicate names -> `error()` at the
+  second proc: `exposed name 'dup' is used twice: first at a.nim(2, 6),
+  again at b.nim(3, 6). Exposed names must be unique across all modules
+  because they become neel.<name> in JS` (1-based columns like the
+  compiler; never "duplicate case label"). `DispatchProc = proc(name:
+  string; args: seq[JsonNode]): JsonNode {.gcsafe.}` (closure type; a named
+  proc converts implicitly, a closure is accepted).
+- Exceptions and wire kinds (`kind = $e.name` via `errMsg(id, e)`):
+  `NeelArgumentError` -> `"NeelArgumentError"` with `msg` one of
+  `"<proc>: expected 2 arguments, got 1"`, `"<proc>: expected 1 argument,
+  got 0"`, `"<proc>: expected 1 to 3 arguments, got 4"`, `"<proc>: argument
+  '<p>' expects <Type>, got <kind>"` where `<kind>` is one of `null`,
+  `boolean`, `integer`, `float`, `string`, `array`, `object`, optionally
+  followed by `": <detail>"` when the reason is more than the kind (e.g.
+  `key 'y' for Point not in { "x": 1 }`, `Invalid enum value: purple`);
+  `NeelUnknownProcError` -> `"NeelUnknownProcError"`, `msg = "no exposed
+  proc named '<name>'"`. Any other `CatchableError` from the user proc
+  gives its own type name (`"ValueError"`); a `NeelRemoteError` keeps its
+  remote kind (`protocol.errorInfo`). Type labels drop the `system.`
+  qualifier (`Option[int]`, `seq[int]`, `Table[string, int]`).
+- Reply builder: `handleCall(m: Msg; dispatch: DispatchProc): Option[Msg]
+  {.gcsafe.}`. `m.kind` must be `msgCall` (`doAssert`). With id:
+  `some(retMsg(m.id, dispatch(m.name, m.args)))`, or `some(errMsg(m.id,
+  e))` for a `CatchableError`. Without id: runs, discards the result,
+  `none(Msg)`; a failure is written to stderr as `neel: fire-and-forget
+  call '<name>' raised <kind>: <msg>` only when `not defined(release)`.
+  Defects are not caught (they are bugs; the pool's behaviour applies).
+- For Task 9 (`js` proxy): nothing here sets a current window. `handleCall`
+  is a plain proc taking the dispatcher, so Task 13 brackets it: in
+  `onMessage`, look up the window for `conn`, set the thread-local current
+  window, call `handleCall(m, neelDispatch)`, clear the thread-local in a
+  `finally` (or pass a closure `DispatchProc` that does the same around
+  `neelDispatch`). Exposed procs run on pool workers, so the thread-local is
+  per worker and must be set for every call, never cached.
+- For Task 10 (`neel.js`): `__NEEL_EXPOSED__` = `exposedNames()` evaluated
+  inside `startApp` (after the user's exposed procs, see the ordering rule).
+  Error strings JS will see in `err.error`: `kind: "NeelArgumentError"` for
+  arity and type problems, `kind: "NeelUnknownProcError"` for an unknown
+  name (which can only happen with a hand-built message, since generated
+  `neel.<name>` functions exist only for registered names), the Nim
+  exception type name otherwise; `msg` formats as listed above. A
+  fire-and-forget `.send` never gets a reply, even on failure.
+- For Task 13 (`startApp`): emit `generateDispatch(neelDispatch)` from the
+  `startApp` macro (a macro may emit a call to another macro; it expands
+  right after, at the `startApp` call site, with the registry as of that
+  point). Ordering rule: `startApp()` must come after every `{.expose.}`
+  proc in the module and after the imports of modules containing exposed
+  procs; it may be inside `proc main()`. A proc exposed later is simply
+  not in the `case` (runtime `NeelUnknownProcError`). `onMessage(conn,
+  text)`: `let m = decode(text)` (catch `NeelProtocolError`: log/drop or
+  close 1008); `case m.kind of msgCall: let reply = handleCall(m,
+  neelDispatch); if reply.isSome: discard srv.send(conn,
+  encode(reply.get))` - `send` returning `false` (connection gone) needs no
+  log; `of msgRet, msgErr: discard tbl.complete(conn, m.id, m)`.
+  `handleCall` is `{.gcsafe.}` so it is callable directly from the
+  `MessageHandler` hook. `src/neel.nim` should re-export `expose`
+  (pragma), `NeelArgumentError`, `NeelUnknownProcError`; `neelRegister`,
+  `generateDispatch`, `exposedNames`, `checkArity`, `convertArg`,
+  `convertResult`, `raiseUnknownProc` are referenced by generated code via
+  `bindSym` and need no re-export.
+- Gotchas: fresh `NimNode`s created in a macro carry the lineInfo of the
+  macro's *own* source line, not line 0, so "point at user code" needs an
+  explicit recursive `copyLineInfo` over the generated tree. `macros.error`
+  is not fatal: the compiler keeps going and reports later errors too (a
+  failed `generateDispatch` is followed by "undeclared identifier" for the
+  dispatcher name). A `compiles((block: <decl>; true))` wrapper works for
+  negative macro tests but every declaration inside it is nested, so
+  positive `compiles` checks are impossible and `nim check` subprocesses
+  are needed for message/location assertions (`tests/t_expose.nim` has
+  `nimCheck(dir, file)`: polling loop with `hasData` / `peekExitCode`,
+  120 s deadline, `--path:<repo>/src`, `--nimcache` under the temp dir;
+  about 2 s per invocation). `nim check` prints macOS temp paths as
+  `/private/...`; compare file names, not full paths. `macros.LineInfo`
+  columns are 0-based; the compiler prints 1-based.
+- Tests (`tests/t_expose.nim`, 41 cases, plus `tests/fixtures/
+  exposed_helper.nim` with an exported and a non-exported exposed proc):
+  direct wrapper calls for every scalar kind, seq, object, enum (name and
+  ordinal), `JsonNode`, `Option` (both directions), `Table`, `HashSet`,
+  multi-name IdentDefs, defaults (1/2/3 args, default referencing an
+  earlier parameter), void -> `JNull`, object result, `func`, parameter
+  named `args`, propagated `ValueError`; exact arity messages (singular,
+  plural, range), exact type-mismatch messages, detail for missing key /
+  bad enum / wrong element; dispatch routing, unknown name, ordering rule
+  (`earlyDispatch` vs `fullDispatch`), cross-module dispatch of exported
+  and non-exported fixture procs, `exposedNames` order; `handleCall` ret,
+  null ret, `ValueError`, forwarded `NeelRemoteError` kind,
+  `NeelArgumentError`, `NeelUnknownProcError`, no-id success and failure,
+  closure dispatcher; `compiles` negatives (generic, template, varargs)
+  and `nim check` negatives with file/line assertions (nested, generic,
+  template, duplicate across two modules naming both locations, GC-unsafe
+  proc). The release build was also run once (no stderr log lines).
+
 - `neel/expose.nim`: `expose` pragma macro.
   - Validates top-level placement and supported signatures; clear compile
     errors for nested procs, generics, and unsupported parameter forms.
