@@ -38,7 +38,7 @@ handled outside this plan.
 | Nim API | `js.<fnName>(...)` via experimental dot operators. Fire-and-forget by default; `js.wait.<fnName>(...)` / `js.wait(timeoutMs).<fnName>(...)` blocks and returns `JsonNode`; `win.js.<fnName>(...)` targets a specific window. _(Revised by Task 2 spike (b) from `js.<fnName>(...).wait()`, which is not implementable; veto in review.)_ |
 | Windows | Full multi-window API: `openWindow`, `closeWindow`, `windows()`, `currentWindow()`, per-window `js`. |
 | Browsers | `Browser` enum + per-browser spec table. Ordered preference list (`seq[Browser]`). `Default` = default-browser tab. `fallback: bool` (true -> open app in default-browser tab; false -> open default-browser tab showing a Neel error page listing the browsers searched). 2.0 ships `Chrome`, `Chromium`, `Default`. Dedicated `--user-data-dir`; size/position via launch flags. No shell string construction. |
-| Lifecycle | Exit after the last connection closes plus a configurable grace period (connection-count based). Explicit `quit()`. Browser launched only after `listen` succeeds. |
+| Lifecycle | Exit after the last connection closes plus a configurable grace period (connection-count based). Explicit `quit()` _(named `quitApp()` since Task 12: a zero-argument `quit()` is ambiguous with `system.quit`)_. Browser launched only after `listen` succeeds. |
 | Security | Per-launch random token baked into `neel.js`, required on WebSocket upgrade. |
 | Assets | `embedAssets: static bool = defined(release)`. `std/mimetypes` for MIME, `Range` support (media), real 404s. |
 | Tests | Unit tests under `tests/`. No CI for now. |
@@ -1492,6 +1492,188 @@ Notes for later tasks:
   discovery results, argument construction.
 
 #### Task 12: Window management and lifecycle
+**Status:** done
+
+Deviations: the explicit-exit proc is `quitApp()`, not `quit()`: a
+zero-argument `quit()` is ambiguous with `system.quit(errorcode =
+QuitSuccess)` in every module that sees both (verified with a throwaway
+program). The blocking wait is `waitForAppExit()` (no clash with
+`osproc.waitForExit`). `ExitReason` has a third member, `erStartupTimeout`,
+for the startup deadline the task left open. Beyond the connection-count
+grace period, the main thread also *retires* individual windows whose
+connection has been gone for a grace period (the user closed the browser
+window): without that, `windows()` in a multi-window app would list windows
+the user closed forever and their Chrome processes (which outlive their last
+window on macOS) would never be terminated. `currentWindow()` and
+`window(id)` return `Option[Window]` rather than raising. All throwaway
+programs lived in `/tmp/neelw/` and are not part of the repo.
+
+Notes for later tasks:
+- `Window` (`neel/window.nim`): `object(id: int, js: JsProxy)`; plain ints,
+  copyable, `{.gcsafe.}`-usable, `Task`-isolatable, `==` structural. Ids
+  are a monotonic counter from 1 (never 0, never reused, also not after a
+  failed launch). `js` is `initJsProxy(id)` so `win.js.foo(...)` /
+  `win.js.wait.foo(...)` target that window. Accessors `isOpen(w)`,
+  `isConnected(w)`. Records behind a `Window` are `ptr WindowRecord` from
+  `allocShared0` in a `Table[int, ptr WindowRecord]` (the table moves the
+  pointers, never the records), so the `ptr IdAllocator` the resolver hands
+  out stays valid; a record is freed only after its connection's
+  `connectionClosed` has run, or immediately when it never connected. The
+  `BrowserHandle` (a `ref`) lives in the record and is touched only under
+  the lock; `closeWindow` / retirement *move* it out under the lock and
+  terminate it outside (no concurrent refcount traffic, no 2 s `terminate`
+  poll under the lock).
+- Init seam: `initWindows(closeConn: CloseProc; pending: PendingTable;
+  baseUrl: string; search: BrowserSearch; fallback = true; defaultOpts =
+  LaunchOptions(); gracePeriodMs = DefaultGracePeriodMs; startupTimeoutMs =
+  DefaultStartupTimeoutMs; launcher: Launcher = nil; onWindowOpen,
+  onWindowClose: WindowHook = nil)` and `teardownWindows()`. Types:
+  `CloseProc = proc(conn: ConnId; code: int): bool {.gcsafe.}`
+  (`Server.close`), `Launcher = proc(url, userDataDir: string; opts:
+  LaunchOptions): BrowserHandle {.gcsafe.}` (`nil` = `launchWithFallback(
+  search, url, noBrowserPageUrl(baseUrl, search), fallback, userDataDir,
+  opts)`; tests inject a fake), `WindowHook = proc(w: Window) {.gcsafe.}`.
+  Constants: `DefaultGracePeriodMs` (3 s debug / 10 s release),
+  `MinGracePeriodMs = 250` (`initWindows` `doAssert`s `gracePeriodMs >=
+  250`: the shim's first reconnect delay), `DefaultStartupTimeoutMs =
+  30_000`. `initWindows` `doAssert`s it is not already initialised, so the
+  order is `initWindows` -> ... -> `teardownWindows` -> (next `initWindows`).
+  The manager is a module-level `ptr` written only by these two procs on
+  the main thread; everything else is `{.gcsafe.}` and takes the one lock.
+- Mapping hooks and their place in the server's sequence:
+  1. `RequestHandler` for `/ws`: `isWebSocketUpgrade(req)` -> token check ->
+     parse `WindowQueryParam` from `req.query` -> `bindConnection(windowId,
+     conn): bool` -> `upgrade()` only if it returned `true` (else respond
+     403). `bindConnection` accepts a known, not-closed id; re-binding an id
+     that already has a connection replaces it (refresh / shim reconnect; the
+     old `ConnId` is unmapped at once so `windowIdOf(old)` is `NoWindow`).
+  2. `onOpen` = `connectionOpened(conn)`: `inc` count, cancels a running
+     grace period, fires `onWindowOpen` the *first* time a connection bound
+     to that window opens (a refresh does not fire it again).
+  3. `onMessage`: `withCurrentWindow(windowIdOf(conn)): reply =
+     handleCall(m, neelDispatch)` (`NoWindow` for an unbound conn).
+  4. `onClose` = `connectionClosed(conn)`: `dec` count (count 0 -> grace
+     deadline = now + grace), clears the window's connection *only if it
+     still points at this `ConnId`*, `pending.disconnect(conn)`, frees the
+     record if `closeWindow` had already closed it. Hooks may overlap; every
+     path is lock-guarded and `connectionClosed` for a connection replaced by
+     a re-bind leaves the new binding alone (tested bind A, bind B, close A).
+  Connections that were never bound are still counted (symmetric
+  open/close), so the count is always "live WebSocket connections".
+- Resolver: `resolveWindow(windowId): WindowRoute {.gcsafe.}` - pass it to
+  `initJsBridge(sendProc, resolveWindow, pending, callTimeoutMs)`. Returns
+  `WindowRoute(conn, addr rec.ids)` while the window is bound and not
+  closed, else `WindowRoute()`.
+- Window API: `openWindow(path = "/"; size = none(WindowSize); position =
+  none(WindowPosition); extraFlags: seq[string] = @[]): Window {.gcsafe.}`
+  allocates the id, registers the record *before* launching (a
+  default-browser tab can connect while `open` is still being polled),
+  computes `userDataDirFor(id)` and `launchUrl(baseUrl, path, id)` =
+  `<base><path>?window=<id>` (`&window=` when the path has a query, fragment
+  kept last, missing leading `/` added; exported and pure), calls the
+  launcher with `defaultOpts` overridden by `size` / `position` and
+  `extraFlags` appended, stores the handle. A launcher exception
+  (`NeelBrowserError`, `ValueError` for a bad size) drops the record and
+  propagates. `closeWindow(w)`: mark closed, `closeConn(conn, 1000)` if
+  bound, `terminate` / `close` / `removeUserDataDir` on the handle,
+  `onWindowClose(w)`; idempotent, unknown id is a no-op; later
+  `bindConnection(w.id, ...)` is refused. `windows(): seq[Window]` (not
+  closed, id order; includes loading and recently disconnected windows),
+  `window(id): Option[Window]`, `currentWindow(): Option[Window]` =
+  `window(currentWindowId())`, `connectionCount(): int`.
+- Lifecycle state (all under the lock): `connCount`, `everConnected`,
+  `graceActive` + `graceDeadline`, `quitRequested`; per record `createdAt`,
+  `everConnected`, `disconnectedAt`, `closed`. `waitForAppExit():
+  ExitReason` (main thread only) loops on `waitTimeout(cond, lock, <= 1 s)`
+  and on every wake-up: (a) retires records whose connection has been gone
+  for `gracePeriodMs` or that never connected within `startupTimeoutMs`
+  (terminate / close / removeUserDataDir, `onWindowClose` on the main
+  thread, free; closed-but-stale records from the Task 6 "socket died before
+  the 101" gap are freed after the startup timeout too); (b) returns
+  `erQuit` if `quitApp()` ran; (c) if `connCount == 0` and no window is
+  still loading (opened less than `startupTimeoutMs` ago and never
+  connected): `erLastWindowClosed` once `graceDeadline` has passed, or
+  `erStartupTimeout` if no connection ever opened and `initWindows` was more
+  than `startupTimeoutMs` ago (this covers "zero windows" and "the browser
+  never connected"). A loading window therefore defers the exit (a second
+  window launched cold while the first is closed does not kill the app), and
+  a connection opening at any time cancels the grace period.
+  `quitApp()` (`{.gcsafe.}`, any thread, a worker inside an exposed proc
+  included) only sets the flag and signals. `waitForAppExit` never calls
+  `shutdown`. `teardownWindows()` terminates every remaining handle, removes
+  the profile dirs, fires `onWindowClose` for windows still open (e.g. after
+  `erQuit`), frees everything; call it after `shutdown`.
+- For Task 13 (`startApp` wiring): `tbl = newPendingTable()`; `srv =
+  newServer(onRequest = handleRequest, onMessage = handleMessage, onOpen =
+  connectionOpened, onClose = connectionClosed, workers, queueCapacity)`
+  (the Task 12 hooks are plain procs and can be passed directly;
+  `handleMessage` is the recipe above with `windowIdOf`); `search =
+  findBrowser(browsers, browserPath)` (before `listen` to fail fast);
+  `srv.listen(port)`; `base = "http://127.0.0.1:" & $srv.port`;
+  `initJsBridge(sendProc, resolveWindow, tbl, callTimeoutMs)`;
+  `initWindows(closeProc, tbl, base, search, fallback, LaunchOptions(size,
+  position, extraFlags), gracePeriodMs, onWindowOpen = ..., onWindowClose =
+  ...)`; `discard openWindow("/")` (or the configured start path). `/neel.js`
+  learns the window id from the page URL: the launch URL is
+  `<base>/?window=<id>`, so render `__NEEL_WINDOW_ID__` from the `window=`
+  query of the `Referer` header (Task 11 note), falling back to the single
+  open window when there is exactly one (`windows()`), and the shim then
+  presents it on `/ws` where `bindConnection` validates it (an id that
+  `window(id).isNone` is a 403). On `NeelBrowserError` from `openWindow`
+  with `fallback = false`: the error page has already been opened in the
+  default browser and `openWindow` has dropped the record; print the error,
+  keep serving (`waitForAppExit()` returns `erStartupTimeout` after
+  `startupTimeoutMs`, during which `NoBrowserPath` is served; for a quicker
+  exit `sleep(gracePeriodMs)` then `quitApp()`), then shut down as usual.
+  Main-thread sequence after setup: `let reason = waitForAppExit()` ->
+  `srv.shutdown()` (sends 1001 to every window, runs every `onClose` =
+  `connectionClosed`, so every pending waiter has failed) ->
+  `resetJsBridge()` -> `teardownWindows()` (terminates browsers still
+  running, e.g. after `quitApp`) -> drop `tbl`. `src/neel.nim` should
+  re-export `Window`, `ExitReason`, `WindowHook`, `openWindow`,
+  `closeWindow`, `windows`, `window`, `currentWindow`, `isOpen`,
+  `isConnected`, `quitApp`, `connectionCount`, `DefaultGracePeriodMs`,
+  `MinGracePeriodMs`, `DefaultStartupTimeoutMs`; `initWindows`,
+  `teardownWindows`, `waitForAppExit`, `bindConnection`,
+  `connectionOpened`, `connectionClosed`, `windowIdOf`, `resolveWindow`,
+  `launchUrl` are for `startApp`. A joint `import neel/[jsproxy, window,
+  browser, protocol]; export ...` was compiled in a throwaway program: no
+  clashes (`js`, `wait`, `close`, `window(id)` all resolve).
+- Gotchas: `closeWindow` blocks for the browser's `terminate` (about 100 ms
+  with Chrome; up to `TerminateGraceMs` + 1 s if it ignores SIGTERM) - fine
+  from an exposed proc, do not call it on the IO thread. Hooks run on
+  whichever thread observes the event (`connectionOpened`: a pool worker;
+  `closeWindow`: its caller; retirement / teardown: the main thread) and may
+  call `js` / `windows()` but must not call `waitForAppExit` or
+  `teardownWindows`. A hook called from `teardownWindows` sees an
+  uninitialised module (`windows()` is empty). `move rec.handle` through a
+  `ptr` works and leaves `nil`. `Table.pop(key, var)` needs a `var`
+  destination. The test fake launcher creates `userDataDirFor(id)` so that
+  `removeUserDataDir` is observable; `nimble test` leaves no `neel-<pid>-*`
+  directory behind (checked).
+- Tests (`tests/t_window.nim`, 25 cases): id allocation and `js` proxy,
+  launch URL (`?window=` / `&window=`) and profile dir, `launchUrl` edge
+  cases, option overrides, failed launch (record dropped, id not reused),
+  `windows()` ordering; `bindConnection` known / unknown / 0 / closed,
+  refresh re-association (bind A, bind B, close A keeps B, close B clears),
+  resolver (empty / live / stable allocator address / id continuity through
+  `js` / empty after close), `currentWindow` via `withCurrentWindow`,
+  `pending.disconnect` fails a waiter thread with `NeelDisconnectedError`,
+  unbound connections counted but no hooks; `closeWindow` (1000 close,
+  profile dir removed, refused re-bind, idempotent, record freed on
+  `connectionClosed`), never-connected and unknown-id closes; lifecycle:
+  grace period -> `erLastWindowClosed` within bounds, reopen cancels,
+  `quitApp` from a thread -> `erQuit` at once, quit before any window,
+  `erStartupTimeout` with and without a window, loading second window
+  defers the exit, user-closed window retired while another lives,
+  `MinGracePeriodMs` enforced; one integration test against the real server
+  (403 for an unknown id, bind before upgrade, `whoami` through
+  `withCurrentWindow`, `openWindow` from a worker, refresh on a new
+  `ConnId`, two connected windows, `closeWindow` from inside the exposed
+  proc observed as a 1000 close frame, count-driven `erLastWindowClosed`,
+  shutdown in a `finally`). Every wait and read is bounded (3 s). Stable
+  over repeated debug and release runs.
+
 - `neel/window.nim`:
   - `Window` type with id, browser process handle, connection reference, and
     the `js*: JsProxy` field required by Task 9 (per Task 2 spike (b)).
