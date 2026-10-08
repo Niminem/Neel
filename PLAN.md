@@ -1687,6 +1687,277 @@ Notes for later tasks:
 - Tests: mapping, grace-period timer with reconnect, `quit` behavior.
 
 #### Task 13: `startApp` assembly
+**Status:** done
+
+Deviations: `webDir` is resolved against the directory of the source file
+that calls `startApp` in *both* asset modes (the task text offered "current
+working directory" for disk mode): debug and release builds then find the
+same files no matter where the program is started from, and `nim c -r
+examples/x/app.nim` works from the repo root. The explicit exit proc is
+`quitApp()` (Task 12). When no browser is found and `fallback = false`,
+`startApp` serves the error page for `gracePeriodMs`, tears down, and then
+re-raises the `NeelBrowserError` (the task text offered waiting for
+`erStartupTimeout` or `quitApp()`): a program that cannot open a window
+should fail loudly with the browser list in the message rather than return
+a misleading `ExitReason`. A `..` segment is refused even when it would stay
+inside the root (`/sub/../index.html` is a 404), and a malformed WebSocket
+message is logged (debug) and dropped rather than closed with 1008. The
+start page parameter is `startPath = "/"` (an `openWindow` path), not a
+file name. `runApp` is public (tests and power users call it with their own
+dispatcher); the launcher test seam is its `launcher: Launcher = nil`
+parameter, forwarded verbatim by `startApp`. No file outside the task's
+list was changed; throwaway programs lived in `/tmp/neel13/` (deleted).
+
+Notes for later tasks (Tasks 14 and 15):
+- Public `startApp` (a macro in `src/neel.nim`): `startApp(webDir = "web",
+  embedAssets = defined(release), startPath = "/", port = 0, workers =
+  DefaultWorkers, queueCapacity = DefaultQueueCapacity, callTimeoutMs =
+  DefaultCallTimeoutMs, gracePeriodMs = DefaultGracePeriodMs,
+  startupTimeoutMs = DefaultStartupTimeoutMs, browsers = @[Chrome,
+  Chromium], fallback = true, browserPath = "", size = none(WindowSize),
+  position = none(WindowPosition), extraFlags: seq[string] = @[],
+  onWindowOpen, onWindowClose: WindowHook = nil, launcher: Launcher =
+  nil): ExitReason` (discardable: `startApp()` as a statement and `let r =
+  startApp()` both work). Keyword arguments only, except that the single
+  positional argument is `webDir` (`startApp("web", port = 8000)`).
+  Expansion: `block: generateDispatch(neelDispatch); when <embedAssets>:
+  let a = embeddedAssets(embedWebDir(<webDir>, "<callerDir>")) else: let a
+  = diskAssets(resolveWebDir("<callerDir>", <webDir>)); runApp(a,
+  neelDispatch, exposedNames(), <other keyword args verbatim>)`. All
+  referenced symbols are `bindSym`'d, so the user imports only `neel`.
+  `embedAssets` must be a compile-time constant (`true`, `false`, a
+  `const`, or `defined(...)`); `webDir` must be a constant when embedding.
+  Every generated node is stamped with the call-site position, so errors
+  (non-constant `embedAssets`, a wrong argument type, a missing web
+  directory) point at the user's `startApp(...)` line; the macro's own
+  errors: `startApp: only the web directory may be positional...`,
+  `startApp: 'dispatch' is set by startApp itself...` (also for `assets`
+  and `exposed`). The ordering rule holds: call `startApp` after every
+  `{.expose.}` proc and after the imports of modules that contain them; it
+  may be inside `main()`.
+- `runApp*(assets: AssetSource; dispatch: DispatchProc; exposed:
+  seq[string]; <the keyword parameters above>): ExitReason {.discardable.}`
+  is the ordinary proc behind the macro. Sequence: `doAssert` not already
+  running; `search = findBrowser(browsers, browserPath)` (before anything is
+  bound, so a bad override fails fast with `NeelBrowserError`); fill the
+  module global `app` (token, search, fallback, assets, dispatch, exposed);
+  `app.tbl = newPendingTable()`; `app.srv = newServer(onRequest =
+  handleRequest, onMessage = handleMessage, onOpen = connectionOpened,
+  onClose = connectionClosed, workers, queueCapacity)`; then inside
+  `try`: `initJsBridge(appSend, resolveWindow, app.tbl, callTimeoutMs)`;
+  `app.srv.listen(port)`; `base = "http://127.0.0.1:" & $app.srv.port`;
+  `initWindows(appClose, app.tbl, base, search, fallback,
+  LaunchOptions(size, position, extraFlags), gracePeriodMs,
+  startupTimeoutMs, launcher, onWindowOpen, onWindowClose)`; `discard
+  openWindow(startPath)` (on `NeelBrowserError`: print `neel: <msg>` to
+  stderr, `sleep(gracePeriodMs)` so the default browser can fetch the error
+  page, re-raise); `result = waitForAppExit()`; `finally`:
+  `app.srv.shutdown()` -> `resetJsBridge()` -> `teardownWindows()` -> `app
+  = AppState()` (drops the server and the table). Every exception from the
+  sequence (`OSError` from `listen`, `ValueError` from a bad `size`,
+  `NeelBrowserError`) propagates after that teardown, and `startApp` can be
+  called again afterwards (the smoke test runs two apps in one process).
+- Module globals (`src/neel.nim`): one `var app: AppState` with `running`,
+  `srv: Server`, `tbl: PendingTable`, `token`, `search: BrowserSearch`,
+  `fallback`, `assets: AssetSource`, `dispatch: DispatchProc`, `exposed:
+  seq[string]`; written only by `runApp` before `listen` and after
+  `shutdown`, read by the hooks through `appPtr(): ptr AppState`
+  (`{.cast(gcsafe).}`, the jsproxy `bridgePtr` pattern). Hooks are plain
+  module-level procs (`handleRequest`, `handleMessage`, `appSend`,
+  `appClose`); nothing captures the `Server`.
+- Token: 16 bytes from `std/sysrand.urandom` rendered as 32 lowercase hex
+  characters, new on every `runApp`; compared in constant time on `/ws`.
+  `urandom` failure raises `OSError` before anything is bound.
+- Route table (`handleRequest`): (1) `req.path == WsPath` (`"/ws"`):
+  `isWebSocketUpgrade(req)` -> `decodeQuery(req.query)` -> `token` must
+  equal the launch token and `window` must parse as a positive id that
+  `bindConnection(windowId, conn)` accepts -> `upgrade()`; anything else on
+  `/ws` (plain GET, bad token, unknown/closed window, `window=0`) is `403
+  Forbidden` (text/plain). (2) Any method other than GET/HEAD on any other
+  path -> `methodNotAllowed()` (405, `Allow: GET, HEAD`). (3)
+  `NeelJsPath* = "/neel.js"` -> `okResponse(renderNeelJs(token, id,
+  exposed), "application/javascript")` + `Cache-Control: no-store`. (4)
+  `NoBrowserPath` (`/neel/no-browser`) -> `text/html; charset=utf-8` +
+  `Cache-Control: no-store`, no token: heading, "started with `fallback =
+  <value>`", one `<li><code>` per `describeSearch` line (HTML-escaped; "No
+  browser was in the preference list." when empty), and the three fixes
+  (install Chrome/Chromium, `browserPath = ...`, `fallback = true`). The
+  `?searched=` query is ignored (the retained `BrowserSearch` is used).
+  (5) Everything else -> `serveAsset(app.assets, req)`. A raising handler
+  is the server's 500.
+- `/neel.js` window-id rule (`neelJsWindowId`): parse the `Referer`
+  header with `parseUri`, take its `window=` query; if it is a positive id
+  and `window(id).isSome`, use it. Otherwise (no `Referer`, unparsable,
+  unknown or closed id) fall back to the single open window when
+  `windows().len == 1`. Otherwise 404 (text/plain: "cannot tell which
+  window this page belongs to; open the page through Neel"). Consequence
+  for Task 14's two-window example: a second window's page URL is
+  `<base><path>?window=2`, so its `<script src="/neel.js">` request carries
+  `window=2` in `Referer` and renders window 2 even while window 1 is open.
+  Chromium sends the full same-origin `Referer` by default; a page that sets
+  `<meta name="referrer" content="no-referrer">` breaks multi-window.
+- `handleMessage`: `decode` (a `NeelProtocolError` is written to stderr as
+  `neel: dropped malformed message on connection <id>: <reason>` in debug
+  builds and dropped; the connection stays open); `msgCall` ->
+  `withCurrentWindow(windowIdOf(conn)): reply = handleCall(m,
+  app.dispatch)`, `discard app.srv.send(conn, encode(reply.get))` when
+  there is a reply; `msgRet`/`msgErr` -> `discard app.tbl.complete(conn,
+  m.id, m)`.
+- Asset lookup API (`neel/assets.nim`): `AssetSource = object(mode:
+  AssetMode (amDisk | amEmbedded), root: string, files: Table[string,
+  string])`; `diskAssets(dir)` (root = `normalizedPath(absolutePath(dir))`,
+  file read on every request, need not exist); `embeddedAssets(files:
+  openArray[(string, string)])`; `macro embedWebDir(dir, callerDir: static
+  string)` walks the directory at compile time (`walkDirRec`, sorted keys,
+  `/` separators, `staticRead` each file; compile error `neel: web
+  directory not found for embedding: <abs> (webDir = "..." relative to
+  ...)` when missing; an empty directory gives an empty seq);
+  `resolveWebDir(callerDir, dir)` (absolute `dir` wins, else
+  `callerDir / dir`); `resolveAssetPath(rawPath): Option[string]` (must
+  start with `/`; `decodeUrl(decodePlus = false)`; refuse NUL, backslash,
+  any `..` segment; drop `.` and empty segments; `/` -> `IndexFile*`
+  (`"index.html"`); a non-root path ending in `/` -> `none`);
+  `lookupAsset(src, key): Option[string]` (embedded: table lookup; disk:
+  `normalizedPath(root / key)` must `isRelativeTo(root)` (defence in depth)
+  and `fileExists` (false for directories), read errors -> `none`;
+  symlinks inside the root are followed without further checks, hidden
+  files are served); `serveAsset(src, req): HttpResponse` (405 unless
+  GET/HEAD -> 404 for `none` -> `contentTypeFor(key)` -> with a `Range`
+  header: `partialContent` / `rangeNotSatisfiable` / fall through on
+  `rsIgnored` -> `okResponse` + `Accept-Ranges: bytes`). Only `/` maps to
+  the index: `/sub/` is a 404, not `/sub/index.html`. Directory listings
+  never exist. Keys in the embedded table and on disk are
+  byte-for-byte interchangeable (tested per fixture file).
+- Re-export list of `src/neel.nim` (exact): from `expose`: `expose`,
+  `NeelArgumentError`, `NeelUnknownProcError`, `fromJsonHook`, `toJsonHook`;
+  from `jsproxy`: everything except `initJsBridge`, `resetJsBridge`,
+  `SendProc`, `WindowResolver`, `WindowRoute`, `setCurrentWindow`,
+  `clearCurrentWindow`, `withCurrentWindow` (so `js`, `wait`, `jsSend`,
+  `jsCallWait`, `JsProxy`, `JsWaitProxy`, `initJsProxy`, the `.()`
+  operators, `NeelNoWindowError`, `currentWindowId`, `CurrentWindow`,
+  `NoWindow`, `UseDefaultTimeout`, `DefaultCallTimeoutMs`); from `window`:
+  `Window`, `ExitReason` (with `erLastWindowClosed`, `erQuit`,
+  `erStartupTimeout`), `WindowHook`, `Launcher`, `openWindow`,
+  `closeWindow`, `windows`, `window`, `currentWindow`, `isOpen`,
+  `isConnected`, `quitApp`, `connectionCount`, `DefaultGracePeriodMs`,
+  `MinGracePeriodMs`, `DefaultStartupTimeoutMs`; from `browser`:
+  `Browser` (with its members), `NeelBrowserError`, `LaunchOptions`,
+  `WindowSize`, `WindowPosition`; from `protocol`: `NeelProtocolError`,
+  `NeelTimeoutError`, `NeelDisconnectedError`, `NeelRemoteError`; from
+  `websocket`: `NeelFrameError`; from `pool`: `DefaultWorkers`,
+  `DefaultQueueCapacity`; from `assets`: `AssetSource`; own: `startApp`,
+  `runApp`, `NeelVersion`, `NeelJsPath`. Not re-exported: `initWindows`,
+  `teardownWindows`, `waitForAppExit`, `bindConnection`,
+  `connectionOpened`, `connectionClosed`, `windowIdOf`, `resolveWindow`,
+  `launchUrl`, the server/http/protocol internals, `std/options` (an app
+  that passes `size = some((800, 600))` imports `std/options` itself).
+- Example layout for Task 14: `examples/<name>/app.nim` next to
+  `examples/<name>/web/index.html` (plus `web/*.js`, `web/*.css`,
+  subdirectories as needed). `index.html` must load `<script
+  src="/neel.js"></script>` *before* the app's own script; module scripts
+  read `window.neel`. The app: `import neel`, `{.expose.}` procs, then
+  `startApp()` (or `startApp(size = some((W, H)))` with `import
+  std/options`) as the last statement or inside `main()`. Running: `nim c
+  -r examples/<name>/app.nim` from any directory serves `web/` from disk
+  (edits show up on refresh); `nim c -d:release examples/<name>/app.nim`
+  embeds `web/` into the binary at compile time (verified: the file bytes
+  appear in the release binary and not in the debug one), so the release
+  binary can be moved anywhere. The default grace period differs (3 s debug
+  / 10 s release). Expect Chromium's own stderr noise in the terminal (the
+  browser inherits stdio, Task 11).
+- Two-window round-trip recipe for Task 14: an exposed proc `openSecond()
+  = openWindow("/second.html").id` (served from `web/second.html`, whose
+  `<script src="/neel.js">` renders window 2 via `Referer`); the first page
+  calls `await neel.openSecond()`; in the second page `neel.expose({ ask:
+  (q) => prompt(q) })` (or any function returning a value); an exposed
+  proc `askSecond(id: int): string = window(id).get.js.wait.ask("...")
+  .getStr` (or `win.js.wait(5000).ask(...)`) targets window 2 explicitly,
+  while `js.wait.foo()` inside an exposed proc targets the window that made
+  the call; `closeWindow(window(id).get)` closes it with a 1000 close so the
+  shim does not reconnect. Each window is its own Chrome process with a
+  private profile (`userDataDirFor(id)`); closing a window's browser is
+  detected through its WebSocket closing, and a window whose connection has
+  been gone for a grace period is retired automatically. The smoke test
+  `tests/t_neel.nim` shows the whole wire sequence (shim fetch, 403s,
+  101, `call`/`ret` both ways, `err` kinds, `quitApp`, grace exit).
+- Facts the README (Task 15) must state: *threading* - the main thread
+  blocks in `startApp`; one IO thread owns the sockets; exposed procs run
+  on pool workers (default 64, `workers =`), concurrently, also two calls
+  from the same page at once, so they must be GC-safe and guard shared
+  state with locks; `js.foo(...)` is fire-and-forget, `js.wait.foo(...)`
+  blocks the calling worker up to `callTimeoutMs` (default 10 s) and raises
+  `NeelTimeoutError` / `NeelRemoteError` / `NeelDisconnectedError`; `js` has
+  a current window only inside an exposed proc, elsewhere use
+  `win.js`/`window(id).get.js` (`NeelNoWindowError` otherwise); hooks
+  (`onWindowOpen`/`onWindowClose`) run on whichever thread observes the
+  event. *Lifecycle* - the app ends when the WebSocket connection count has
+  been 0 for `gracePeriodMs` (`erLastWindowClosed`), when `quitApp()` is
+  called (`erQuit`), or when no window connected within `startupTimeoutMs`
+  (30 s, `erStartupTimeout`); a page refresh or the shim's reconnect
+  (up to 5 attempts, 7.75 s) counts as a brief disconnect, which is why
+  `gracePeriodMs >= 250`; `startApp` returns the `ExitReason` after
+  shutting everything down and may be called again. *Browsers* - the
+  preference list `browsers` (default `@[Chrome, Chromium]`), `Default`
+  means a tab in the OS default browser (no app mode), `browserPath`
+  overrides discovery (must exist), `fallback = true` opens the app in a
+  default-browser tab when nothing is found, `fallback = false` opens the
+  `/neel/no-browser` page instead and `startApp` raises `NeelBrowserError`
+  after `gracePeriodMs`; `Edge`/`Brave`/`Opera`/`Vivaldi` are reserved and
+  skipped; size/position/`extraFlags` only apply to app-mode browsers;
+  one private profile per window; the server binds `127.0.0.1` on an
+  ephemeral port by default (`port =` for a fixed one) and every WebSocket
+  needs the per-launch token baked into `/neel.js`. *Assets* - `webDir`
+  relative to the calling source file, `embedAssets` defaults to
+  `defined(release)`, `/` is `index.html`, directories are never listed,
+  `..`/backslash/NUL paths are 404, `Range` is supported for media, MIME
+  via `std/mimetypes` with `.js` as `application/javascript`.
+- Gotchas: a nested proc inside a macro that captures a macro parameter
+  (e.g. a recursive `stampCallSite` closing over `args`) reads that
+  parameter as `nil` in the VM on 2.2.10 - pass it explicitly to a
+  top-level proc. `quote do` gives substituted user nodes the quote's own
+  position, so "point at user code" is done by re-stamping every node whose
+  position is in `neel.nim`, not by skipping user nodes. `args.lineInfoObj`
+  of a `varargs[untyped]` macro parameter is the call site even with zero
+  arguments (checked top-level and inside a proc); macOS reports `/tmp` as
+  `/private/tmp` there. An `export` of a doc-commented statement must use
+  `#` comments (an indented `##` after `export` is "invalid indentation").
+  `export m.sym` disambiguates a proc that shares its module's name
+  (`expose.expose`, `window.window`); `export m except a, b` works. The
+  sandbox used by tool runs forbids writes under `getTempDir()`, which the
+  fake launcher needs (profile dirs), so `nimble test` must run
+  unsandboxed. Dead code is eliminated before embedding: a `startApp` in a
+  never-called proc leaves no asset bytes in the binary.
+- Tests: `tests/t_assets.nim` (34 cases over `tests/fixtures/web/`:
+  `index.html`, `app.js`, `style.css`, `noext`, `sub/page.html`, `sub/data
+  with space.json`, `media/blob.bin` holding bytes 0..255; `resolveAssetPath`
+  root/plain/percent/escape/directory cases; every serving case in both
+  modes via a `bothModes` template: index with Content-Type and
+  Accept-Ranges, MIME for js/css/json/octet-stream, nested and
+  percent-encoded paths, missing files, 14 escaping targets including
+  `%2e%2e`, `..%2f`, backslashes raw and encoded, `%00`, `//etc/passwd`
+  and the absolute fixture path, directory requests not listed, HEAD
+  identical headers with the body stripped by `encodeResponse`, 405 for
+  POST/PUT/DELETE/OPTIONS, Range 206 (middle, suffix, open, clamped), 416
+  and ignorable ranges, whole binary round-trip; embedded table equals the
+  disk walk, byte-identical encodings for every file plus a range, root
+  normalization, empty source, `not compiles` for a missing directory) and
+  `tests/t_neel.nim` (3 cases: `startApp` on a thread with a fake launcher
+  that publishes the port; run 1 (disk assets) checks launches, the shim
+  with/without/with-bogus `Referer`, token shape, `WINDOW_ID`, `EXPOSED`
+  order, index/nested/404/escape/405/HEAD/Range through the server, the
+  no-browser page without the token, 403 for wrong/empty token, wrong
+  window, plain GET `/ws`, 101, `add`, `whichWindow`, `askJs` round trip
+  with `ret` and with a forwarded `TypeError`, `NeelUnknownProcError`,
+  `NeelArgumentError`, a dropped malformed message, `quitApp` -> 1001 close
+  -> `erQuit`, profile dir removed; run 2 (embedded assets) checks a fresh
+  token, embedded index/css/404, a call, and the grace-period exit
+  `erLastWindowClosed` within bounds; the third case checks the re-export
+  list with `compiles` / `not compiles`). Every wait and read is bounded
+  (3 s). `nimble test` (13 files) passes; `nim c src/neel.nim`, `nim c
+  -d:release src/neel.nim`, and the release build of `t_neel.nim` were
+  run; a throwaway app under `/tmp` confirmed the default `embedAssets =
+  defined(release)` embeds `web/` only in release.
+
 - `src/neel.nim`:
   - Public `startApp` signature (web directory, `embedAssets`, port, worker
     pool size, call timeout, grace period, browsers, fallback, size, position,
