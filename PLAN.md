@@ -915,6 +915,156 @@ Notes for later tasks:
   diagnostic.
 
 #### Task 9: `js` proxy
+**Status:** done
+
+Deviations: `wait` is one proc with a defaulted parameter (`wait(p,
+timeoutMs = UseDefaultTimeout)`) rather than two overloads; both call forms
+work. Arguments are converted with `expose.convertResult` (`std/jsonutils`
+`toJson`, enums as names), so `js.nim` imports `expose.nim` (not in the
+dependency sketch; no cycle). Gotcha found: the module `neel/js` and the
+global `js` share a name and a module name wins, so after a plain `import
+neel/js` the expression `js.foo(1)` is module access and fails with
+"undeclared identifier: 'foo'"; the fix is an import alias (`import neel/js
+as jsmod`) and `neel.nim` must re-export it the same way (details below).
+The planned file name was kept; renaming the module (e.g. `jsproxy.nim`)
+would remove the gotcha and is flagged for review.
+
+Notes for later tasks:
+- Types (`neel/js.nim`): `JsProxy = object(windowId: int)`, `JsWaitProxy =
+  object(windowId, timeoutMs: int)`; plain ints, no refs, so both are usable
+  from `{.gcsafe.}` code and `Task`-isolatable. Sentinels: `CurrentWindow =
+  0` (`windowId` meaning "this thread's current window"), `NoWindow = 0`
+  (`currentWindowId()` when none is set), `UseDefaultTimeout = 0`
+  (`timeoutMs` meaning the bridge's default). Window ids are therefore
+  positive integers (Task 12 must never issue 0). `DefaultCallTimeoutMs =
+  10_000`. `NeelNoWindowError` (`object of CatchableError`) lives here.
+- Globals and constructors: `const js* = JsProxy(windowId: CurrentWindow)`;
+  `initJsProxy(windowId): JsProxy` for an explicit window; `wait(p: JsProxy;
+  timeoutMs = UseDefaultTimeout): JsWaitProxy` (`js.wait`, `js.wait(500)`;
+  a non-positive `timeoutMs` means the default).
+- Dot operators: `macro `.()`(p: JsProxy; name: untyped; args:
+  varargs[untyped])` expands to `jsSend(p, "name", @[convertResult(a),
+  ...])` (`newSeq[JsonNode]()` for no arguments), returns `void`; the
+  `JsWaitProxy` overload expands to `jsCallWait(...)` returning `JsonNode`.
+  No logic in the macros. Accepted argument types = everything
+  `convertResult` handles (the Task 8 list: scalars, `string`, enums as
+  names, `seq`/`array`/`set`, tuples, objects, `ref`, `distinct`, `Option`,
+  `Table[string, V]`, `HashSet`, `JsonNode` passed through); any expression,
+  not only literals; `nil` has no type, use `newJNull()`. `js.foo` without
+  parentheses is the compiler's "undeclared field" error. Method-call syntax
+  wins over dot operators: `js.echo("x")` calls Nim's `echo`, `js.repr()`
+  calls `repr`; `js.len()`, `js.add()`, `js.close()`, `js.open()` etc.
+  reach the operator. Escape hatch for collisions and dynamic names:
+  `jsSend(p: JsProxy; name: string; args: seq[JsonNode])` and
+  `jsCallWait(p: JsWaitProxy; name: string; args: seq[JsonNode]): JsonNode`,
+  both `{.gcsafe.}`, both public.
+- Semantics: `jsSend` = `sendText(conn, encode(callMsg(name, args)))`, no
+  table; a `false` from the send proc (connection closing) is swallowed,
+  fire-and-forget never reports. `jsCallWait` = `id = ids[].nextId();
+  pending.register(conn, id); if not sendText(...): cancel + raise
+  NeelDisconnectedError; pending.wait(conn, id, timeoutMs)` with `timeoutMs`
+  = the proxy's or the bridge default. Exceptions: `NeelNoWindowError`
+  (bridge not initialised; `CurrentWindow` with no thread-local set; window
+  id the resolver does not know / not connected), then the `PendingTable`
+  set (`NeelRemoteError` with the JS `kind`, `NeelDisconnectedError`,
+  `NeelTimeoutError`).
+- Current window: `var currentWindowVar {.threadvar.}: int`; API
+  `currentWindowId(): int` (`NoWindow` if unset), `setCurrentWindow(id)`,
+  `clearCurrentWindow()`, `template withCurrentWindow(id; body)` (saves the
+  previous value, sets, runs, restores in `finally`; nests). All
+  `{.gcsafe.}`. Nothing is inherited by new threads.
+- Bridge (injection seam): `initJsBridge(sendText: SendProc; resolveWindow:
+  WindowResolver; pending: PendingTable; defaultTimeoutMs =
+  DefaultCallTimeoutMs)` and `resetJsBridge()`. `SendProc = proc(conn:
+  ConnId; text: string): bool {.gcsafe.}`; `WindowResolver = proc(windowId:
+  int): WindowRoute {.gcsafe.}` with `WindowRoute = object(conn: ConnId,
+  ids: ptr IdAllocator)` where `ids == nil` means "unknown or not
+  connected" (`CurrentWindow` is resolved to a real id before the resolver
+  is called, so it never sees 0). The record is a module global written
+  once on the main thread (`doAssert`s on nil procs / table and a
+  non-positive timeout) and read through one `{.cast(gcsafe).}` accessor;
+  readers call through the `ref` fields without copying them. Calling
+  `initJsBridge` again is allowed only after `shutdown` (no worker running);
+  `resetJsBridge` makes every `js.*` raise `NeelNoWindowError` again.
+- Importing: use `import neel/js as jsmod` everywhere inside the package and
+  in tests (the symbols stay unqualified). A plain `import neel/js` shadows
+  the global with the module name and `js.foo(1)` fails with "undeclared
+  identifier: 'foo'" (verified; `let` vs `const` makes no difference).
+- For Task 10 (`neel.js`): a Nim -> JS call arrives as exactly
+  `{"t":"call","name":"foo","args":[1,"x",true]}` (fire-and-forget, no `id`
+  key at all) or `{"t":"call","id":N,"name":"foo","args":[...]}` with a
+  positive `N`; `args` is always an array (`[]` for no arguments) and its
+  elements follow the Task 8 result encoding (enums as name strings,
+  objects as JSON objects, `Option` none as `null`). Reply with
+  `{"t":"ret","id":N,"value":V}` / `{"t":"err","id":N,"error":{"kind":...,
+  "msg":...}}` only when `id` is present; the `err.error.kind` string
+  becomes `NeelRemoteError.kind` on the Nim side and is forwarded verbatim if
+  it crosses back to JS via an exposed proc's failure. Ids on the two
+  directions are independent counters (Nim's starts at 1 per connection).
+- For Task 12 (windows): `Window.js* = initJsProxy(w.id)` at creation; the
+  id must be a positive `int` (it also goes into `__NEEL_WINDOW_ID__`).
+  Keep one `IdAllocator` per window/connection record (never reset while
+  the connection lives; drop it with the record) and implement
+  `WindowResolver` over the window table: `proc(windowId: int): WindowRoute
+  {.gcsafe.}` = under the window-table lock, look up the window; if it has a
+  live connection return `WindowRoute(conn: w.conn, ids: addr w.ids)`, else
+  `WindowRoute()`. The `ptr IdAllocator` must stay valid while a
+  `jsCallWait` may be using it: allocate window records in shared memory or
+  keep them in a container that does not move them (`ptr`/`ref` records,
+  not value entries of a growing `Table`), and free a record only after
+  `onClose` has run. `currentWindow()` is `currentWindowId()` mapped
+  through the window table (`NoWindow` -> none / error). A `jsSend` after
+  the connection is gone is silently dropped; a `jsCallWait` raises
+  `NeelDisconnectedError` either from the failed send or from `disconnect`.
+- For Task 13 (`startApp`): order is `tbl = newPendingTable()`; `srv =
+  newServer(...)`; `initJsBridge(proc(conn, text) = srv.send(conn, text)`
+  -- or a plain proc over the module-global server --, `resolver`, `tbl`,
+  `callTimeoutMs)`; `srv.listen(port)`; launch the browser. The send proc
+  may capture the `Server` (the bridge is not stored by the server, so the
+  Task 6 cycle warning does not apply), but a plain proc reading the module
+  global is simplest. `onMessage(conn, text)`: `let m = decode(text)`
+  (catch `NeelProtocolError`); `case m.kind of msgCall: var reply:
+  Option[Msg]; withCurrentWindow(windowIdOf(conn)): reply = handleCall(m,
+  neelDispatch); if reply.isSome: discard srv.send(conn,
+  encode(reply.get))` (use `NoWindow` if the connection has no window, so
+  `js.*` inside raises `NeelNoWindowError` cleanly); `of msgRet, msgErr:
+  discard tbl.complete(conn, m.id, m)`. `onClose(conn)`: mark the window
+  disconnected (so the resolver returns `ids == nil`), then `discard
+  tbl.disconnect(conn)`; a worker blocked in `jsCallWait` on that
+  connection then raises `NeelDisconnectedError`, `handleCall` turns it
+  into an `err`, and the `send` of that reply simply returns `false`.
+  Because `onClose` may overlap a running handler, a `jsCallWait` that
+  starts after the mark sees `NeelNoWindowError` (resolver) or
+  `NeelDisconnectedError` (send returns `false`); both are fine. After
+  `shutdown` (all `onClose` done): `resetJsBridge()`, then drop the table.
+  `src/neel.nim` must `import neel/js as jsmod; export jsmod` (not `import
+  neel/js; export js`, which leaks the module name) so users get `js`,
+  `wait`, `jsSend`, `jsCallWait`, `JsProxy`, `JsWaitProxy`,
+  `NeelNoWindowError`, `currentWindowId`, and the sentinels. The
+  integration test in `tests/t_js.nim` is a working model of this wiring
+  (hooks as plain procs over a module global, `handleCall` bracketed by
+  `withCurrentWindow`, ret / err / timeout / disconnect paths).
+- Gotchas: `inMilliseconds` truncates, so a wait with a 50 ms deadline can
+  measure as 49 ms; timing assertions need a margin. The `.()` macro with
+  `varargs[untyped]` receives zero arguments as an empty node list, so the
+  empty-args case must be built explicitly (`@[]` has no type there).
+- Tests (`tests/t_js.nim`, 24 cases): exact wire text for `js.foo(1, "x",
+  true)` and `js.noArgs()`, object/seq/enum/float/JsonNode/null/expression
+  arguments compared with `convertResult`, blocking `js.wait.foo(1)` with a
+  cross-thread `ret`, `js.wait(50)` timeout bounds, per-connection id
+  sequence, `not compiles(js.foo)` and void-ness, proxy sizes; routing by
+  thread-local, explicit proxy vs thread-local, nested `withCurrentWindow`
+  restore (also on exception), `NeelNoWindowError` for no current window /
+  unknown window / uninitialised bridge, thread-local isolation across
+  threads; `.to(int)` on a `ret`, `err` -> `NeelRemoteError` kind/msg,
+  bridge default timeout, failed send -> `NeelDisconnectedError` with
+  `pendingCount == 0`, `disconnect` during a wait; escape hatch for
+  `echo`/`repr`/`len` and dynamic names, `.to(Point)` chaining; one
+  integration test against the real server (scripted client triggers an
+  "exposed proc" that does `js.wait.foo(1)`; ret, forwarded `TypeError`,
+  `NeelTimeoutError`, and abrupt close -> `NeelDisconnectedError` are all
+  checked; shutdown in `finally`). Every wait and read is bounded (3 s).
+
 Revised by Task 2 spike (b): the original `js.foo(...).wait()` design is not
 implementable (see "Spike results"). The wait modifier moves onto the proxy.
 
