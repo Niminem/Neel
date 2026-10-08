@@ -1,4 +1,4 @@
-## t_js.nim - the `js` proxy: dot-operator expansion, routing, waits, the
+## t_jsproxy.nim - the `js` proxy: dot-operator expansion, routing, waits, the
 ## bridge seam, and one round trip through the real server.
 ##
 ## Unit tests inject a recording send proc and a fake two-window resolver via
@@ -7,8 +7,7 @@
 
 import std/[unittest, json, locks, os, monotimes, times, typedthreads, net,
             nativesockets, strutils, options]
-import neel/js as jsmod   # a plain `import neel/js` would shadow the `js` global
-import neel/[protocol, server, websocket, http, expose]
+import neel/[jsproxy, protocol, server, websocket, http, expose]
 
 const
   IoTimeout = 3000

@@ -53,7 +53,7 @@ handled outside this plan.
 - Exposed procs must be top-level. They may return any `toJson`-able type or
   nothing. Default parameter values are supported. Generic procs are not.
 - `js` is a global proxy value exported by `neel`. Settled by Task 2: the
-  `{.experimental: "dotOperators".}` pragma is needed only in `js.nim`; the
+  `{.experimental: "dotOperators".}` pragma is needed only in `jsproxy.nim`; the
   user's module needs nothing.
 - Wrapper naming: `<procName>NeelSym`. Predictable rather than `genSym`'d so
   `startApp` can reference it and tests can target it.
@@ -67,7 +67,8 @@ handled outside this plan.
   - `src/neel/server.nim` - selectors IO loop, connection state machine
   - `src/neel/protocol.nim` - call/ret/err messages, pending-call table
   - `src/neel/expose.nim` - `expose` pragma, registry, dispatch generation
-  - `src/neel/js.nim` - `js` proxy, dot operators, `.wait`
+  - `src/neel/jsproxy.nim` - `js` proxy, dot operators, `.wait` (renamed from
+    `js.nim` in Task 9: a module named `js` shadows the `js` global)
   - `src/neel/frontend.nim` + `src/neel/neel.js` - browser-side shim
   - `src/neel/browser.nim` - `Browser` enum, spec table, discovery, launch
   - `src/neel/window.nim` - `Window` type, connection mapping, lifecycle
@@ -920,17 +921,17 @@ Notes for later tasks:
 Deviations: `wait` is one proc with a defaulted parameter (`wait(p,
 timeoutMs = UseDefaultTimeout)`) rather than two overloads; both call forms
 work. Arguments are converted with `expose.convertResult` (`std/jsonutils`
-`toJson`, enums as names), so `js.nim` imports `expose.nim` (not in the
-dependency sketch; no cycle). Gotcha found: the module `neel/js` and the
-global `js` share a name and a module name wins, so after a plain `import
-neel/js` the expression `js.foo(1)` is module access and fails with
-"undeclared identifier: 'foo'"; the fix is an import alias (`import neel/js
-as jsmod`) and `neel.nim` must re-export it the same way (details below).
-The planned file name was kept; renaming the module (e.g. `jsproxy.nim`)
-would remove the gotcha and is flagged for review.
+`toJson`, enums as names), so `jsproxy.nim` imports `expose.nim` (not in the
+dependency sketch; no cycle). The module is `src/neel/jsproxy.nim`, not the
+planned `js.nim` (approved in review): a module name wins over a symbol of
+the same name, so with a module called `js` every `import neel/js` turned
+`js.foo(1)` into module-qualified access ("undeclared identifier: 'foo'";
+verified with `let` and `const`, and a plain `import neel/js; export js` in
+`neel.nim` leaked the module name to the user as well). The test file is
+`tests/t_jsproxy.nim` accordingly.
 
 Notes for later tasks:
-- Types (`neel/js.nim`): `JsProxy = object(windowId: int)`, `JsWaitProxy =
+- Types (`neel/jsproxy.nim`): `JsProxy = object(windowId: int)`, `JsWaitProxy =
   object(windowId, timeoutMs: int)`; plain ints, no refs, so both are usable
   from `{.gcsafe.}` code and `Task`-isolatable. Sentinels: `CurrentWindow =
   0` (`windowId` meaning "this thread's current window"), `NoWindow = 0`
@@ -986,10 +987,9 @@ Notes for later tasks:
   readers call through the `ref` fields without copying them. Calling
   `initJsBridge` again is allowed only after `shutdown` (no worker running);
   `resetJsBridge` makes every `js.*` raise `NeelNoWindowError` again.
-- Importing: use `import neel/js as jsmod` everywhere inside the package and
-  in tests (the symbols stay unqualified). A plain `import neel/js` shadows
-  the global with the module name and `js.foo(1)` fails with "undeclared
-  identifier: 'foo'" (verified; `let` vs `const` makes no difference).
+- Importing: `import neel/jsproxy` (plain); nothing to alias. Do not add a
+  module, type, or proc named `js` anywhere in the package: it would shadow
+  the global.
 - For Task 10 (`neel.js`): a Nim -> JS call arrives as exactly
   `{"t":"call","name":"foo","args":[1,"x",true]}` (fire-and-forget, no `id`
   key at all) or `{"t":"call","id":N,"name":"foo","args":[...]}` with a
@@ -1037,18 +1037,17 @@ Notes for later tasks:
   starts after the mark sees `NeelNoWindowError` (resolver) or
   `NeelDisconnectedError` (send returns `false`); both are fine. After
   `shutdown` (all `onClose` done): `resetJsBridge()`, then drop the table.
-  `src/neel.nim` must `import neel/js as jsmod; export jsmod` (not `import
-  neel/js; export js`, which leaks the module name) so users get `js`,
-  `wait`, `jsSend`, `jsCallWait`, `JsProxy`, `JsWaitProxy`,
+  `src/neel.nim` does `import neel/jsproxy; export jsproxy` so users get
+  `js`, `wait`, `jsSend`, `jsCallWait`, `JsProxy`, `JsWaitProxy`,
   `NeelNoWindowError`, `currentWindowId`, and the sentinels. The
-  integration test in `tests/t_js.nim` is a working model of this wiring
+  integration test in `tests/t_jsproxy.nim` is a working model of this wiring
   (hooks as plain procs over a module global, `handleCall` bracketed by
   `withCurrentWindow`, ret / err / timeout / disconnect paths).
 - Gotchas: `inMilliseconds` truncates, so a wait with a 50 ms deadline can
   measure as 49 ms; timing assertions need a margin. The `.()` macro with
   `varargs[untyped]` receives zero arguments as an empty node list, so the
   empty-args case must be built explicitly (`@[]` has no type there).
-- Tests (`tests/t_js.nim`, 24 cases): exact wire text for `js.foo(1, "x",
+- Tests (`tests/t_jsproxy.nim`, 24 cases): exact wire text for `js.foo(1, "x",
   true)` and `js.noArgs()`, object/seq/enum/float/JsonNode/null/expression
   arguments compared with `convertResult`, blocking `js.wait.foo(1)` with a
   cross-thread `ret`, `js.wait(50)` timeout bounds, per-connection id
@@ -1068,7 +1067,7 @@ Notes for later tasks:
 Revised by Task 2 spike (b): the original `js.foo(...).wait()` design is not
 implementable (see "Spike results"). The wait modifier moves onto the proxy.
 
-- `neel/js.nim`: `JsProxy`, `JsWaitProxy`, and dot operators
+- `neel/jsproxy.nim` (planned as `js.nim`): `JsProxy`, `JsWaitProxy`, and dot operators
   (`{.experimental: "dotOperators".}` only in this module; the user's module
   needs nothing).
   - `js.foo(args...)` sends a fire-and-forget `call` immediately and returns

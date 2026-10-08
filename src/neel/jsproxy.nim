@@ -1,4 +1,4 @@
-## js.nim - the `js` proxy: calling browser-side functions from Nim.
+## jsproxy.nim - the `js` proxy: calling browser-side functions from Nim.
 ##
 ## `js.foo(a, b)` sends a fire-and-forget `call` to the current window and
 ## returns nothing. `js.wait.foo(a, b)` and `js.wait(timeoutMs).foo(a, b)`
@@ -51,13 +51,11 @@
 ## send proc and a fake resolver. `resetJsBridge()` clears it after
 ## `shutdown`; `initJsBridge` may then be called again.
 ##
-## Importing: this module and its global share the name `js`, and a module
-## name wins over a symbol, so after a plain `import neel/js` the expression
-## `js.foo(1)` is read as module-qualified access and fails with "undeclared
-## identifier: 'foo'". Import it under an alias: `import neel/js as jsmod`
-## (the symbols, including `js`, are still unqualified). `neel.nim` must
-## re-export it the same way (`import neel/js as jsmod; export jsmod`); a
-## plain `import neel/js; export js` leaks the module name to the user.
+## Naming: the module is `jsproxy`, not `js`, on purpose. A module name wins
+## over a symbol of the same name, so a module called `js` would make
+## `js.foo(1)` module-qualified access ("undeclared identifier: 'foo'") in
+## every file that imports it. `neel.nim` re-exports with `import
+## neel/jsproxy; export jsproxy`.
 ##
 ## Threading: `jsSend`, `jsCallWait`, and the current-window procs are
 ## `{.gcsafe.}` and may run on any thread. The bridge record is a module
