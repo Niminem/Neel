@@ -6,8 +6,11 @@ alwaysApply: false
 
 # Tests
 
-- One file per module under test: `tests/test_<module>.nim` (`test_sha1.nim`,
-  `test_websocket.nim`, ...). `nimble test` runs all of them.
+- One file per module under test: `tests/t_<module>.nim` (`t_sha1.nim`,
+  `t_websocket.nim`, ...). Nimble's built-in `nimble test` runs every
+  `tests/t*.nim`, so never put a non-test helper module in `tests/` with a
+  name starting with `t`. Compiler flags for tests go in `tests/config.nims`,
+  not in a custom nimble task.
 - Use `std/unittest`. Group with `suite` per module and `test` per behavior.
 - Tests must not depend on a browser being installed or on network access beyond
   `127.0.0.1`. Browser launch logic is tested by injecting discovery results, not by
