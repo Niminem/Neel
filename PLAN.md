@@ -1282,6 +1282,196 @@ Notes for later tasks:
 ### Phase 3 - Windows and browsers
 
 #### Task 11: Browser discovery and launch
+**Status:** done
+
+Deviations: discovery takes a `hostOs` parameter (default: the compile
+target) so the macOS, Windows, and Linux search rules and the three opener
+commands are all unit-tested on any host; the probes are a `Discovery` record
+of five procs. A `browserPath` override that does not exist raises
+`NeelBrowserError` rather than falling through to discovery (an explicit
+misconfiguration should be loud). A `launchWithFallback` convenience that
+combines search result, `fallback`, and the error page was added so Task 13
+does not re-derive the four cases. The reserved members carry a display name
+(for the "reserved, not supported" line) but are otherwise empty. The
+no-browser URL carries the probed names in its query so the page can render
+without server state. Chromium has no Windows `App Paths` key on purpose.
+All real launches ran as throwaway programs under `/tmp/neelb/` (deleted).
+
+Notes for later tasks:
+- Types (`neel/browser.nim`): `Browser = enum Chrome, Chromium, Edge, Brave,
+  Opera, Vivaldi, Default`; `HostOs = enum hoMacos, hoWindows, hoLinux` with
+  `CurrentHostOs` (BSDs use the Linux rules); `BrowserSpec` fields `name`,
+  `supported`, `supportsAppMode`, `macAppPaths` (`~/` expanded with `HOME`),
+  `macBundleIds` + `macExecutable` (mdfind fallback), `windowsRelativePaths`
+  (under `%ProgramFiles%`, `%ProgramFiles(x86)%`, `%LocalAppData%`, in that
+  order), `windowsAppPathsKeys` (HKCU then HKLM
+  `SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\<exe>`),
+  `linuxExecutables` (`findExe`); `const BrowserSpecs: array[Browser,
+  BrowserSpec]` with a `static:` consistency block (populated entries have
+  candidates on every OS and app mode; `Default` and reserved members have
+  none). Helpers `isSupported(b)`, `isReserved(b)` (`Edge`, `Brave`,
+  `Opera`, `Vivaldi`), `displayName(b)`, `hasCandidates(spec, os)`.
+- Discovery: `Discovery = object(fileExists, findExe, getEnv, mdfind,
+  registryAppPath)` - five `{.gcsafe.}` procs; `systemDiscovery()` is the
+  real one (`mdfind` via `execProcess` with an args array on macOS, empty
+  elsewhere; `std/registry.getUnicodeValue` on Windows, empty elsewhere).
+  `probeBrowser(b, discovery, hostOs = CurrentHostOs): ProbeResult(browser,
+  candidates: seq[string], path)` records every location examined.
+  `findBrowser(preferences: seq[Browser]; browserPath = ""; discovery =
+  systemDiscovery(); hostOs = CurrentHostOs): BrowserSearch` with
+  `found: Option[FoundBrowser(browser, path, fromOverride)]`, `probed:
+  seq[ProbeResult]` (in order, including the one found), `skipped:
+  seq[Browser]` (reserved members). Walk: `Default` is always "found"
+  (`path == ""`) and stops the walk; reserved members are skipped; a
+  non-empty `browserPath` must exist (`NeelBrowserError` otherwise) and is
+  returned as-is with `browser` = first app-mode preference (or `Chrome`),
+  `fromOverride = true`, nothing probed. Empty list -> nothing found.
+  `searchedNames(s): seq[string]` (display names), `describeSearch(s):
+  seq[string]` (`Google Chrome: <candidate>, <candidate>, ...` plus
+  `Microsoft Edge: reserved, not supported in this release`). Both
+  `findBrowser` and the launch procs are `{.gcsafe.}` (`openWindow` from an
+  exposed proc runs on a worker).
+- Launch: `buildLaunchArgs(url, userDataDir; size = none(WindowSize);
+  position = none(WindowPosition); extraFlags: openArray[string] = []):
+  seq[string]` (pure; also an overload over `LaunchOptions(size, position,
+  extraFlags)`) returns exactly `["--app=<url>", "--user-data-dir=<dir>",
+  "--window-size=W,H"?, "--window-position=X,Y"?, "--disable-http-cache",
+  "--no-first-run", "--no-default-browser-check", extras...]`; one argv
+  element each, nothing quoted; `WindowSize = tuple[width, height: int]`
+  (non-positive -> `ValueError`), `WindowPosition = tuple[x, y: int]`
+  (negatives allowed). `launchBrowser(found: FoundBrowser; url, userDataDir;
+  opts = LaunchOptions()): BrowserHandle` = `startProcess(found.path, args,
+  options = {poParentStreams, poDaemon})` (the browser inherits our stdio: a
+  pipe nobody reads would eventually block Chromium's logging; expect its
+  stderr noise in the terminal); `OSError` -> `NeelBrowserError`.
+  `userDataDirFor(windowId; pid = getCurrentProcessId(); tempDir =
+  getTempDir())` = `<tempDir>/neel-<pid>-<windowId>`.
+- User-data-dir policy (decided, measured on this Mac with Chrome): **one
+  private dir per window** (`userDataDirFor(windowId)`). Measured: a second
+  `--app` launch with the *same* dir prints "Opening in existing browser
+  session.", opens the window inside the first instance, and the launcher
+  exits after ~210 ms with code 0, so its handle tracks nothing; with
+  distinct dirs every window is its own process that stays alive. Cost: each
+  window is a full browser instance (memory) and a fresh profile
+  (`--no-first-run` suppresses the welcome flow). Also measured: closing the
+  only app window (DevTools `/json/close`, equivalent to the user's close
+  button) leaves the macOS process *running* - "process alive" does not
+  mean "window open". `terminate()` (SIGTERM) exits in ~80-100 ms with code
+  0 and takes the helper processes along; `kill()` gives 137 in ~60 ms.
+- Handle (`BrowserHandle`, a `ref object`, not thread-safe - guard it with
+  the window-table lock): `kind: LaunchKind` (`lkAppWindow` | `lkDefaultBrowser`),
+  `browser`, `path`, `args`, `url`, `userDataDir` (`""` for the default
+  browser), private `process: Process`. Procs: `isRunning(h)` (`false` for
+  nil, default-browser, or closed handles), `pid(h)` (0 when none),
+  `exitCode(h)` (-1 while running / none), `terminate(h, graceMs =
+  TerminateGraceMs (2000)): bool` (SIGTERM, poll, SIGKILL after `graceMs`,
+  `true` when gone), `close(h)` (releases the OS handle, idempotent),
+  `removeUserDataDir(h)` (best effort, only when not running). What the
+  handle guarantees: for `lkAppWindow` with a per-window dir, the process
+  *is* the window's browser instance, so `terminate` closes the window and
+  `isRunning == false` means the browser is gone (crash or quit). It does
+  **not** guarantee that a live process has a window (macOS keeps the app
+  running after the last window closes). For `lkDefaultBrowser` nothing is
+  tracked: `isRunning` is always `false`, `terminate` is a no-op `true`.
+- Default browser: `defaultBrowserCommand(url, hostOs = CurrentHostOs):
+  OpenerCommand(command, args)` = `open <url>` (macOS), `xdg-open <url>`
+  (Linux/other POSIX), `rundll32.exe url.dll,FileProtocolHandler <url>`
+  (Windows); the URL is one argv element. `openDefaultBrowser(url):
+  BrowserHandle` runs it with `{poUsePath, poParentStreams, poDaemon}`,
+  polls up to 3 s for the opener to exit (`open` takes ~100 ms), raises
+  `NeelBrowserError` if it cannot start or exits non-zero (verified: `open`
+  of a missing file -> code 1 -> error), returns an `lkDefaultBrowser`
+  handle with no process.
+- Error page: `NoBrowserPath* = "/neel/no-browser"`, `NoBrowserQueryParam* =
+  "searched"`; `noBrowserPageUrl(baseUrl, search)` =
+  `<baseUrl>/neel/no-browser?searched=Chrome,Chromium` (enum names, comma
+  separated, query omitted when nothing was probed; trailing slash on
+  `baseUrl` tolerated). `NeelBrowserError = object of CatchableError` with
+  `searched*: seq[string]` (display names; empty for the override and
+  `startProcess` cases).
+- `launchWithFallback(search, url, errorPageUrl, fallback, userDataDir, opts
+  = LaunchOptions()): BrowserHandle`: found app-mode -> `launchBrowser`;
+  found `Default` -> `openDefaultBrowser(url)`; none + `fallback` ->
+  `openDefaultBrowser(url)`; none + not `fallback` -> best-effort
+  `openDefaultBrowser(errorPageUrl)` then raises `NeelBrowserError` listing
+  the searched names (the opener failure, if any, is appended to the
+  message).
+- For Task 12 (windows): create the window record (positive id, Task 9),
+  compute `userDataDirFor(id)`, launch, and store the `BrowserHandle` in the
+  record. Poll liveness with `h.isRunning` under the window lock if you want
+  to detect a crashed/quit browser early, but drive the lifecycle from the
+  WebSocket connection count (Task 6 notes) because a live process may have
+  no window (macOS). `closeWindow`: `close(conn, CloseNormal)` so the shim
+  does not reconnect, then `h.terminate()` (the browser exits in ~100 ms and
+  the window disappears), `h.close()`, `h.removeUserDataDir()` once
+  `isRunning` is `false`; `quit()`/shutdown: the same for every window. A
+  handle whose process exited immediately with code 0 after launch (within
+  ~250 ms) means Chrome handed the window to an already-running instance -
+  this cannot happen with `userDataDirFor` unless the user passes the same
+  `--user-data-dir` in `extraFlags` (the later flag wins in Chromium); treat
+  such a window as untrackable (connection count only, no terminate). The
+  window id should be carried in the launch URL's query: launch
+  `http://127.0.0.1:<port><path>?window=<id>` (reuse `WindowQueryParam`
+  from `frontend.nim` so the page URL, `/neel.js`, and `/ws` share one
+  name). The page then loads `<script src="/neel.js">`; that request's
+  `Referer` is the page URL (same-origin script loads carry the full URL
+  under Chromium's default referrer policy), so Task 13 can render
+  `__NEEL_WINDOW_ID__` from `Referer`'s `window=` and fall back to the
+  single not-yet-served window when the header is absent. A refresh keeps
+  the query, so the same id is presented again (Task 10). Gotcha:
+  `osproc.waitForExit(p, timeout)` on
+  macOS/BSD **SIGKILLs** the child when the timeout expires; never use it to
+  wait politely - `terminate` polls `running()` instead.
+- For Task 13 (`startApp`): parameters `browsers: seq[Browser]` (suggested
+  default `@[Chrome, Chromium]` - with `Default` in the list "nothing found"
+  can never happen and `fallback` is moot; `@[Default]` forces a tab),
+  `fallback = true`, `browserPath = ""`, `size`, `position`, `extraFlags`.
+  Order: `srv.listen(port)` -> `let base = "http://127.0.0.1:" & $srv.port`
+  -> `let search = findBrowser(browsers, browserPath)` (may raise
+  `NeelBrowserError` for a bad override; do it before `listen` if you prefer
+  failing fast) -> create window 1 -> `launchWithFallback(search, base &
+  "/?window=1", noBrowserPageUrl(base, search), fallback, userDataDirFor(1),
+  LaunchOptions(size, position, extraFlags))`. Serve `GET /neel/no-browser`
+  (`NoBrowserPath`) as `text/html` without needing the token: list
+  `search.describeSearch` (one line per probed browser with the locations
+  tried, plus the reserved members), say that `fallback = false` was set,
+  and how to fix it (`browserPath`, install Chrome/Chromium, or
+  `fallback = true`); the `searched` query names are redundant with the
+  retained `BrowserSearch` and may be ignored. When `launchWithFallback`
+  raises in the `fallback = false` case the error page has already been
+  opened in the default browser, so keep the server up for the grace period
+  (treat it like a window that never connected) before shutting down,
+  otherwise the page 404s/refuses. `src/neel.nim` should re-export
+  `Browser`, `NeelBrowserError`, and `LaunchOptions`/`WindowSize`/
+  `WindowPosition` if they appear in the `startApp` signature.
+- Tests (`tests/t_browser.nim`, 47 cases): spec-table consistency (supported
+  / reserved / `Default`, per-OS candidates, names, `supportsAppMode`,
+  `CurrentHostOs`); `probeBrowser` on all three OS rule sets with a canned
+  `Discovery` that logs every question (macOS fixed path, `~` expansion with
+  and without `HOME`, mdfind fallback, full candidate list when missing;
+  Windows root order, trailing backslash, registry last and
+  existence-checked, Chromium never consults the registry, unset roots;
+  Linux `findExe` order), usage errors for `Default`/reserved/incomplete
+  `Discovery`; `findBrowser` resolution (first found, second found, nothing,
+  empty list, `Default` first and mid-list, reserved skipped and recorded,
+  override exists / missing / with no app-mode preference); `describeSearch`
+  and `noBrowserPageUrl` formatting (round-trip of the enum names through
+  `parseEnum`); exact argv for every `buildLaunchArgs` shape, one-argument
+  URL with no quoting, extras verbatim and in order, `LaunchOptions`
+  equivalence, `ValueError`/`AssertionDefect` cases, `userDataDirFor`
+  policy; the three opener commands; nil / default-browser handle queries;
+  `NeelBrowserError` shape. Nothing launches. Manual verification on this
+  Mac (throwaway `/tmp/neelb/real.nim`, deleted): `systemDiscovery` found
+  Chrome at `/Applications/...` and listed the Chromium locations plus the
+  mdfind query; `launchBrowser` opened a 500x320 app window at (80,80) with
+  the exact argv above; same-dir second launch exited with 0 within 1.5 s;
+  `terminate` returned `true` in 79 ms with exit 0; `removeUserDataDir`
+  removed the profile; `openDefaultBrowser` of a missing file raised with
+  "exited with code 1" and of a real page opened one tab; `launchWithFallback`
+  with nothing found and `fallback = false` raised with `searched =
+  @["Chromium"]`. Also compiled with `--os:windows` and `--os:linux
+  --compileOnly` to check the `std/registry` and opener branches.
+
 - `neel/browser.nim`:
   - `Browser` enum (`Chrome`, `Chromium`, `Edge`, `Brave`, `Opera`, `Vivaldi`,
     `Default`) and `BrowserSpec` table (macOS bundle paths + `mdfind`
