@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Neel round trip - window 2</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/neel.js"></script>
+  <script src="/second.js" defer></script>
+</head>
+<body>
+  <h1>Second window <small>window <span id="window-id">?</span></small></h1>
+  <p>
+    This page registered <code>ask</code> with <code>neel.expose</code>. When
+    window 1 presses <em>neel.askSecond(id)</em>, Nim calls it here with
+    <code>window(id).get.js.wait(5000).ask(...)</code>; it shows a prompt and
+    returns what you type. Cancel throws, and the error name travels back to
+    window 1.
+  </p>
+  <h2>Questions received</h2>
+  <ul id="log"></ul>
+</body>
+</html>

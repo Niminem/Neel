@@ -19,9 +19,12 @@ tests/t_*
 !tests/t_*.nim
 /bin/
 
-# Compiled example binaries (sources live next to them)
-examples/*/filepicker
-examples/*/*.exe
+# Compiled example binaries: examples/<name>/<name> (debug and release share
+# the name) and *.exe. Only each example's .nim file and web/ folder are
+# tracked.
+examples/*/*
+!examples/*/*.nim
+!examples/*/web/
 
 # Misc
 *.txt

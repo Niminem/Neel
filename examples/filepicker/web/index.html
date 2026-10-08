@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Neel file picker</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/neel.js"></script>
+  <script src="/main.js" defer></script>
+</head>
+<body>
+  <h1>File picker</h1>
+  <p>
+    Enter a directory (relative to your home directory, or absolute) and Nim
+    picks a random entry from it.
+  </p>
+  <form id="form">
+    <input id="directory" type="text" value="Desktop" autocomplete="off" spellcheck="false">
+    <button id="pick" type="submit">Pick a random entry</button>
+  </form>
+  <p id="result" class="result"></p>
+  <p id="error" class="error"></p>
+</body>
+</html>

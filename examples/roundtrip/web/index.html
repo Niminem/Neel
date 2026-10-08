@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Neel round trip - window 1</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/neel.js"></script>
+  <script src="/main.js" defer></script>
+</head>
+<body>
+  <h1>Round trip <small>window <span id="window-id">?</span></small></h1>
+
+  <section>
+    <h2>JS → Nim</h2>
+    <p>
+      <button id="sum">neel.sum([1, 2, 3, 4, 5])</button>
+      <output id="sum-result"></output>
+    </p>
+  </section>
+
+  <section>
+    <h2>Nim → JS → Nim</h2>
+    <p>
+      Nim calls the async <code>answer</code> function this page registered
+      with <code>neel.expose</code>, waits for it, and returns the result.
+    </p>
+    <p>
+      <input id="answer-text" type="text" value="forty-two" autocomplete="off">
+      <button id="ask-page">neel.askPage("...")</button>
+      <output id="ask-page-result"></output>
+    </p>
+  </section>
+
+  <section>
+    <h2>Second window</h2>
+    <p>
+      <button id="open-second">neel.openSecond()</button>
+      <output id="open-second-result"></output>
+    </p>
+    <p>
+      <button id="ask-second">neel.askSecond(id)</button>
+      <button id="close-second">neel.closeSecond(id)</button>
+      <output id="ask-second-result"></output>
+    </p>
+    <p class="hint">
+      Try: answer the prompt (a value comes back); wait 5 s without answering
+      (<code>NeelTimeoutError</code>); press Cancel (<code>PromptCancelled</code>);
+      close window 2 while the prompt is up (<code>NeelDisconnectedError</code>);
+      ask again after closing it (<code>NeelNoWindowError</code>).
+    </p>
+  </section>
+
+  <section>
+    <h2>windows()</h2>
+    <p><button id="list-windows">neel.listWindows()</button></p>
+    <ul id="window-list"></ul>
+  </section>
+
+  <p id="error" class="error"></p>
+</body>
+</html>

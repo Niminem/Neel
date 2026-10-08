@@ -1983,6 +1983,242 @@ Notes for later tasks (Tasks 14 and 15):
 ### Phase 4 - Examples and documentation
 
 #### Task 14: Examples
+**Status:** done
+
+Deviations: the layout is `examples/<name>/<name>.nim` + `examples/<name>/web/`
+(lower-case directories; the Task 13 note said `app.nim`), and a third
+example, `stresstest`, was added as a manual test harness beyond the two the
+task listed. The 1.x `examples/FilePicker/` was removed with `git rm` before
+`examples/filepicker/` was created (the macOS file system is
+case-insensitive, so the two names are one directory). `filepicker` raises
+two small custom exception types (`MissingDirectoryError`,
+`EmptyDirectoryError`) so the page shows distinct `e.name`s. `roundtrip`
+passes `onWindowOpen` / `onWindowClose` hooks (terminal echo) but no
+browser arguments. `.gitignore` ignores `examples/*/*` except `*.nim` and
+`web/`, so every compiled example binary (debug and release share the name,
+plus `*.exe`) is ignored without listing names. No file under `src/` or
+`tests/` was changed; the throwaway wrappers lived in `/tmp/neel14/`
+(deleted). Browser verification used the IDE browser (Chromium) against
+throwaway copies of each example with a fake launcher and a fixed port (the
+Task 10 technique; see the checklist below for what was *not* verifiable
+that way: real Chrome launch, app-mode window size, OS-level window close).
+
+Notes for later tasks (Task 15):
+- The examples and what each demonstrates (for the README to link):
+  - `examples/filepicker/` - the hello world: one `{.expose.}` proc
+    (`filePicker(directory: string): string`), `await neel.filePicker(...)`
+    with `try`/`catch` showing `e.name` / `e.message`, a button disabled
+    while awaiting, `startApp()` with defaults. Structured errors for a
+    missing and an empty directory.
+  - `examples/roundtrip/` - return values both ways and two windows:
+    `neel.sum([...])` (JS -> Nim), `askPage` (Nim -> JS -> Nim through an
+    `async` function registered with `neel.expose`, so the thenable path),
+    `openSecond()` (`openWindow("/second.html").id`), `askSecond(id)`
+    (`window(id).get.js.wait(5000).ask(...)` into the second window, which
+    uses `prompt`), `closeSecond(id)` (`closeWindow`), `listWindows()`
+    (`windows()` + `isConnected`), hooks echoing to the terminal, and the
+    four error kinds the first page sees: a forwarded JS error name
+    (`PromptCancelled` via `NeelRemoteError`), `NeelTimeoutError`,
+    `NeelDisconnectedError` (window closed mid-wait), `NeelNoWindowError`.
+  - `examples/stresstest/` - a harness page with eight sections, each with
+    buttons and a `<pre>` log, plus an in-flight counter: types (object with
+    `seq`/`Option`/enum/`Table`/`float`/`bool` fields, defaults with 1/2/3
+    args, `JsonNode`, void), errors (every kind incl. `NeelArgumentError`
+    messages, `NeelUnknownProcError`, `NeelUnknownFunctionError`,
+    `NeelTimeoutError` at 300 ms, a JS `RangeError` forwarded), concurrency
+    (500 x 50 ms `slowAdd`, 1000 `.send()` pings, a re-entrant
+    `js.wait.callBackIntoNim()` whose JS awaits `neel.add`), payloads (2 MB
+    string, 100k ints, depth 50), a push from a plain `std/typedthreads`
+    thread through `win.js.progress(i)` with a stop flag, windows (`openTab`,
+    `broadcast` via `windows()` + `win.js`, `closeById`, `whoAmI`, hook
+    events pushed into every page, a pending `js.wait` whose target is
+    closed), assets (SVG `<img>`, `Range` 206 on `blob.bin`, 404,
+    `/neel/no-browser`), lifecycle (`exitApp()` -> `quitApp()`,
+    `neel.close()`), and a numbered list of manual checks in the page.
+    `startApp(size = some((1100, 800)), gracePeriodMs = 3000, ...)` and the
+    `ExitReason` is printed.
+- Build / run (any working directory; `nimble.paths` / `config.nims` at the
+  repo root put `src/` on the path - in a fresh clone run `nimble setup` or
+  `nimble install` first, or pass `--path:src`):
+  - debug (disk assets, 3 s grace): `nim c -r examples/filepicker/filepicker.nim`,
+    `nim c -r examples/roundtrip/roundtrip.nim`,
+    `nim c -r examples/stresstest/stresstest.nim`
+  - release (embedded assets, 10 s grace except stresstest's 3 s):
+    `nim c -d:release examples/<name>/<name>.nim && ./examples/<name>/<name>`
+    (the binary can be moved anywhere; `cd examples/<name> && nim c ...`
+    works too). All six debug/release x root/in-dir combinations were
+    compiled; every `web/` file (including all 4096 bytes of `blob.bin`)
+    was found in the release binaries and in none of the debug ones.
+- API friction met while writing real apps (README caveats or follow-ups,
+  not fixed here):
+  1. `std/json` is not re-exported, so `js.wait.foo(...).getStr` /
+     `.getInt` / `.to(T)` and `%*` need `import std/json` in the app (the
+     Task 13 recipe omits it). Candidate follow-up: re-export `std/json`
+     from `neel.nim`, or document the import in the quick start.
+  2. `std/options` is not re-exported, yet `window(id)` and
+     `currentWindow()` return `Option[Window]`, so even an app that never
+     passes `size`/`position` needs `import std/options` for `.isSome` /
+     `.get`. Same remedy.
+  3. `window(id).get` on a closed window is an `UnpackDefect` - a Defect,
+     which is not caught by the dispatcher and takes the process down. The
+     README must show the `isNone` check (as both examples do) rather than
+     the bare `.get` chain; candidate follow-up: an accessor that raises
+     `NeelNoWindowError` (e.g. `requireWindow(id): Window`).
+  4. There is no ordering guarantee between messages on one connection
+     (handlers run concurrently): a `neel.pingCount()` issued right after
+     1000 `neel.ping.send()` can run before the last pings; the harness
+     polls. The README's threading section should say so explicitly.
+  5. `Table[string, V]` fields come back with keys in hash order, not
+     insertion order; JS code that compares must canonicalize.
+  6. Hooks must guard their `js` calls: `onWindowClose` fired from
+     `teardownWindows` sees `windows()` empty and the bridge reset, so a
+     `win.js.*` there raises `NeelNoWindowError` (and a hook that raises is
+     swallowed, but silently). The hook runs on the thread that observes the
+     event; `closeWindow` from an exposed proc fires it on that worker.
+  7. The page has no disconnect / reconnect event: `neel.ready` only tracks
+     the first open, so a status indicator cannot follow `neel.close()`, a
+     server 1001, or the retry loop except by observing rejected calls.
+     Candidate follow-up: `neel.onclose` / `neel.onreconnect` callbacks or a
+     `neel.connected` getter.
+  8. Re-using a `Thread[T]` variable needs `joinThread` after the previous
+     run finished (`running` is `false`), otherwise `createThread` leaks the
+     old thread; the stresstest shows the lock + `started` flag pattern.
+  9. `prompt()` inside a Nim -> JS target blocks that page's event loop, so
+     other Nim -> JS calls to the same window wait behind it (fine for a demo,
+     worth a sentence in the README).
+  10. `exitApp()` resolves with `null` before the shutdown close (1001)
+      arrives, so a page cannot await "the app has exited"; later calls
+      reject with `neel: connection is closed`.
+  11. Chromium may discard and reload a background tab; this looks like a
+      page refresh (same window id, `onWindowOpen` does not fire again).
+      Observed in the IDE browser during verification; harmless.
+  12. The `nimble.paths` file that makes `import neel` work for the
+      examples is git-ignored and machine-specific; a fresh clone needs
+      `nimble setup` (or an installed `neel`). The README's "run the
+      examples" section must say so.
+- Verified in the IDE browser (Chromium, fake launcher, fixed port,
+  `embedAssets = false` over each example's real `web/`): filepicker -
+  page loads for `?window=1`, a Desktop entry comes back, `EmptyDirectoryError`
+  and `MissingDirectoryError` arrive with their names and messages, the
+  button is disabled during the call and the error paragraph renders.
+  roundtrip - `sum` = 15, `askPage` returns the async answer, `openSecond`
+  -> 2 with the launch URL `/second.html?window=2` in the terminal and
+  `/neel.js` rendering window 2 from `Referer` while window 1 is open,
+  `listWindows()` shows connected / not connected, `askSecond` returns the
+  (stubbed) prompt value, a thrown `PromptCancelled` arrives on page 1 with
+  that name, `NeelTimeoutError` after 5045 ms, `NeelDisconnectedError:
+  connection N closed while waiting for id 1` when the second page called
+  `neel.close()` mid-wait, `NeelNoWindowError: window N is not open` after
+  retirement or `closeSecond`, terminal shows `window N opened/closed`.
+  stresstest - every automated check printed `[ok]`: types round trip (also
+  `maybe: null`, empty table/seq), defaults 1/2/3, `asJson`, `nothing() ->
+  null`, all seven error cases with the exact Task 8 / Task 10 messages, 500
+  `slowAdd` in 442 ms, 1000 pings counted after 53 ms, `reenter() -> 30`,
+  2 MB string (checksums equal) in 166 ms, 100k ints in 201 ms, depth 50,
+  progress thread stopped at 23/50 and a restart finished 50/50, SVG 200
+  `image/svg+xml` + `<img>` 96x96, Range 206 `bytes 100-199/4096` with the
+  right bytes, 404, no-browser page title, `whoAmI` = `neel.windowId`,
+  `openTab` -> window 2 at `/?tab=1&window=2`, `windows()`, broadcast
+  reached 2 windows and appeared in both logs, `closeById(2)` while
+  `askWindow(2)` was pending -> `[hook] window 2 closed` pushed into window
+  1's log and `NeelDisconnectedError` for the wait, `askWindow(2)` again ->
+  `NeelNoWindowError`, `neel.close()` in window 3 -> later calls reject,
+  `[hook] window 3 closed` after the 3 s grace, `exitApp()` -> `[hook]
+  window 1 closed` + `stresstest exited: erQuit`, process gone, no
+  `neel-<pid>-*` profile directories left. `nimble test` (13 files) and
+  `nim c src/neel.nim` pass unchanged.
+- Manual checklist for the user (real Chrome, from the repo root):
+  - filepicker (`nim c -r examples/filepicker/filepicker.nim`):
+    1. An app-mode Chrome window titled "Neel file picker" opens; the
+       terminal shows Chromium's own stderr noise and nothing from Neel.
+    2. Press "Pick a random entry" with `Desktop`: a file or folder name
+       appears in monospace below the form; the button is disabled for the
+       instant of the call.
+    3. Enter `nope/nowhere`: red `MissingDirectoryError: no such directory:
+       /Users/<you>/nope/nowhere`.
+    4. Create an empty directory (`mkdir ~/emptytest`), enter `emptytest`:
+       `EmptyDirectoryError: the directory is empty: ...`.
+    5. Press Cmd/Ctrl+R: the page reloads and step 2 still works.
+    6. Close the window: the process exits about 3 s later (10 s for the
+       release build) with no output.
+    7. Release: `nim c -d:release examples/filepicker/filepicker.nim`, move
+       the binary to `/tmp` and start it from there: identical behaviour
+       (assets are embedded).
+  - roundtrip (`nim c -r examples/roundtrip/roundtrip.nim`):
+    1. Window 1 opens; terminal prints `window 1 opened`; the heading says
+       "window 1".
+    2. `neel.sum([1, 2, 3, 4, 5])` -> `15`.
+    3. `neel.askPage("...")` -> `the page answered: what now? -> forty-two`
+       (edit the text box first to see your text come back) about 300 ms
+       after the press.
+    4. `neel.openSecond()` -> `opened window 2`; a second Chrome window
+       (own process, own profile) opens on `second.html` whose heading says
+       "window 2"; terminal prints `window 2 opened`.
+    5. `neel.listWindows()` -> `window 1 (connected)`, `window 2
+       (connected)`.
+    6. `neel.askSecond(id)`: window 2 shows a prompt and logs "asked: ...";
+       type `7` -> page 1 shows `7`; window 2 logs "answered: 7".
+    7. Again, press Cancel in the prompt -> page 1 shows red
+       `PromptCancelled: the prompt was cancelled in window 2`.
+    8. Again, wait without answering -> after 5 s page 1 shows
+       `NeelTimeoutError: no reply for id N on connection M within 5000 ms`;
+       the prompt in window 2 stays up; answering it later has no effect.
+    9. Again, and close window 2 with its close button while the prompt is
+       up -> page 1 shows `NeelDisconnectedError: connection M closed while
+       waiting for id N`; terminal prints `window 2 closed` about 3 s later
+       (retired after the grace period); `neel.listWindows()` then shows only
+       window 1.
+    10. `neel.askSecond(id)` once more -> `NeelNoWindowError: window 2 is
+        not open`.
+    11. `neel.openSecond()` again -> window 3; `neel.closeSecond(id)` ->
+        `closed window 3`, the window disappears at once, terminal prints
+        `window 3 closed` immediately (not after the grace period).
+    12. Close window 1: terminal prints `window 1 closed`, process exits 3 s
+        later.
+  - stresstest (`nim c -r examples/stresstest/stresstest.nim`):
+    1. A 1100x800 app window opens; header reads `window 1 (main),
+       connection: connected, calls in flight: 0`; terminal prints `[hook]
+       window 1 opened`.
+    2. Press every button in Types, Errors, Concurrency, Payloads: each log
+       line ends with `[ok]`; the 500 `slowAdd` line says `concurrent` and
+       well under 25000 ms; the in-flight counter rises to 500 and returns
+       to 0.
+    3. Push: `startProgress()`, watch the progress bar advance for 5 s and
+       the log end with `finished all 50 steps`; press start again, then
+       `stopProgress()` after a second: `stopped by the Stop button`.
+    4. Windows: `whoAmI()` -> `[ok]`; `openTab(n)` opens a second Chrome
+       window whose header says `window 2 (tab 1)`; terminal `[hook] window
+       2 opened`, and window 1's log shows `[hook] window 2 opened` too.
+       `broadcast('hello')` -> `reached 2 window(s)` and the message appears
+       in both windows' logs. `askWindow(id, 15000)` with `2`, then close
+       window 2's browser window within 10 s -> `NeelDisconnectedError` in
+       window 1's log; or let it run -> `answer from window 2` after 10 s.
+       `openTab(n)` again, `closeById(id)` with the new id -> the window
+       disappears, terminal `[hook] window 3 closed`, log `closeById(3) ->
+       null`.
+    5. Assets: the blue "N" logo renders (96x96); Range line says `206,
+       Content-Range: bytes 100-199/4096 ... [ok]`; `/does-not-exist.txt ->
+       404 [ok]`; `/neel/no-browser -> 200, <title> "Neel: no supported
+       browser found" [ok]`.
+    6. Manual checks in the page: refresh (same window id, status
+       `connected`, no second `opened` hook); `kill -9 <pid>` (pid from
+       `asJson()`), press `whoAmI()` at once -> after about 8 s `gave up
+       reconnecting after 5 attempts`, later presses `connection is closed`.
+    7. Restart; `neel.close() (this window)` -> log `whoAmI() after close:
+       NeelDisconnectedError ... [ok]`, status `closed by neel.close()`; the
+       window stays open but dead; terminal `[hook] window 1 closed` after 3
+       s and `stresstest exited: erLastWindowClosed`.
+    8. Restart; `exitApp() (quit)` -> log `exitApp() -> null`, terminal
+       `[hook] window 1 closed` and `stresstest exited: erQuit`, the Chrome
+       window closes, process ends.
+    9. Restart with `browsers = @[Default]` edited into `startApp` (or on a
+       machine without Chrome): the page opens as a tab in the default
+       browser; steps 2-5 behave the same; the app exits 3 s after the tab
+       is closed.
+    10. Release build: `nim c -d:release examples/stresstest/stresstest.nim`
+        and run the binary from another directory: same results; fire-and-
+        forget failures are no longer printed to the terminal.
+
 - Port FilePicker to 2.0: `{.expose.}`, awaited `neel.filePicker(...)`,
   `textContent` instead of `innerHTML`, handle empty directories and
   non-existent paths with structured errors.
