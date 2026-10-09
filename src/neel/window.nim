@@ -256,9 +256,10 @@ proc initWindows*(closeConn: CloseProc; pending: PendingTable; baseUrl: string;
 proc teardownWindows*() =
   ## Terminates every remaining browser process, removes their profile
   ## directories, fires `onWindowClose` for windows still open, frees every
-  ## record, and drops the manager. Main thread only, after server `shutdown`
-  ## (every `onClose` has run, no worker can call into this module). A no-op
-  ## when not initialised.
+  ## record, and drops the manager. Main thread only, from the server
+  ## `shutdown`'s `beforeJoin` (every `onClose` has run, no worker can call
+  ## into this module, and the workers that grew the tables are still alive
+  ## to take their blocks back). A no-op when not initialised.
   let m = mgr
   if m == nil:
     return

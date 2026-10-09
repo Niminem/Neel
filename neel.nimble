@@ -8,7 +8,7 @@ srcDir        = "src"
 
 # Dependencies
 
-requires "nim >= 2.2.0"
+requires "nim >= 2.2.12"
 
 # Tests: nimble's built-in `nimble test` compiles and runs every `tests/t*.nim`
 # (we name them `tests/t_<module>.nim`). Compiler flags for tests live in

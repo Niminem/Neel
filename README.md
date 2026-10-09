@@ -8,7 +8,7 @@ and returns a Promise; a JS function registered with `neel.expose` becomes
 `js.<name>(...)` in Nim, with `js.wait.<name>(...)` when a return value is
 needed. Neel 2.0 is inspired by Python's [Eel](https://github.com/python-eel/Eel).
 
-Requirements: Nim >= 2.2.0, no external packages. Supported browsers in this
+Requirements: Nim >= 2.2.12, no external packages. Supported browsers in this
 release: Google Chrome and Chromium (app mode), or a tab in the OS default
 browser.
 
@@ -762,7 +762,7 @@ Neel 2.0 is a rewrite with a new API; nothing from 1.x compiles unchanged.
 | default parameter values unsupported | supported (positional) |
 | exit roughly 3 s / 10 s after the socket closes | the same defaults, now `gracePeriodMs`, plus `quitApp()` and `startApp` returning an `ExitReason` |
 | assets embedded in release builds | the same, now `embedAssets = defined(release)` and overridable |
-| `--threads:on --mm:orc` on Nim 1.6 | Nim >= 2.2 required; no flags |
+| `--threads:on --mm:orc` on Nim 1.6 | Nim >= 2.2.12 required; no flags |
 | re-exported `std/os`, `std/osproc`, `std/strutils`, `std/json`, `std/threadpool`, `std/browsers`, `std/jsonutils`, Mummy | re-exports only `std/json` and `std/options`; import the rest yourself; no external dependencies |
 
 Unchanged: the page loads `/neel.js` before its own script, assets use

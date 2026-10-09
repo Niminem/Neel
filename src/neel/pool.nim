@@ -19,6 +19,10 @@
 ##   on failure so it can be retried later.
 ## - `stop(drain)` either finishes the queued work or discards it, then joins
 ##   every worker. It is idempotent and wakes workers blocked on an empty queue.
+##   `stop(drain, beforeJoin)` also runs `beforeJoin` once the queue is empty and
+##   no task is running but before any worker exits: Nim's allocator cannot
+##   free a block after the thread that allocated it has exited, so state that
+##   workers grew must be released there, not after `stop` returns.
 ## - `waitTimeout`: a timed condition-variable wait that `std/locks` lacks;
 ##   exported because `protocol.nim`'s pending-call table needs the same thing.
 ##
@@ -58,11 +62,13 @@ type
     lock: Lock
     notEmpty: Cond      # signalled when a task is queued or stop is requested
     notFull: Cond       # signalled when a task is dequeued or stop is requested
+    idle: Cond          # signalled when the queue is empty and nothing runs
     queue: seq[Task]    # ring buffer of fixed capacity
     head: int           # index of the oldest queued task
     count: int          # number of queued tasks
     running: int        # tasks currently executing
-    stopping: bool      # no new submissions; workers exit once the queue is empty
+    stopping: bool      # no new submissions
+    released: bool      # workers exit once the queue is empty
     joined: bool        # every worker has been joined
     joining: bool       # a `stop` call is currently joining
     workers: seq[Thread[ptr PoolImpl]]
@@ -74,6 +80,10 @@ type
     ## Handle to a worker pool. Dropping the last reference without calling
     ## `stop` performs `stop(drain = false)`; call `stop` explicitly for
     ## deterministic shutdown.
+
+  BeforeJoinHook* = proc() {.gcsafe.}
+    ## Run by `stop` (and `Server.shutdown`) on the calling thread after the
+    ## work is done and before any thread exits; see the module header.
 
 var currentPool {.threadvar.}: ptr PoolImpl
   ## Set on worker threads so `stop` can refuse to join the calling thread.
@@ -103,10 +113,10 @@ proc workerLoop(p: ptr PoolImpl) {.thread.} =
   while true:
     var task: Task
     acquire p.lock
-    while p.count == 0 and not p.stopping:
+    while p.count == 0 and not p.released:
       discard waitTimeout(p.notEmpty, p.lock, IdleWaitMs)
     if p.count == 0:
-      # Stopping with nothing left to run (a non-draining stop has already
+      # Released with nothing left to run (a non-draining stop has already
       # emptied the queue).
       release p.lock
       break
@@ -123,16 +133,31 @@ proc workerLoop(p: ptr PoolImpl) {.thread.} =
       discard
     acquire p.lock
     dec p.running
+    if p.count == 0 and p.running == 0:
+      broadcast p.idle
     release p.lock
 
 # --- lifecycle ----------------------------------------------------------------
 
-proc stopImpl(p: ptr PoolImpl; drain: bool) =
+proc releaseAndJoin(p: ptr PoolImpl) =
+  acquire p.lock
+  p.released = true
+  broadcast p.notEmpty
+  release p.lock
+  joinThreads(p.workers)
+  acquire p.lock
+  p.joined = true
+  release p.lock
+
+proc beginStop(p: ptr PoolImpl; drain: bool): bool =
+  ## Refuses new tasks (and discards the queued ones unless `drain`).
+  ## Returns `false` when another `stop` has already claimed the join.
   doAssert currentPool != p, "Pool.stop must not be called from one of its own workers"
   acquire p.lock
-  if p.joined:
+  if p.joined or p.joining:
     release p.lock
-    return
+    return false
+  p.joining = true
   p.stopping = true
   if not drain:
     # Discard everything queued; each slot's destructor frees the task's
@@ -141,23 +166,26 @@ proc stopImpl(p: ptr PoolImpl; drain: bool) =
       p.queue[i] = Task()
     p.head = 0
     p.count = 0
-  broadcast p.notEmpty
   broadcast p.notFull
-  let mustJoin = not p.joining
-  p.joining = true
   release p.lock
-  if mustJoin:
-    joinThreads(p.workers)
-    acquire p.lock
-    p.joined = true
-    release p.lock
+  true
+
+proc waitIdle(p: ptr PoolImpl) =
+  ## Until nothing is queued or running. Bounded per wait; overall as long
+  ## as the running tasks take, like the join itself.
+  acquire p.lock
+  while p.count > 0 or p.running > 0:
+    discard waitTimeout(p.idle, p.lock, IdleWaitMs)
+  release p.lock
 
 proc `=destroy`(p: PoolObj) =
   if p.impl != nil:
-    stopImpl(p.impl, drain = false)
+    if beginStop(p.impl, drain = false):
+      releaseAndJoin(p.impl)
     deinitLock p.impl.lock
     deinitCond p.impl.notEmpty
     deinitCond p.impl.notFull
+    deinitCond p.impl.idle
     `=destroy`(p.impl[])
     deallocShared(p.impl)
 
@@ -170,6 +198,7 @@ proc newPool*(workers = DefaultWorkers; queueCapacity = DefaultQueueCapacity): P
   initLock impl.lock
   initCond impl.notEmpty
   initCond impl.notFull
+  initCond impl.idle
   impl.queue = newSeq[Task](queueCapacity)
   impl.workers = newSeq[Thread[ptr PoolImpl]](workers)
   for i in 0 ..< workers:
@@ -179,10 +208,25 @@ proc newPool*(workers = DefaultWorkers; queueCapacity = DefaultQueueCapacity): P
 proc stop*(p: Pool; drain = true) =
   ## Stops accepting tasks, then joins every worker. With `drain = true` the
   ## tasks already queued run first; with `drain = false` they are discarded
-  ## (in-flight tasks always finish). Idempotent: later calls return at once.
-  ## Must not be called from a worker thread (it would join itself); Neel
-  ## shuts down from the main thread.
-  stopImpl(p.impl, drain)
+  ## (in-flight tasks always finish). Idempotent: later calls (including one
+  ## racing a `stop` in progress) return at once. Must not be called from a
+  ## worker thread (it would join itself); Neel shuts down from the main
+  ## thread.
+  if beginStop(p.impl, drain):
+    releaseAndJoin(p.impl)
+
+proc stop*(p: Pool; drain = true; beforeJoin: BeforeJoinHook) =
+  ## `stop`, plus `beforeJoin` on the calling thread once nothing is queued
+  ## or running and every worker is still alive. The workers are released
+  ## and joined even if it raises. A call that finds the pool already
+  ## stopped (or being stopped) does not run its hook.
+  doAssert not beforeJoin.isNil, "stop: beforeJoin is nil; use stop(p, drain)"
+  if beginStop(p.impl, drain):
+    waitIdle(p.impl)
+    try:
+      beforeJoin()
+    finally:
+      releaseAndJoin(p.impl)
 
 # --- submission ----------------------------------------------------------------
 

@@ -1,3 +1,5 @@
+import std/os
+
 switch("path", thisDir() / "src")
 
 # begin Nimble config (version 2)

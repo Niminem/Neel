@@ -187,8 +187,8 @@ proc initJsBridge*(sendText: SendProc; resolveWindow: WindowResolver;
                     defaultTimeoutMs: defaultTimeoutMs)
 
 proc resetJsBridge*() =
-  ## Drops the installed bridge (after `shutdown`, when no `js` call can be in
-  ## progress). `js.*` raises `NeelNoWindowError` until the next
+  ## Drops the installed bridge (from the server `shutdown`'s `beforeJoin`,
+  ## when no `js` call can be in progress). `js.*` raises `NeelNoWindowError` until the next
   ## `initJsBridge`.
   bridge = JsBridge()
 

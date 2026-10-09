@@ -10,7 +10,9 @@
 ## Surface:
 ## - `newServer(hooks..., workers, queueCapacity, maxMessageSize)`,
 ##   `listen(server, port = 0)` (binds `127.0.0.1` only; `port` is readable
-##   afterwards), `shutdown(server)` (idempotent, joins every thread).
+##   afterwards), `shutdown(server)` (idempotent, joins every thread);
+##   `shutdown(server, beforeJoin)` also runs a cleanup hook after all work
+##   is done but before any Neel thread exits.
 ## - Hooks, all run on pool workers and all `{.gcsafe.}`:
 ##   `RequestHandler = proc(conn, req): RequestAction` answers a request with
 ##   `respond(response)` or asks for a WebSocket upgrade with `upgrade()`;
@@ -37,6 +39,8 @@ when defined(windows):
 import std/[selectors, nativesockets, locks, tables, hashes, monotimes, times,
             tasks, typedthreads, oserrors, strutils]
 import ./[http, websocket, sha1, pool]
+
+export BeforeJoinHook
 
 const
   UseWinSockets = defined(windows) or defined(nimdoc)
@@ -69,6 +73,9 @@ const
   ReadChunk = 64 * 1024
     ## Bytes read per readable event.
   Backlog = 128
+  ParkCheckMs = 1000
+    ## Period at which `shutdown` and the parked IO thread re-check each
+    ## other's flag; both are also signalled, this is only a safety net.
 
 type
   ConnId* = distinct int
@@ -174,6 +181,9 @@ type
     dirty: seq[ConnId]        # connections with new outbound bytes or actions
     ioRunning: bool           # the selector and wake event are alive
     stopRequested: bool
+    ioParked: bool            # the IO thread finished its teardown and waits
+    ioReleased: bool          # `shutdown` lets the parked IO thread exit
+    ioCond: Cond              # signalled on `ioParked` and `ioReleased`
 
   ServerObj = object
     impl: ptr ServerImpl
@@ -717,39 +727,67 @@ proc ioLoop(s: ptr ServerImpl) {.thread.} =
   s.selector.unregister(s.listenFd)
   s.listenFd.close()
   s.teardownAll()
+  # Nim's allocator cannot free a block after its owning thread has exited,
+  # so storage this thread grew is released here, not by `=destroy`.
+  s.byFd = default(Table[int, Conn])
   acquire s.lock
+  s.byId = default(Table[ConnId, Conn])
+  s.dirty = @[]
   s.ioRunning = false
   release s.lock
   s.selector.unregister(s.wake)
   s.wake.close()
   s.selector.close()
+  s.selector = nil
+  # Stay alive until `shutdown` has drained the pool: the queued `onClose`
+  # tasks (and any request still queued) carry argument blocks this thread
+  # allocated, and the workers free them.
+  acquire s.lock
+  s.ioParked = true
+  broadcast s.ioCond
+  while not s.ioReleased:
+    discard waitTimeout(s.ioCond, s.lock, ParkCheckMs)
+  release s.lock
 
 # --- public API --------------------------------------------------------------------
 
+proc releaseIo(s: ptr ServerImpl) =
+  acquire s.lock
+  s.ioReleased = true
+  broadcast s.ioCond
+  release s.lock
+  joinThread(s.ioThread)
+
+proc beginShutdown(s: ptr ServerImpl): bool =
+  ## Stops the IO loop and waits until the IO thread has torn every
+  ## connection down (queueing their `onClose`) and parked. Returns `false`
+  ## when there are no threads to stop (before `listen`, or already stopped).
+  if s.state != ssListening:
+    s.state = ssStopped
+    return false
+  s.state = ssStopped
+  acquire s.lock
+  s.stopRequested = true
+  if s.ioRunning:
+    try:
+      s.wake.trigger()
+    except IOSelectorsException:
+      discard
+  while not s.ioParked:
+    discard waitTimeout(s.ioCond, s.lock, ParkCheckMs)
+  release s.lock
+  true
+
 proc shutdownImpl(s: ptr ServerImpl) =
-  case s.state
-  of ssStopped:
-    return
-  of ssNew:
-    s.state = ssStopped
-    return
-  of ssListening:
-    acquire s.lock
-    s.stopRequested = true
-    if s.ioRunning:
-      try:
-        s.wake.trigger()
-      except IOSelectorsException:
-        discard
-    release s.lock
-    joinThread(s.ioThread)
+  if beginShutdown(s):
     s.pool.stop(drain = true)
-    s.state = ssStopped
+    releaseIo(s)
 
 proc `=destroy`(s: ServerObj) =
   if s.impl != nil:
     shutdownImpl(s.impl)
     deinitLock s.impl.lock
+    deinitCond s.impl.ioCond
     `=destroy`(s.impl[])
     deallocShared(s.impl)
 
@@ -766,6 +804,7 @@ proc newServer*(onRequest: RequestHandler = nil;
   ## `nil` `onMessage` ignores messages.
   let impl = cast[ptr ServerImpl](allocShared0(sizeof(ServerImpl)))
   initLock impl.lock
+  initCond impl.ioCond
   impl.onRequest = onRequest
   impl.onMessage = onMessage
   impl.onOpen = onOpen
@@ -805,12 +844,34 @@ proc running*(s: Server): bool =
   ## `true` between `listen` and `shutdown`.
   s.impl.state == ssListening
 
+proc ioThreadRunning*(s: Server): bool =
+  ## Whether the IO thread has started and not yet returned (for tests and
+  ## diagnostics: it is still alive inside `shutdown`'s `beforeJoin`).
+  s.impl.ioThread.running
+
 proc shutdown*(s: Server) =
   ## Stops accepting, closes every connection (upgraded ones get a best-effort
-  ## 1001 close frame and their `onClose`), joins the IO thread, drains and
-  ## joins the pool. Idempotent; safe in a test `finally`. Must be called from
-  ## outside the pool (not from a hook).
+  ## 1001 close frame and their `onClose`), drains the pool, then joins the
+  ## pool and the IO thread. Idempotent; safe in a test `finally`. Must be
+  ## called from outside the pool (not from a hook).
   shutdownImpl(s.impl)
+
+proc shutdown*(s: Server; beforeJoin: BeforeJoinHook) =
+  ## `shutdown`, plus `beforeJoin` on the calling thread after every
+  ## `onClose` and every queued task has finished, while the IO thread and
+  ## every worker are still alive: free state that the hooks grew there
+  ## (Nim cannot free a block once the thread that allocated it has exited).
+  ## The threads are joined even if it raises. Before `listen` or after a
+  ## completed `shutdown` the hook runs at once.
+  doAssert not beforeJoin.isNil, "shutdown: beforeJoin is nil; use shutdown(s)"
+  let impl = s.impl
+  if beginShutdown(impl):
+    try:
+      impl.pool.stop(drain = true, beforeJoin = beforeJoin)
+    finally:
+      releaseIo(impl)
+  else:
+    beforeJoin()
 
 proc send*(s: Server; conn: ConnId; text: string): bool =
   ## Queues `text` as one WebSocket text message to `conn` from any thread.

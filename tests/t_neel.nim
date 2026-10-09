@@ -56,9 +56,37 @@ type
     done: bool
     reason: ExitReason
     failure: string         # exception message if startApp raised
+    workersSeen: int        # workers that ran `markWorker`
+    workersExited: int      # ... and have since exited
+    exitedAtWindowClose: int  # `workersExited` when `onWindowClose` ran
 
 var shared: Shared
 initLock shared.lock
+
+var workerMarked {.threadvar.}: bool
+
+proc markWorker() {.expose.} =
+  ## Arranges for this worker thread's exit to be counted.
+  if workerMarked:
+    return
+  workerMarked = true
+  {.cast(gcsafe).}: # test global guarded by its lock
+    acquire shared.lock
+    inc shared.workersSeen
+    release shared.lock
+  onThreadDestruction(proc() {.closure, gcsafe, raises: [].} =
+    {.cast(gcsafe).}:
+      acquire shared.lock
+      inc shared.workersExited
+      release shared.lock)
+
+proc recordWindowClose(w: Window) {.gcsafe.} =
+  ## `onWindowClose`: `teardownWindows` fires it for a window still open at
+  ## exit, from `shutdown`'s `beforeJoin`, so no worker may have exited yet.
+  {.cast(gcsafe).}:
+    acquire shared.lock
+    shared.exitedAtWindowClose = shared.workersExited
+    release shared.lock
 
 proc fakeLaunch(url, userDataDir: string; opts: LaunchOptions): BrowserHandle
     {.gcsafe.} =
@@ -93,7 +121,8 @@ proc appThread(run: int) {.thread.} =
                               browsers = @[], gracePeriodMs = Grace,
                               startupTimeoutMs = 2000, callTimeoutMs = 2000,
                               workers = 4, queueCapacity = 32,
-                              launcher = fakeLaunch)
+                              launcher = fakeLaunch,
+                              onWindowClose = recordWindowClose)
         finish(reason)
       else:
         let reason = startApp("fixtures/web", embedAssets = true,
@@ -112,6 +141,9 @@ proc resetShared() =
   shared.userDataDirs = @[]
   shared.done = false
   shared.failure = ""
+  shared.workersSeen = 0
+  shared.workersExited = 0
+  shared.exitedAtWindowClose = -1
   release shared.lock
 
 proc sharedPort(): int =
@@ -284,9 +316,9 @@ suite "neel: startApp end to end":
       check token.len == 32
       check token.allCharsInSet({'0' .. '9', 'a' .. 'f'})
       check ("const WINDOW_ID = 1;") in shim.body
-      check ("const EXPOSED = " &
-             jsStringArrayLiteral(@["add", "askJs", "whichWindow", "stop"]) & ";") in shim.body
-      check shim.body == renderNeelJs(token, 1, @["add", "askJs", "whichWindow", "stop"])
+      const exposedNames = @["add", "askJs", "whichWindow", "stop", "markWorker"]
+      check ("const EXPOSED = " & jsStringArrayLiteral(exposedNames) & ";") in shim.body
+      check shim.body == renderNeelJs(token, 1, exposedNames)
       # Without a Referer the single open window is assumed; an unknown id
       # in the Referer falls back the same way.
       check http(port, NeelJsPath).body == shim.body
@@ -324,7 +356,8 @@ suite "neel: startApp end to end":
       check "browserPath" in page.body
 
       # /ws: token and window id are both required.
-      let wrongToken = handshake(port, "0" & token[1 .. ^1], 1)
+      let wrongToken = handshake(port, (if token[0] == '0': "1" else: "0") &
+                                       token[1 .. ^1], 1)
       check wrongToken.status.startsWith("HTTP/1.1 403")
       wrongToken.client.sock.close()
       let wrongWindow = handshake(port, token, 2)
@@ -369,8 +402,12 @@ suite "neel: startApp end to end":
       c.sendMsg(callMsg("add", @[%40, %2], id = 7))
       check c.readMsg() == retMsg(7, %42)
 
+      # A worker that will report its own exit (checked after the run).
+      c.sendMsg(callMsg("markWorker", @[], id = 8))
+      check c.readMsg() == retMsg(8, newJNull())
+
       # quitApp from an exposed proc ends the app; shutdown says goodbye.
-      c.sendMsg(callMsg("stop", @[], id = 8))
+      c.sendMsg(callMsg("stop", @[], id = 9))
       var sawClose = false
       for _ in 0 .. 2:
         let f = c.readFrame()
@@ -384,9 +421,17 @@ suite "neel: startApp end to end":
     check shared.reason == erQuit
     acquire shared.lock
     let dirs = shared.userDataDirs
+    let seen = shared.workersSeen
+    let exited = shared.workersExited
+    let exitedAtClose = shared.exitedAtWindowClose
     release shared.lock
     check dirs.len == 1
     check not dirExists(dirs[0])
+    # Window teardown ran while every worker was still alive (they free
+    # their blocks), and the workers were joined afterwards.
+    check seen == 1
+    check exitedAtClose == 0
+    check exited == seen
 
   test "embedded assets: a second run, fresh token, grace period after the last close":
     appRun(2):

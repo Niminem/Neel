@@ -677,6 +677,21 @@ proc readMsg(c: var WsClient): Msg =
 proc sendMsg(c: WsClient; m: Msg) =
   c.sock.send(encodeText(encode(m), Key))
 
+proc integRelease() {.gcsafe.} =
+  ## `shutdown`'s `beforeJoin`, as in `runApp`: free what the workers grew
+  ## while they are still alive.
+  {.cast(gcsafe).}:
+    resetJsBridge()
+    teardownWindows()
+    integ.table = nil
+    acquire fake.lock
+    fake.closes = @[]
+    fake.launches = @[]
+    fake.sent = @[]
+    fake.opened = @[]
+    fake.closed = @[]
+    release fake.lock
+
 suite "window: integration with the server":
   test "bind-before-upgrade, refresh, two windows, closeWindow, count-driven exit":
     resetFake()
@@ -753,6 +768,4 @@ suite "window: integration with the server":
       check sorted(closedIds()) == @[1, 2]
       check integ.table.pendingCount == 0
     finally:
-      integ.srv.shutdown()
-      resetJsBridge()
-      teardownWindows()
+      integ.srv.shutdown(beforeJoin = integRelease)

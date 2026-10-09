@@ -4,7 +4,7 @@
 ## timeout, and every server is shut down in a `finally`.
 
 import std/[unittest, net, nativesockets, strutils, algorithm, os, locks,
-            monotimes, times]
+            monotimes, times, tables]
 import neel/[server, http, websocket]
 
 const
@@ -30,6 +30,16 @@ type
     decoder: FrameDecoder
     buf: string
 
+  Bag = object
+    ## Shutdown-ordering state shared with the hooks (through a `ptr`).
+    lock: Lock
+    closes: int
+    workersSeen: int     # worker threads that ran `noteWorker`
+    workersExited: int   # ... and have since exited
+    grown: Table[int, string]  # storage allocated on workers
+
+var workerNoted {.threadvar.}: bool
+
 # --- helpers ---------------------------------------------------------------------
 
 proc waitUntil(deadlineMs: int; cond: proc(): bool): bool =
@@ -39,6 +49,22 @@ proc waitUntil(deadlineMs: int; cond: proc(): bool): bool =
       return true
     sleep(1)
   cond()
+
+proc rehome[T](x: var T) =
+  ## Replaces `x` with a copy made on the calling thread; the original's
+  ## blocks are freed now, while the threads that allocated them still live.
+  let copy = x
+  x = copy
+
+proc releaseState(st: ptr State): BeforeJoinHook =
+  ## `shutdown`'s `beforeJoin` for a `State` the hooks grew on workers, so
+  ## the test thread can keep reading it and free it after the join.
+  result = proc() {.gcsafe.} =
+    acquire st.lock
+    rehome(st.opened)
+    rehome(st.closed)
+    rehome(st.messages)
+    release st.lock
 
 proc snapshot(st: ptr State): State =
   acquire st.lock
@@ -167,6 +193,40 @@ proc openedId(st: ptr State; index: int): ConnId =
            "onOpen did not fire"
   snapshot(st).opened[index]
 
+proc noteWorker(bag: ptr Bag) {.gcsafe.} =
+  ## Once per worker thread: count the thread now and again when it exits.
+  if workerNoted:
+    return
+  workerNoted = true
+  acquire bag.lock
+  inc bag.workersSeen
+  release bag.lock
+  onThreadDestruction(proc() {.closure, gcsafe, raises: [].} =
+    acquire bag.lock
+    inc bag.workersExited
+    release bag.lock)
+
+proc startBagServer(bag: ptr Bag; workers, queueCapacity: int): Server =
+  ## Upgrades everything; messages grow `bag.grown` on the workers, `onClose`
+  ## counts. Neither hook replies, so nothing captures the `Server`.
+  let onRequest: RequestHandler = proc(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
+    upgrade()
+  let onMessage: MessageHandler = proc(conn: ConnId; message: string) {.gcsafe.} =
+    noteWorker(bag)
+    acquire bag.lock
+    bag.grown[bag.grown.len] = message & " " & $int(conn)
+    release bag.lock
+  let onClose: ConnectionHandler = proc(conn: ConnId) {.gcsafe.} =
+    noteWorker(bag)
+    sleep(2)
+    acquire bag.lock
+    inc bag.closes
+    release bag.lock
+  result = newServer(onRequest = onRequest, onMessage = onMessage,
+                     onClose = onClose, workers = workers,
+                     queueCapacity = queueCapacity, closeTimeoutMs = 500)
+  result.listen(0)
+
 template serverTest(name: string; body: untyped) =
   test name:
     var st {.inject.}: State
@@ -176,7 +236,7 @@ template serverTest(name: string; body: untyped) =
     try:
       body
     finally:
-      srv.shutdown()
+      srv.shutdown(beforeJoin = releaseState(stp))
       deinitLock st.lock
 
 # --- tests -----------------------------------------------------------------------
@@ -521,7 +581,7 @@ suite "server: WebSocket":
     let http = connect(srv.port)
     discard openedId(stp, 1)
     let t0 = getMonoTime()
-    srv.shutdown()
+    srv.shutdown(beforeJoin = releaseState(stp))
     check (getMonoTime() - t0).inMilliseconds < IoTimeout
     check not srv.running
     # Upgraded peers get a best-effort 1001 then EOF; the plain socket just EOFs.
@@ -541,3 +601,82 @@ suite "server: WebSocket":
     a.sock.close()
     b.sock.close()
     http.close()
+
+# Nim's allocator cannot free a block once the thread that allocated it has
+# exited (on Windows that is an intermittent SIGSEGV in `addToSharedFreeList`).
+# These tests pin down the ordering that prevents it; see NOTES.md.
+suite "server: shutdown ordering":
+  test "beforeJoin runs after every onClose, with the IO thread and the workers alive":
+    var bag: Bag
+    initLock bag.lock
+    let bagp = addr bag
+    let srv = startBagServer(bagp, workers = 3, queueCapacity = 16)
+    var clients: seq[WsClient]
+    try:
+      for i in 0 ..< 4:
+        clients.add handshake(srv.port)
+      check srv.ioThreadRunning
+      var atHook = (closes: -1, exited: -1, ioAlive: false)
+      srv.shutdown(beforeJoin = proc() {.gcsafe.} =
+        acquire bagp.lock
+        atHook.closes = bagp.closes
+        atHook.exited = bagp.workersExited
+        release bagp.lock
+        {.cast(gcsafe).}: # `srv` is a test-block global; this runs on the test thread
+          atHook.ioAlive = srv.ioThreadRunning)
+      check atHook.closes == 4
+      check atHook.exited == 0
+      check atHook.ioAlive
+      check not srv.ioThreadRunning
+      acquire bag.lock
+      check bag.workersSeen >= 1
+      check bag.workersExited == bag.workersSeen
+      release bag.lock
+    finally:
+      srv.shutdown()
+      for c in clients:
+        c.sock.close()
+      deinitLock bag.lock
+
+  test "beforeJoin runs at once before listen and after a completed shutdown":
+    let fresh = newServer()
+    var ran = 0
+    fresh.shutdown(beforeJoin = proc() {.gcsafe.} = inc ran)
+    check ran == 1
+    var bag: Bag
+    initLock bag.lock
+    let srv = startBagServer(addr bag, workers = 1, queueCapacity = 4)
+    srv.shutdown()
+    srv.shutdown(beforeJoin = proc() {.gcsafe.} = inc ran)
+    check ran == 2
+    deinitLock bag.lock
+
+  test "50 create/shutdown cycles with open connections and queued work":
+    # The crash this guards against needed the IO thread to have grown its
+    # tables and to have queued `onClose` tasks at shutdown, and workers to
+    # have grown shared state that is freed afterwards. Every round does all
+    # three; without the ordering it fails intermittently, on Windows mostly.
+    for round in 0 ..< 50:
+      var bag: Bag
+      initLock bag.lock
+      let bagp = addr bag
+      var clients: seq[WsClient]
+      block:
+        let srv = startBagServer(bagp, workers = 2, queueCapacity = 8)
+        try:
+          for i in 0 ..< 6:
+            clients.add handshake(srv.port)
+          for c in clients:
+            c.sock.send(encodeText("a", Key) & encodeText("b", Key) &
+                        encodeText("c", Key))
+        finally:
+          srv.shutdown(beforeJoin = proc() {.gcsafe.} =
+            acquire bagp.lock
+            bagp.grown = default(Table[int, string])
+            release bagp.lock)
+        # Leaving the block destroys the server: its tables and pool go too.
+      check bag.closes == 6
+      check bag.workersExited == bag.workersSeen
+      for c in clients:
+        c.sock.close()
+      deinitLock bag.lock

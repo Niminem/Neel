@@ -19,10 +19,26 @@ Mummy, or `std/threadpool`.
 
 - `PLAN.md` at the repo root holds all settled decisions, assumptions, the wire
   protocol, the module layout, and the ordered task list. Read it before any work.
+- `NOTES.md` at the repo root is the log of the current phase (tasks 1-15 are done;
+  we are verifying on macOS, Windows, and Linux and fixing what breaks): findings,
+  gotchas every change must respect, and the per-platform verification matrix.
+  Read it before any work.
 - If something in the plan conflicts with the code or is unclear, stop and ask; do
   not silently pick one.
 
-## Session workflow
+## Hardening workflow (current phase)
+
+1. Read `PLAN.md` and `NOTES.md`, then the modules the problem touches.
+2. Fix the reported problem (and its siblings, if the cause is shared); add a test
+   that pins the fix down where one is feasible.
+3. Run `nimble test` (and `nim c` on the package). Note which Nim compiled it: check
+   `nim -v` and Nimble's "using ... for compilation" line; they can differ.
+4. Add a dated entry to `NOTES.md` "Findings" (platform, symptom, cause, fix,
+   test), update the verification matrix and "Open items", and record new rules
+   under "Gotchas". Changes to settled behaviour or API also get a line in
+   `PLAN.md` "Post-implementation changes".
+
+## Session workflow (tasks)
 
 Each session implements exactly one task from `PLAN.md`.
 
@@ -36,8 +52,9 @@ Each session implements exactly one task from `PLAN.md`.
 
 ## Hard constraints
 
-- Nim >= 2.2.0 (installed: 2.2.10). ORC and threads are on by default; do not add flags
-  that assume otherwise.
+- Nim >= 2.2.12 (enforced by `neel.nimble` and a compile-time check in `src/neel.nim`;
+  older allocators crash on cross-thread frees, see `NOTES.md`). ORC and threads are on
+  by default; do not add flags that assume otherwise.
 - Zero external Nimble dependencies. Standard library only. SHA-1 is hand-rolled in
   `src/neel/sha1.nim`.
 - Server binds `127.0.0.1` only.

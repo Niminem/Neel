@@ -454,8 +454,8 @@ suite "browser: launch arguments":
       discard buildLaunchArgs(Url, "")
 
   test "user-data-dir policy: one private dir per window under the temp dir":
-    check userDataDirFor(1, pid = 4242, tempDir = "/tmp") == "/tmp/neel-4242-1"
-    check userDataDirFor(7, pid = 4242, tempDir = "/tmp/") == "/tmp/neel-4242-7"
+    check userDataDirFor(1, pid = 4242, tempDir = "/tmp") == "/tmp" / "neel-4242-1"
+    check userDataDirFor(7, pid = 4242, tempDir = "/tmp/") == "/tmp" / "neel-4242-7"
     check userDataDirFor(1, pid = 4242, tempDir = "/tmp") !=
       userDataDirFor(2, pid = 4242, tempDir = "/tmp")
     check userDataDirFor(1, pid = 1, tempDir = "/tmp") !=
@@ -467,7 +467,7 @@ suite "browser: launch arguments":
       discard userDataDirFor(0)
     # The directory lands in the argv as the --user-data-dir flag.
     let args = buildLaunchArgs(Url, userDataDirFor(9, pid = 1, tempDir = "/t"))
-    check args[1] == "--user-data-dir=/t/neel-1-9"
+    check args[1] == "--user-data-dir=" & ("/t" / "neel-1-9")
 
 suite "browser: default-browser command":
   const Url = "http://127.0.0.1:54321/neel/no-browser?searched=Chrome,Chromium"

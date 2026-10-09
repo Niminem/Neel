@@ -19,6 +19,10 @@ handled outside this plan.
   line or two.
 - Facts that later tasks depend on (spike results, final API shapes, gotchas)
   are recorded here, not only in chat.
+- Tasks 1-15 are done. Cross-platform verification and the bug fixes it
+  produces are logged in `NOTES.md` (findings, gotchas, verification matrix);
+  changes to settled behaviour are also summarised under "Post-implementation
+  changes" below.
 - Placeholders in `src/neel/neel.js` substituted by `frontend.nim`:
   `__NEEL_TOKEN__`, `__NEEL_WINDOW_ID__`, `__NEEL_EXPOSED__`.
 
@@ -30,7 +34,7 @@ handled outside this plan.
 |---|---|
 | Compatibility | Clean break. No `exposeProcs`, `callJs`, or `callNim`. README rewritten. |
 | Repository | Rewrite on the `neel2-devel` branch (forked from `master` after the `init neel 2.0` reset); merged into `master` only once every task is implemented and verified on macOS, Windows, and Linux. 1.x is preserved by tag `v1.1.0`. |
-| Nim / dependencies | Nim >= 2.2.0. Zero external dependencies (hand-rolled SHA-1). |
+| Nim / dependencies | Nim >= 2.2.12 _(raised from 2.2.0 during verification: older allocators crash when a block is freed after its thread exited; see "Post-implementation changes")_. Zero external dependencies (hand-rolled SHA-1). |
 | Server | Own HTTP/1.1 + WebSocket server. Single IO thread on `std/selectors`, configurable worker pool. Binds `127.0.0.1` only. |
 | Exposure | `{.expose.}` pragma on top-level procs. Emits an exported `<name>NeelSym` wrapper plus a `neelRegister` call. Compile-time registry of bound symbols; `startApp` generates the dispatch. |
 | Protocol | Symmetric JSON messages `call` / `ret` / `err` with ids. No id = fire-and-forget. Structured errors. |
@@ -467,7 +471,8 @@ Notes for later tasks:
   `shutdown` sets a flag and wakes the selector; the IO thread closes the
   listener, sends a best-effort `encodeClose(CloseGoingAway)` to every
   upgraded connection, tears every connection down (queueing their
-  `onClose`), closes the selector; then `shutdown` joins the IO thread and
+  `onClose`), closes the selector (_superseded: see "Post-implementation
+  changes"_); then `shutdown` joins the IO thread and
   `stop(drain = true)`s the pool, so every `onClose` has run when
   `shutdown` returns. `shutdown` must be called from outside the pool (not
   from a hook); Task 12/13's `quit()` must signal the main thread rather than
@@ -2309,6 +2314,35 @@ runner for `neel.js` once a JS runtime is acceptable as a dev dependency.
   must state; say that a fresh clone needs `nimble setup` (or an installed
   `neel`) before the examples compile.
 - Doc comments on all public symbols; `nim doc` builds cleanly.
+
+---
+
+## Post-implementation changes
+
+Changes made during verification (details and tests in `NOTES.md`). They
+supersede the task notes they mention.
+
+- Minimum Nim raised to 2.2.12 (`neel.nimble`, README, and a compile-time
+  `{.error.}` in `src/neel.nim`, since `nim c` ignores the Nimble
+  requirement). Reason below; 2.2.12's allocator gives chunks a permanent
+  owner, so frees after a thread's exit are safe, including for user-created
+  threads that call `js.*`, which Neel cannot guard itself.
+- Thread-owned memory (gotcha): Nim <= 2.2.10 cannot free a block after the
+  thread that allocated it has exited (Windows: intermittent SIGSEGV in
+  `addToSharedFreeList`). Neel's own threads still free what they grew
+  before exiting (deterministic teardown; kept after the version bump). API: `Pool.stop(p, drain = true;
+  beforeJoin: BeforeJoinHook)` and `Server.shutdown(s; beforeJoin)` (new
+  overloads; `BeforeJoinHook = proc() {.gcsafe.}`, re-exported by
+  `server`) run the hook on the caller after all work is done and before
+  any thread exits; the threads are joined even if it raises; before
+  `listen` / after a completed `shutdown` it runs at once. `ioThreadRunning`
+  is a diagnostic. Order inside `shutdown` (replaces the Task 6 notes): the
+  IO thread tears connections down (queueing `onClose`), frees its tables,
+  and parks; the pool drains; the hook runs; workers are released and
+  joined; then the IO thread. `runApp`'s teardown (replaces the Task 12/13
+  sequence `shutdown` -> `resetJsBridge` -> `teardownWindows`):
+  `shutdown(beforeJoin = releaseSharedState)` where the hook does
+  `resetJsBridge`, `teardownWindows`, and drops the pending table.
 
 ---
 

@@ -567,6 +567,16 @@ proc readMsg(c: var WsClient): Msg =
 proc sendMsg(c: WsClient; m: Msg) =
   c.sock.send(encodeText(encode(m), Key))
 
+proc integRelease() {.gcsafe.} =
+  ## `shutdown`'s `beforeJoin`, as in `runApp`: the replies and the pending
+  ## table were grown on workers, so they are freed while those still live.
+  {.cast(gcsafe).}:
+    resetJsBridge()
+    acquire integ.lock
+    integ.replies = @[]
+    release integ.lock
+    integ.table = nil
+
 suite "js: integration with the server":
   test "a worker's js.wait round-trips through the real server":
     initLock integ.lock
@@ -618,6 +628,5 @@ suite "js: integration with the server":
       check not integ.connected
       release integ.lock
     finally:
-      integ.srv.shutdown()
-      resetJsBridge()
+      integ.srv.shutdown(beforeJoin = integRelease)
       deinitLock integ.lock

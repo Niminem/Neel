@@ -12,6 +12,10 @@ type
     threads: seq[int]
     gate: bool
     gateWaiters: int
+    workersSeen: int     # worker threads that ran `noteWorker`
+    workersExited: int   # ... and have since exited
+
+var workerNoted {.threadvar.}: bool
 
 proc waitUntil(deadlineMs: int; cond: proc(): bool): bool =
   ## Polls `cond` for up to `deadlineMs`; never hangs the suite.
@@ -63,10 +67,27 @@ proc napThenBump(sh: ptr Shared; ms: int) {.gcsafe.} =
   sleep(ms)
   bump(sh)
 
+proc noteWorker(sh: ptr Shared) {.gcsafe.} =
+  ## `napThenBump`, and once per worker thread: count the thread now and
+  ## again when it exits.
+  if not workerNoted:
+    workerNoted = true
+    acquire sh.lock
+    inc sh.workersSeen
+    release sh.lock
+    onThreadDestruction(proc() {.closure, gcsafe, raises: [].} =
+      acquire sh.lock
+      inc sh.workersExited
+      release sh.lock)
+  napThenBump(sh, 2)
+
 template poolTest(name: string; body: untyped) =
   test name:
     var sh {.inject.}: Shared
     initLock sh.lock
+    # Workers append to `threads`; with room reserved here they never
+    # reallocate it, so the buffer stays owned by this (long-lived) thread.
+    sh.threads = newSeqOfCap[int](256)
     let shp {.inject.} = addr sh
     try:
       body
@@ -148,6 +169,46 @@ suite "pool":
     check counted(shp) == 1
     check p.queued == 0
     check p.isStopped
+
+  poolTest "beforeJoin runs after the drain and before any worker exits":
+    let p = newPool(workers = 4, queueCapacity = 64)
+    for i in 0 ..< 40:
+      check p.submit(toTask noteWorker(shp))
+    var atHook = (count: -1, exited: -1, queued: -1, running: -1, stopped: true)
+    p.stop(drain = true, beforeJoin = proc() {.gcsafe.} =
+      acquire shp.lock
+      atHook.count = shp.count
+      atHook.exited = shp.workersExited
+      release shp.lock
+      {.cast(gcsafe).}: # `p` is a test-block global; this runs on the test thread
+        atHook.queued = p.queued
+        atHook.running = p.running
+        atHook.stopped = p.isStopped)
+    check atHook.count == 40
+    check atHook.exited == 0
+    check atHook.queued == 0
+    check atHook.running == 0
+    check not atHook.stopped
+    check p.isStopped
+    acquire sh.lock
+    check sh.workersSeen >= 1
+    check sh.workersExited == sh.workersSeen
+    release sh.lock
+
+  poolTest "the workers are joined even if beforeJoin raises":
+    let p = newPool(workers = 2, queueCapacity = 8)
+    check p.submit(toTask bump(shp))
+    expect ValueError:
+      p.stop(drain = false, beforeJoin = proc() {.gcsafe.} =
+        raise newException(ValueError, "hook failed"))
+    check p.isStopped
+
+  poolTest "a stop after the pool has stopped does not run its hook":
+    let p = newPool(workers = 2, queueCapacity = 4)
+    p.stop()
+    var ran = false
+    p.stop(beforeJoin = proc() {.gcsafe.} = ran = true)
+    check not ran
 
   poolTest "double stop is safe":
     let p = newPool(workers = 2, queueCapacity = 4)

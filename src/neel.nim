@@ -33,6 +33,11 @@
 ## Everything else lives in `neel/*.nim`; see `PLAN.md` "Module layout" for
 ## the responsibility of each.
 
+when (NimMajor, NimMinor, NimPatch) < (2, 2, 12):
+  # Older allocators crash (intermittently, mostly on Windows) when memory is
+  # freed after the thread that allocated it has exited; see NOTES.md.
+  {.error: "Neel requires Nim >= 2.2.12; this is Nim " & NimVersion.}
+
 import std/[json, options, strutils, sysrand, uri, macros, os]
 import neel/[http, server, pool, protocol, expose, jsproxy, frontend, browser,
              window, assets]
@@ -74,7 +79,7 @@ const
 type
   AppState = object
     ## Everything the hooks need, written once by `runApp` before `listen`
-    ## and cleared after `shutdown`, when no worker can be running. Hooks
+    ## and cleared during `shutdown`, once no hook can be running. Hooks
     ## are plain procs that reach it through `appPtr` (never closures
     ## capturing the `Server`, which the server would then store).
     running: bool
@@ -92,7 +97,7 @@ var app: AppState
 
 proc appPtr(): ptr AppState {.inline.} =
   # Write-once before `listen` on the thread running `runApp`, cleared only
-  # after `shutdown` has joined every worker; readers only call through the
+  # once `shutdown` has drained every hook; readers only call through the
   # `ref` and proc fields without copying them. The cast silences the
   # GC-safety check on the global; it does not change the access pattern.
   {.cast(gcsafe).}:
@@ -267,6 +272,16 @@ proc handleMessage(conn: ConnId; text: string) {.gcsafe.} =
 
 # --- running ---------------------------------------------------------------------
 
+proc releaseSharedState() {.gcsafe.} =
+  ## `shutdown`'s `beforeJoin`: every hook has finished but the IO thread and
+  ## the workers are still alive, so the window table, the connection map,
+  ## and the pending table (all grown on workers) are freed while their
+  ## owning threads can still take the blocks back.
+  {.cast(gcsafe).}: # main thread; no task is running (see `shutdown`)
+    resetJsBridge()
+    teardownWindows()
+    app.tbl = nil
+
 proc runApp*(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
              startPath = "/"; port = 0; workers = DefaultWorkers;
              queueCapacity = DefaultQueueCapacity;
@@ -284,8 +299,9 @@ proc runApp*(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   ## thread and returns why the app ended. Sequence: `findBrowser` (fails
   ## fast on a bad `browserPath`), token, `newPendingTable`, `newServer`,
   ## `initJsBridge`, `listen`, `initWindows`, `openWindow(startPath)`,
-  ## `waitForAppExit`; then always `shutdown`, `resetJsBridge`,
-  ## `teardownWindows`, and the table is dropped. `launcher` replaces the
+  ## `waitForAppExit`; then always `shutdown` with `releaseSharedState` as
+  ## its `beforeJoin` (`resetJsBridge`, `teardownWindows`, the table is
+  ## dropped). `launcher` replaces the
   ## browser launch (tests inject a fake); `nil` launches for real. When no
   ## browser is found and `fallback` is `false`, the error page has been
   ## opened in the default browser: it is served for `gracePeriodMs`, then
@@ -320,9 +336,7 @@ proc runApp*(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
       raise
     result = waitForAppExit()
   finally:
-    app.srv.shutdown()
-    resetJsBridge()
-    teardownWindows()
+    app.srv.shutdown(beforeJoin = releaseSharedState)
     app = AppState()
 
 proc stampCallSite(n, site: NimNode) =
