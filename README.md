@@ -48,18 +48,15 @@ no compiler flags are required.
 
 ## Running the examples
 
-From a fresh clone the examples cannot find `neel` until the package is on the
-compiler's path. Either install the package or let Nimble write the local path
-file (`nimble.paths`, picked up by the repository's `config.nims`):
+From a fresh clone, no setup is needed — the repository's `config.nims` adds
+`src/` to the compiler's path automatically:
 
 ```
 git clone https://github.com/Niminem/Neel.git
 cd Neel
-nimble setup        # or: nimble install
 ```
 
-(Alternatively pass `--path:src` to every `nim c` below.) Then, from any
-working directory:
+Then, from any working directory inside the repo:
 
 ```
 nim c -r examples/filepicker/filepicker.nim
