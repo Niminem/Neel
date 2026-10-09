@@ -24,8 +24,8 @@
 ## calling worker up to its timeout (default 10 s); the default pool has 64
 ## workers.
 
-import std/[json, options, tables, os, atomics, locks, typedthreads]
-import neel
+import std/[tables, os, atomics, locks, typedthreads]
+import neel # also brings std/json and std/options
 
 # --- types -----------------------------------------------------------------------
 
@@ -195,18 +195,13 @@ proc broadcast(msg: string): int {.expose.} =
       discard
 
 proc closeById(id: int) {.expose.} =
-  let w = window(id)
-  if w.isNone:
-    raise newException(NeelNoWindowError, "window " & $id & " is not open")
-  closeWindow(w.get) # blocks ~100 ms for the browser process to exit
+  ## `requireWindow` raises `NeelNoWindowError` for an unknown or closed id.
+  closeWindow(requireWindow(id)) # blocks ~100 ms for the browser process to exit
 
 proc askWindow(id: int; timeoutMs: int): JsonNode {.expose.} =
   ## Blocks on `slowAnswer()` in window `id` (which takes 10 s there). Close
   ## that window while this waits and the page gets `NeelDisconnectedError`.
-  let w = window(id)
-  if w.isNone:
-    raise newException(NeelNoWindowError, "window " & $id & " is not open")
-  w.get.js.wait(timeoutMs).slowAnswer()
+  requireWindow(id).js.wait(timeoutMs).slowAnswer()
 
 # --- lifecycle -------------------------------------------------------------------
 

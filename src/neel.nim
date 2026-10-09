@@ -3,8 +3,11 @@
 ## This is the only module an application imports. It provides `startApp`
 ## and re-exports the user-facing pieces of the internal modules under
 ## `neel/`: the `expose` pragma, the `js` proxy, the window API (`openWindow`,
-## `closeWindow`, `windows`, `window`, `currentWindow`), the `Browser` enum and
-## launch option types, `quitApp`, and the `Neel*Error` exception types.
+## `closeWindow`, `windows`, `window`, `requireWindow`, `currentWindow`), the
+## `Browser` enum and launch option types, `quitApp`, and the `Neel*Error`
+## exception types. It also re-exports `std/json` and `std/options`, because
+## the API hands out `JsonNode` (`js.wait.foo(...)`) and `Option` (`window(id)`,
+## `size = some((800, 600))`) values that an application needs to unpack.
 ##
 ## `startApp` is a macro: it generates the dispatch `case` over every proc
 ## bound with `{.expose.}` (so it must be called after them and after the
@@ -37,6 +40,10 @@ from neel/websocket import NeelFrameError
 
 # --- re-exports ------------------------------------------------------------------
 
+# Deliberate stdlib re-exports: every `js.wait.*` result is a `JsonNode` and
+# `window(id)` / `currentWindow()` / `size` / `position` are `Option`s, so an
+# app would otherwise need these two imports next to every `import neel`.
+export json, options
 export expose.expose, NeelArgumentError, NeelUnknownProcError
 # `std/jsonutils` hooks that exposed-proc wrappers instantiate in the user's
 # module (deliberate stdlib re-export, see `expose.nim`).
@@ -45,9 +52,9 @@ export jsproxy except initJsBridge, resetJsBridge, SendProc, WindowResolver,
                       WindowRoute, setCurrentWindow, clearCurrentWindow,
                       withCurrentWindow
 export window.Window, ExitReason, WindowHook, Launcher, openWindow, closeWindow,
-       windows, window.window, currentWindow, isOpen, isConnected, quitApp,
-       connectionCount, DefaultGracePeriodMs, MinGracePeriodMs,
-       DefaultStartupTimeoutMs
+       windows, window.window, requireWindow, currentWindow, isOpen,
+       isConnected, quitApp, connectionCount, DefaultGracePeriodMs,
+       MinGracePeriodMs, DefaultStartupTimeoutMs
 export Browser, NeelBrowserError, LaunchOptions, WindowSize, WindowPosition
 export NeelProtocolError, NeelTimeoutError, NeelDisconnectedError, NeelRemoteError
 export NeelFrameError

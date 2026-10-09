@@ -38,7 +38,14 @@ import std/[selectors, nativesockets, locks, tables, hashes, monotimes, times,
             tasks, typedthreads, oserrors, strutils]
 import ./[http, websocket, sha1, pool]
 
-when defined(windows):
+const
+  UseWinSockets = defined(windows) or defined(nimdoc)
+    ## `std/nativesockets` exposes its Windows API shape (winlean `recv` /
+    ## `send`, no POSIX errno re-exports) under `nim doc` as well, so the doc
+    ## build follows the Windows branches below. Never true in a real build
+    ## on a POSIX host.
+
+when UseWinSockets:
   from std/winlean import TCP_NODELAY, WSAEWOULDBLOCK
 else:
   # `nativesockets` already re-exports EAGAIN/EWOULDBLOCK/EINTR/MSG_NOSIGNAL
@@ -69,22 +76,24 @@ type
     ## (never reused, unlike file descriptors).
 
   RequestActionKind* = enum
+    ## What a request handler asks the server to do.
     raRespond  ## Send `response` and stay in HTTP mode (or close, per keep-alive).
     raUpgrade  ## Complete the WebSocket handshake for this request.
 
   RequestAction* = object
     ## What a `RequestHandler` wants done with a request. Build with
     ## `respond` or `upgrade`.
-    case kind*: RequestActionKind
+    case kind*: RequestActionKind ## Respond or upgrade.
     of raRespond:
-      response*: HttpResponse
+      response*: HttpResponse ## The response to encode and send.
     of raUpgrade:
       discard
 
   RequestHandler* = proc(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.}
-    ## Runs on a pool worker for every complete request. Exceptions become a
-    ## 500. Returning `upgrade()` for a request that is not a valid WebSocket
-    ## upgrade (see `isWebSocketUpgrade`) produces a 400 and closes.
+    ## Runs on a pool worker for every complete request. Exceptions become
+    ## a 500 response. Returning `upgrade()` for a request that is not a
+    ## valid WebSocket upgrade (see `isWebSocketUpgrade`) produces a 400 and
+    ## closes.
   MessageHandler* = proc(conn: ConnId; message: string) {.gcsafe.}
     ## Runs on a pool worker for every complete text message. Exceptions are
     ## swallowed.
@@ -176,7 +185,9 @@ type
 # --- ConnId ----------------------------------------------------------------------
 
 proc `==`*(a, b: ConnId): bool {.borrow.}
+  ## Identity comparison of two connection ids.
 proc hash*(id: ConnId): Hash {.borrow.}
+  ## Hash of the id, so `ConnId` can key a `Table`.
 proc `$`*(id: ConnId): string =
   ## Decimal rendering of the id.
   $int(id)
@@ -214,25 +225,25 @@ proc upgradeResponse(req: HttpRequest): HttpResponse =
 
 # --- platform helpers -------------------------------------------------------------
 
-when defined(windows):
+when UseWinSockets:
   const SendFlags = 0'i32
 else:
   const SendFlags = cint(MSG_NOSIGNAL)
 
 proc wouldBlock(err: OSErrorCode): bool =
-  when defined(windows):
+  when UseWinSockets:
     err.int32 == WSAEWOULDBLOCK
   else:
     err.int32 == EAGAIN or err.int32 == EWOULDBLOCK or err.int32 == EINTR
 
 proc rawRecv(fd: SocketHandle; buf: pointer; len: int): int =
-  when defined(windows):
+  when UseWinSockets:
     int(recv(fd, buf, cint(len), 0'i32))
   else:
     recv(fd, buf, len, 0'i32)
 
 proc rawSend(fd: SocketHandle; buf: pointer; len: int): int =
-  when defined(windows):
+  when UseWinSockets:
     int(send(fd, buf, cint(len), SendFlags))
   else:
     send(fd, buf, len, SendFlags)
@@ -241,7 +252,7 @@ proc raiseFdLimit() =
   ## Raises the soft `RLIMIT_NOFILE` to `min(hard, 4096)` when it is lower
   ## (the macOS GUI default is 256). Failure is ignored. Must run before
   ## `newSelector`, which sizes itself from the limit (PLAN.md spike (c)).
-  when defined(posix):
+  when defined(posix) and not UseWinSockets:
     const Target = 4096
     var lim: RLimit
     if getrlimit(RLIMIT_NOFILE, lim) != 0:
@@ -641,7 +652,7 @@ proc acceptAll(s: ptr ServerImpl) =
     fd.setBlocking(false)
     try:
       setSockOptInt(fd, toInt(nativesockets.IPPROTO_TCP), TCP_NODELAY, 1)
-      when defined(macosx):
+      when defined(macosx) and not UseWinSockets:
         setSockOptInt(fd, SOL_SOCKET, SO_NOSIGPIPE, 1)
     except OSError:
       discard

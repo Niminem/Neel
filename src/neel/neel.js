@@ -20,6 +20,16 @@
 //   neel.ready                 -> Promise resolved on the first open
 //   neel.windowId              -> number
 //   neel.close()               -> deliberate close, no reconnect
+//   neel.connected             -> boolean, true while the socket is open
+//   neel.onclose(fn)           -> fn(code, reconnecting) after every close
+//   neel.onreconnect(fn)       -> fn() after every successful open but the first
+//
+// Connection state for a page that wants to show it: `neel.ready` covers the
+// first open; `neel.onclose` fires once per lost or closed connection with the
+// WebSocket close code (1006 for a lost connection, 1000/1001 for a deliberate
+// close, null when the shim gave up without a socket event) and whether a
+// reconnect attempt follows; `neel.onreconnect` fires when such an attempt
+// succeeds. A listener that throws is reported with console.warn and ignored.
 //
 // Errors: a rejected call carries an Error whose `name` (and `kind`) is the
 // Nim exception type ("ValueError", "NeelArgumentError", ...) and whose
@@ -57,14 +67,18 @@
   const RECONNECT_BASE_MS = 250;
   const DISCONNECTED = "NeelDisconnectedError";
   const UNKNOWN_FUNCTION = "NeelUnknownFunctionError";
-  const RESERVED = new Set(["call", "send", "expose", "ready", "windowId", "close"]);
+  const RESERVED = new Set(["call", "send", "expose", "ready", "windowId", "close",
+                            "connected", "onclose", "onreconnect"]);
 
   const registry = new Map(); // name -> function, from neel.expose
   const pending = new Map();  // id -> {resolve, reject}, in flight on `socket`
   const queue = [];           // {name, args, settle} waiting for an open socket
+  const closeListeners = [];      // from neel.onclose
+  const reconnectListeners = [];  // from neel.onreconnect
   let socket = null;          // the current WebSocket, null while disconnected
   let nextId = 1;             // reset for every connection
   let attempts = 0;           // reconnects since the last successful open
+  let everOpened = false;     // distinguishes the first open from a reconnect
   let timer = null;           // pending reconnect timer
   let terminated = false;     // closed deliberately, by the server, or gave up
 
@@ -140,7 +154,17 @@
     }
   }
 
-  function terminate(reason) {
+  function notify(listeners, ...args) {
+    for (const fn of listeners) {
+      try {
+        fn(...args);
+      } catch (e) {
+        console.warn("neel: connection listener threw", e);
+      }
+    }
+  }
+
+  function terminate(reason, code) {
     terminated = true;
     if (timer !== null) {
       clearTimeout(timer);
@@ -149,6 +173,7 @@
     failPending(reason);
     failQueue(reason);
     rejectReady(neelError(DISCONNECTED, reason)); // no-op once resolved
+    notify(closeListeners, code === undefined ? null : code, false);
   }
 
   function call(name, ...args) {
@@ -241,14 +266,15 @@
       "/ws?token=" + encodeURIComponent(TOKEN) + "&window=" + WINDOW_ID;
   }
 
-  function scheduleReconnect() {
+  function scheduleReconnect(code) {
     if (terminated) return;
     if (attempts >= MAX_RECONNECT_ATTEMPTS) {
-      terminate("neel: gave up reconnecting after " + MAX_RECONNECT_ATTEMPTS + " attempts");
+      terminate("neel: gave up reconnecting after " + MAX_RECONNECT_ATTEMPTS + " attempts", code);
       return;
     }
     attempts += 1;
     timer = setTimeout(connect, RECONNECT_BASE_MS * 2 ** (attempts - 1));
+    notify(closeListeners, code, true);
   }
 
   function connect() {
@@ -260,8 +286,11 @@
     ws.onopen = () => {
       if (ws !== socket) return;
       attempts = 0;
+      const reconnected = everOpened;
+      everOpened = true;
       resolveReady();
       flushQueue();
+      if (reconnected) notify(reconnectListeners);
     };
 
     ws.onmessage = (event) => {
@@ -285,10 +314,10 @@
       failPending("neel: connection lost (close code " + event.code + ")");
       if (terminated) return;
       if (event.code === 1000 || event.code === 1001) {
-        terminate("neel: server closed the connection (close code " + event.code + ")");
+        terminate("neel: server closed the connection (close code " + event.code + ")", event.code);
         return;
       }
-      scheduleReconnect();
+      scheduleReconnect(event.code);
     };
     // onerror carries no information the following onclose does not; ignored.
   }
@@ -320,12 +349,17 @@
 
   function close() {
     if (terminated) return;
-    terminate("neel: closed by neel.close()");
     if (socket !== null) {
       const ws = socket;
       socket = null;
       ws.close(1000, "neel.close()");
     }
+    terminate("neel: closed by neel.close()", 1000);
+  }
+
+  function addListener(listeners, label, fn) {
+    if (typeof fn !== "function") throw new TypeError("neel." + label + "(fn): fn must be a function");
+    listeners.push(fn);
   }
 
   const neel = {};
@@ -336,6 +370,9 @@
     close: { value: close, enumerable: true },
     ready: { value: ready, enumerable: true },
     windowId: { value: WINDOW_ID, enumerable: true },
+    connected: { get: isOpen, enumerable: true },
+    onclose: { value: (fn) => addListener(closeListeners, "onclose", fn), enumerable: true },
+    onreconnect: { value: (fn) => addListener(reconnectListeners, "onreconnect", fn), enumerable: true },
   });
 
   for (const name of EXPOSED) {

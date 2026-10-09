@@ -10,9 +10,19 @@ const tab = params.get("tab");
 
 byId("window-id").textContent = String(neel.windowId);
 byId("tab").textContent = tab === null ? "main" : "tab " + tab;
+
+// Connection status: neel.ready covers the first open, neel.onclose every
+// lost or closed connection (with the close code and whether the shim will
+// retry), neel.onreconnect every successful retry.
+const status = byId("status");
 neel.ready.then(
-  () => { byId("status").textContent = "connected"; },
-  (e) => { byId("status").textContent = e.name; });
+  () => { status.textContent = "connected"; },
+  (e) => { status.textContent = e.name + ": " + e.message; });
+neel.onclose((code, reconnecting) => {
+  status.textContent = (reconnecting ? "reconnecting" : "closed") +
+    " (close code " + code + ", neel.connected = " + neel.connected + ")";
+});
+neel.onreconnect(() => { status.textContent = "connected again"; });
 
 // --- helpers --------------------------------------------------------------------
 
@@ -370,11 +380,10 @@ section("Lifecycle",
     ["exitApp() (quit)", async (log) => {
       log("calling exitApp()...");
       await expectOrValue(log, "exitApp()", t(neel.exitApp()));
-      byId("status").textContent = "quitting (server sends close 1001)";
+      log("waiting for the server's close 1001 (see the status above)");
     }],
     ["neel.close() (this window)", async (log) => {
-      neel.close();
-      byId("status").textContent = "closed by neel.close()";
+      neel.close(); // the status above changes through neel.onclose
       log("neel.close() called");
       await expectError(log, "whoAmI() after close", t(neel.whoAmI()), "NeelDisconnectedError");
     }],

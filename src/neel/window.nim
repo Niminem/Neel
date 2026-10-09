@@ -26,9 +26,10 @@
 ## `Window`. `closeWindow` sends a 1000 close (so `neel.js` does not
 ## reconnect), terminates the browser process, removes its profile directory,
 ## and refuses later binds with that id. `windows()`, `window(id)`,
-## `currentWindow()` query the table. `onWindowOpen` / `onWindowClose` hooks
-## fire once per window, on the thread that observes the event, never under
-## the lock.
+## `requireWindow(id)` (raises `NeelNoWindowError` instead of returning
+## `none`), and `currentWindow()` query the table. `onWindowOpen` /
+## `onWindowClose` hooks fire once per window, on the thread that observes
+## the event, never under the lock.
 ##
 ## Lifecycle (connection-count based): when the WebSocket count drops to 0 a
 ## grace period starts (`DefaultGracePeriodMs`: 3 s debug, 10 s release); a
@@ -514,6 +515,18 @@ proc window*(id: int): Option[Window] {.gcsafe.} =
   if rec != nil and not rec.closed:
     result = some toWindow(rec)
   release m.lock
+
+proc requireWindow*(id: int): Window {.gcsafe.} =
+  ## The open window with this id. Raises `NeelNoWindowError` (`"window <id>
+  ## is not open"`) for an unknown, closed, or `NoWindow` id: the same lookup
+  ## as `window(id)`, but a `CatchableError` instead of the `UnpackDefect`
+  ## that `window(id).get` raises on `none`, so an exposed proc that targets
+  ## a window the user has since closed answers with a structured error
+  ## rather than taking the process down.
+  let w = window(id)
+  if w.isNone:
+    raise newException(NeelNoWindowError, "window " & $id & " is not open")
+  w.get
 
 proc currentWindow*(): Option[Window] {.gcsafe.} =
   ## The window whose exposed proc is running on this thread

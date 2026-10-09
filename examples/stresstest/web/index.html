@@ -45,15 +45,16 @@
         <strong>Reconnect and give up</strong>: the shim reconnects only after
         an abnormal close (any code but 1000/1001), which Neel never sends on
         purpose, so kill the process instead: <code>kill -9 &lt;pid&gt;</code>
-        (the pid is in the asJson() output). Press "whoAmI()" right away: the
-        call is queued while the shim retries (5 attempts, 250 ms to 4 s
-        apart, 7.75 s in total) and is then rejected with
+        (the pid is in the asJson() output). The status above switches to
+        "reconnecting (close code 1006 ...)" at once. Press "whoAmI()" right
+        away: the call is queued while the shim retries (5 attempts, 250 ms
+        to 4 s apart, 7.75 s in total) and is then rejected with
         <code>NeelDisconnectedError: neel: gave up reconnecting after 5
         attempts</code>; every later press rejects at once with
-        <code>neel: connection is closed</code>. A page refresh after a
-        restart of the app works again (a new token is rendered into
-        /neel.js), while the old page cannot reconnect because its token is
-        stale.
+        <code>neel: connection is closed</code>; the status then reads
+        "closed (close code 1006 ...)". A page refresh after a restart of the
+        app works again (a new token is rendered into /neel.js), while the
+        old page cannot reconnect because its token is stale.
       </li>
       <li>
         <strong>No browser</strong>: run the binary on a machine without

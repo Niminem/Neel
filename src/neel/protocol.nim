@@ -61,6 +61,7 @@ type
     kind*: string
 
   MsgKind* = enum
+    ## The three message types; the string value is the wire `t` field.
     msgCall = "call"  ## Invoke `name` with `args`; `id` optional.
     msgRet = "ret"    ## Successful reply to the `call` with the same `id`.
     msgErr = "err"    ## Failed reply to the `call` with the same `id`.
@@ -74,15 +75,15 @@ type
     ## One wire message. `id` is `NoId` when absent (only legal for `call`).
     ## Named `Msg` rather than `Message` so it does not clash with
     ## `websocket.Message` in modules that import both.
-    id*: int
-    case kind*: MsgKind
+    id*: int ## Positive call id, or `NoId` for a fire-and-forget call.
+    case kind*: MsgKind ## Message type, see `MsgKind`.
     of msgCall:
-      name*: string
-      args*: seq[JsonNode]
+      name*: string ## Exposed proc or JS function to invoke.
+      args*: seq[JsonNode] ## Positional arguments, already parsed.
     of msgRet:
-      value*: JsonNode
+      value*: JsonNode ## The return value (`null` for void).
     of msgErr:
-      error*: ErrorInfo
+      error*: ErrorInfo ## Kind and message of the failure.
 
   IdAllocator* = object
     ## Per-connection id counter. Zero-initialized means "next id is 1".

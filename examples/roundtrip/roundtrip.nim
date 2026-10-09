@@ -6,7 +6,7 @@
 ##   function the page registered with `neel.expose`, and returns its result.
 ## - Two windows: `openSecond` opens `web/second.html` in a second browser
 ##   window; `askSecond(id)` targets that window explicitly with
-##   `window(id).get.js.wait(5000).ask(...)` and returns the answer to the
+##   `requireWindow(id).js.wait(5000).ask(...)` and returns the answer to the
 ##   first page; `closeSecond` closes it; `listWindows` reports `windows()`.
 ## - The structured errors the first page sees when the second window is
 ##   closed (`NeelNoWindowError`), slow (`NeelTimeoutError`), closed in the
@@ -27,9 +27,7 @@
 ## Each window is its own Chrome process with a private profile, so opening
 ## the second window takes a moment. Expect Chromium's stderr noise.
 
-import std/json    # `js.wait.*` returns a JsonNode; `getStr` etc. live here
-import std/options # `window(id)` / `currentWindow()` return an Option[Window]
-import neel
+import neel # also brings std/json (`getStr`) and std/options (`isSome`, `get`)
 
 type
   WindowInfo = object
@@ -57,12 +55,10 @@ proc openSecond(): int {.expose.} =
 
 proc askSecond(id: int): string {.expose.} =
   ## Asks window `id` a question and returns its answer (a `prompt` there).
-  ## `window(id)` is `none` once the window has been closed, so it is checked
-  ## rather than unpacked: `.get` on `none` is a Defect, not a bridge error.
-  let w = window(id)
-  if w.isNone:
-    raise newException(NeelNoWindowError, "window " & $id & " is not open")
-  w.get.js.wait(5000).ask("Window 1 asks: what is your favourite number?").getStr
+  ## `requireWindow` raises `NeelNoWindowError` once the window has been
+  ## closed, which the first page sees as a structured error.
+  requireWindow(id).js.wait(5000)
+    .ask("Window 1 asks: what is your favourite number?").getStr
 
 proc closeSecond(id: int) {.expose.} =
   ## Closes window `id` with a clean 1000 close, so its shim does not try to

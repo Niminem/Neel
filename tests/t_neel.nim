@@ -11,8 +11,11 @@
 ## assets) or just disconnects and lets the grace period end the app (second
 ## run, embedded assets). Every wait and read is bounded (3 s max).
 
-import std/[unittest, json, locks, os, monotimes, times, typedthreads, net,
-            nativesockets, strutils, options, uri]
+import std/[unittest, locks, os, monotimes, times, typedthreads, net,
+            nativesockets, strutils, uri]
+# `std/json` and `std/options` are deliberately *not* imported here: this
+# file uses `%`, `getInt`, `some`, `isNone`, ... through `import neel`'s
+# re-export, so the whole suite checks that applications get them for free.
 import neel
 import neel/[protocol, websocket, frontend, browser]
 
@@ -425,6 +428,7 @@ suite "neel: startApp end to end":
     check compiles(closeWindow(Window(id: 1, js: js)))
     check compiles(windows())
     check compiles(window(1))
+    check compiles(requireWindow(1))
     check compiles(currentWindow())
     check compiles(quitApp())
     check compiles(js.wait(100).foo(1))
@@ -432,6 +436,14 @@ suite "neel: startApp end to end":
     check compiles(some((800, 600)) is Option[WindowSize])
     check compiles(LaunchOptions(extraFlags: @["--x"]))
     check compiles(@[Chrome, Chromium, Default])
+    # std/json and std/options come with `import neel` (see the import list).
+    check (%*{"a": 1, "b": [1, 2]})["b"][1].getInt == 2
+    check parseJson("[1,2,3]").to(seq[int]) == @[1, 2, 3]
+    check (%"x").getStr == "x"
+    check some(3).get == 3
+    check none(Window).isNone
+    let size: Option[WindowSize] = some((800, 600))
+    check size.get.width == 800
     check NeelArgumentError is CatchableError
     check NeelUnknownProcError is CatchableError
     check NeelNoWindowError is CatchableError

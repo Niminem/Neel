@@ -81,20 +81,22 @@ type
 
   Frame* = object
     ## One decoded frame. `payload` is already unmasked.
-    fin*: bool
-    opcode*: Opcode
+    fin*: bool        ## Final fragment of its message.
+    opcode*: Opcode   ## Frame type.
     masked*: bool     ## Whether the frame carried a masking key on the wire.
     maskKey*: MaskKey ## Zero when `masked` is false.
-    payload*: string
+    payload*: string  ## Unmasked payload bytes.
 
   FrameStatus* = enum
+    ## Outcome of one `decodeFrame` call.
     fsIncomplete ## More bytes are needed; keep the buffer and call again.
     fsComplete   ## `frame` is valid and `consumed` bytes can be dropped.
 
   FrameResult* = object
-    status*: FrameStatus
+    ## What `decodeFrame` returns.
+    status*: FrameStatus ## See `FrameStatus`.
     consumed*: int ## Bytes of the buffer that made up the frame (fsComplete).
-    frame*: Frame
+    frame*: Frame  ## The decoded frame (fsComplete).
 
   FrameRole* = enum
     ## Which direction a decoder reads. Determines the masking rule.
@@ -115,21 +117,24 @@ type
     header: Frame   # fin/opcode/masked/maskKey; payload empty
 
   MessageKind* = enum
+    ## Data message type (from the first fragment's opcode).
     mkText   ## UTF-8 text message.
     mkBinary ## Binary message (bytes in a `string`).
 
   Message* = object
     ## A complete, reassembled data message.
-    kind*: MessageKind
-    payload*: string
+    kind*: MessageKind ## Text or binary.
+    payload*: string   ## The concatenated fragment payloads.
 
   AssembleStatus* = enum
+    ## Outcome of one `feed` call.
     asNone    ## A fragment was absorbed; nothing to deliver yet.
     asMessage ## `message` holds a complete data message.
     asControl ## `control` holds a ping, pong, or close frame.
 
   AssembleResult* = object
-    status*: AssembleStatus
+    ## What `feed` returns.
+    status*: AssembleStatus ## See `AssembleStatus`.
     message*: Message ## Valid when `status == asMessage`.
     control*: Frame   ## Valid when `status == asControl`.
 

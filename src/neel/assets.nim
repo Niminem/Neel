@@ -50,6 +50,7 @@ type
     ## once by `startApp` (through `diskAssets` / `embeddedAssets`) and read
     ## concurrently by pool workers; nothing mutates it afterwards.
     mode*: AssetMode
+      ## Disk or embedded.
     root*: string
       ## Absolute, normalized web root (`amDisk`); `""` when embedded.
     files*: Table[string, string]

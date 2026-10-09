@@ -57,25 +57,28 @@ type
 
   HttpRequest* = object
     ## A fully parsed request head. The body (if any) has been skipped.
-    httpMethod*: HttpMethod
+    httpMethod*: HttpMethod ## `hmGet`, `hmHead`, or `hmOther`.
     rawMethod*: string      ## Method token as sent, e.g. `"POST"`.
     target*: string         ## Request target as sent, e.g. `"/a?b=1"`.
     path*: string           ## `target` up to the first `?` (not percent-decoded).
     query*: string          ## Part of `target` after the first `?`, or `""`.
-    version*: HttpVersion
-    headers*: seq[HttpHeader]
+    version*: HttpVersion   ## `hv10` or `hv11`.
+    headers*: seq[HttpHeader] ## Every header field in wire order.
     contentLength*: int     ## Declared body length, 0 when absent.
 
   ParseStatus* = enum
+    ## Outcome of one `parseRequest` call.
     psIncomplete  ## More bytes are needed; keep the buffer and call again.
     psComplete    ## `request` is valid and `consumed` bytes can be dropped.
     psMalformed   ## Answer 400 and close; `error` says why.
 
   ParseResult* = object
-    status*: ParseStatus
+    ## What `parseRequest` returns; which fields are meaningful depends on
+    ## `status`.
+    status*: ParseStatus ## See `ParseStatus`.
     consumed*: int      ## Bytes of the buffer that made up the request (psComplete).
     error*: string      ## Human-readable reason (psMalformed).
-    request*: HttpRequest
+    request*: HttpRequest ## The parsed request (psComplete).
 
   HttpParser* = object
     ## Incremental state for one connection. Between `psIncomplete` results
@@ -90,21 +93,23 @@ type
   HttpResponse* = object
     ## A response ready for `encodeResponse`. `Content-Length` and
     ## `Connection` are added automatically unless already present.
-    status*: int
-    headers*: seq[HttpHeader]
-    body*: string
+    status*: int              ## HTTP status code, e.g. 200.
+    headers*: seq[HttpHeader] ## Header fields in the order they are written.
+    body*: string             ## Response body (omitted on the wire for `HEAD`).
 
   ByteRange* = object
     ## Inclusive byte range `[first, last]` within a representation.
     first*, last*: int
 
   RangeStatus* = enum
+    ## Outcome of `parseRange`.
     rsIgnored        ## No usable single range: serve the whole body with 200.
     rsSatisfiable    ## Serve `range` with 206.
     rsUnsatisfiable  ## Answer 416.
 
   RangeResult* = object
-    status*: RangeStatus
+    ## What `parseRange` returns.
+    status*: RangeStatus ## See `RangeStatus`.
     range*: ByteRange  ## Valid when `status == rsSatisfiable`.
 
 const

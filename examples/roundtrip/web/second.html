@@ -13,7 +13,7 @@
   <p>
     This page registered <code>ask</code> with <code>neel.expose</code>. When
     window 1 presses <em>neel.askSecond(id)</em>, Nim calls it here with
-    <code>window(id).get.js.wait(5000).ask(...)</code>; it shows a prompt and
+    <code>requireWindow(id).js.wait(5000).ask(...)</code>; it shows a prompt and
     returns what you type. Cancel throws, and the error name travels back to
     window 1.
   </p>

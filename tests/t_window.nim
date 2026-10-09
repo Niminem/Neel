@@ -275,6 +275,31 @@ suite "window: opening":
     check openWindow().id == 2
     check windows().ids == @[2]
 
+  winTest "requireWindow returns an open window and raises NeelNoWindowError otherwise":
+    let w = openWindow()
+    check requireWindow(1) == w
+    check requireWindow(1).js.windowId == 1
+    # Unknown id.
+    expect NeelNoWindowError:
+      discard requireWindow(2)
+    # NoWindow (what currentWindowId() is outside an exposed proc).
+    expect NeelNoWindowError:
+      discard requireWindow(NoWindow)
+    # Closed id.
+    closeWindow(w)
+    expect NeelNoWindowError:
+      discard requireWindow(1)
+    # Exact message.
+    try:
+      discard requireWindow(7)
+      check false
+    except NeelNoWindowError as e:
+      check e.msg == "window 7 is not open"
+
+  test "requireWindow raises when the window manager is not initialised":
+    expect NeelNoWindowError:
+      discard requireWindow(1)
+
   winTest "windows() lists open windows in id order":
     var ws: seq[Window]
     for i in 1 .. 5:

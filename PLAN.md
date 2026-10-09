@@ -1150,6 +1150,19 @@ Notes for later tasks:
   `windowId`, `close` are reserved: an exposed Nim proc with one of those
   names gets no generated function (a `console.warn` says to use
   `neel.call(name, ...)`). Loading `neel.js` twice is a no-op with a warning.
+  Added by Task 15 (also reserved): `neel.connected` (getter, `true` while
+  the socket is open), `neel.onclose(fn)` (`fn(code, reconnecting)` exactly
+  once per lost or closed connection: `code` is the WebSocket close code,
+  1006 for a lost connection, 1000 for `neel.close()` / `closeWindow`, 1001
+  for shutdown, `null` only if the shim gave up without a socket event;
+  `reconnecting` is `true` when a retry follows), `neel.onreconnect(fn)`
+  (`fn()` after every successful open except the first; `neel.ready` covers
+  that one). Both registrars throw `TypeError` for a non-function; a
+  listener that throws is `console.warn`ed. Verified in the IDE browser
+  against a throwaway stresstest copy: `closeWindow` -> one `(1000, false)`;
+  `kill -9` of the server -> five `(1006, true)` at the documented backoff
+  then one `(1006, false)`; a server 1009 close -> `(1006, true)` then
+  `onreconnect` 256 ms later with `neel.connected == true`.
 - Error names JS -> app (rejections): an `Error` with `name` and `kind` both
   set to the wire `kind` and `message` = wire `msg` (`"ValueError"`,
   `"NeelArgumentError"`, `"NeelUnknownProcError"`, ...);
@@ -1796,6 +1809,12 @@ Notes for later tasks (Tasks 14 and 15):
   `window=2` in `Referer` and renders window 2 even while window 1 is open.
   Chromium sends the full same-origin `Referer` by default; a page that sets
   `<meta name="referrer" content="no-referrer">` breaks multi-window.
+- `requireWindow(id): Window` (added by Task 15, `window.nim`): the same
+  lookup as `window(id)` but raises `NeelNoWindowError` with the message
+  `window <id> is not open` for an unknown, closed, or `NoWindow` id (also
+  when the window manager is not initialised), instead of the `UnpackDefect`
+  from `window(id).get`. Use it inside exposed procs that target another
+  window; `windows()` / `window(id)` remain for enumeration and checks.
 - `handleMessage`: `decode` (a `NeelProtocolError` is written to stderr as
   `neel: dropped malformed message on connection <id>: <reason>` in debug
   builds and dropped; the connection stays open); `msgCall` ->
@@ -1828,8 +1847,12 @@ Notes for later tasks (Tasks 14 and 15):
   the index: `/sub/` is a 404, not `/sub/index.html`. Directory listings
   never exist. Keys in the embedded table and on disk are
   byte-for-byte interchangeable (tested per fixture file).
-- Re-export list of `src/neel.nim` (exact): from `expose`: `expose`,
-  `NeelArgumentError`, `NeelUnknownProcError`, `fromJsonHook`, `toJsonHook`;
+- Re-export list of `src/neel.nim` (exact; `std/json`, `std/options`, and
+  `requireWindow` were added by Task 15): `std/json` and `std/options`
+  whole (so `getStr` / `getInt` / `.to(T)` / `%*` / `parseJson` and
+  `some` / `none` / `isSome` / `get` come with `import neel`); from
+  `expose`: `expose`, `NeelArgumentError`, `NeelUnknownProcError`,
+  `fromJsonHook`, `toJsonHook`;
   from `jsproxy`: everything except `initJsBridge`, `resetJsBridge`,
   `SendProc`, `WindowResolver`, `WindowRoute`, `setCurrentWindow`,
   `clearCurrentWindow`, `withCurrentWindow` (so `js`, `wait`, `jsSend`,
@@ -1838,9 +1861,10 @@ Notes for later tasks (Tasks 14 and 15):
   `NoWindow`, `UseDefaultTimeout`, `DefaultCallTimeoutMs`); from `window`:
   `Window`, `ExitReason` (with `erLastWindowClosed`, `erQuit`,
   `erStartupTimeout`), `WindowHook`, `Launcher`, `openWindow`,
-  `closeWindow`, `windows`, `window`, `currentWindow`, `isOpen`,
-  `isConnected`, `quitApp`, `connectionCount`, `DefaultGracePeriodMs`,
-  `MinGracePeriodMs`, `DefaultStartupTimeoutMs`; from `browser`:
+  `closeWindow`, `windows`, `window`, `requireWindow`, `currentWindow`,
+  `isOpen`, `isConnected`, `quitApp`, `connectionCount`,
+  `DefaultGracePeriodMs`, `MinGracePeriodMs`, `DefaultStartupTimeoutMs`;
+  from `browser`:
   `Browser` (with its members), `NeelBrowserError`, `LaunchOptions`,
   `WindowSize`, `WindowPosition`; from `protocol`: `NeelProtocolError`,
   `NeelTimeoutError`, `NeelDisconnectedError`, `NeelRemoteError`; from
@@ -1849,17 +1873,16 @@ Notes for later tasks (Tasks 14 and 15):
   `runApp`, `NeelVersion`, `NeelJsPath`. Not re-exported: `initWindows`,
   `teardownWindows`, `waitForAppExit`, `bindConnection`,
   `connectionOpened`, `connectionClosed`, `windowIdOf`, `resolveWindow`,
-  `launchUrl`, the server/http/protocol internals, `std/options` (an app
-  that passes `size = some((800, 600))` imports `std/options` itself).
-- Example layout for Task 14: `examples/<name>/app.nim` next to
-  `examples/<name>/web/index.html` (plus `web/*.js`, `web/*.css`,
+  `launchUrl`, the server/http/protocol internals.
+- Example layout (as built by Task 14): `examples/<name>/<name>.nim` next
+  to `examples/<name>/web/index.html` (plus `web/*.js`, `web/*.css`,
   subdirectories as needed). `index.html` must load `<script
   src="/neel.js"></script>` *before* the app's own script; module scripts
   read `window.neel`. The app: `import neel`, `{.expose.}` procs, then
-  `startApp()` (or `startApp(size = some((W, H)))` with `import
-  std/options`) as the last statement or inside `main()`. Running: `nim c
-  -r examples/<name>/app.nim` from any directory serves `web/` from disk
-  (edits show up on refresh); `nim c -d:release examples/<name>/app.nim`
+  `startApp()` (or `startApp(size = some((W, H)))`; `some` comes with
+  `import neel`) as the last statement or inside `main()`. Running: `nim c
+  -r examples/<name>/<name>.nim` from any directory serves `web/` from disk
+  (edits show up on refresh); `nim c -d:release examples/<name>/<name>.nim`
   embeds `web/` into the binary at compile time (verified: the file bytes
   appear in the release binary and not in the debug one), so the release
   binary can be moved anywhere. The default grace period differs (3 s debug
@@ -2050,7 +2073,8 @@ Notes for later tasks (Task 15):
     compiled; every `web/` file (including all 4096 bytes of `blob.bin`)
     was found in the release binaries and in none of the debug ones.
 - API friction met while writing real apps (README caveats or follow-ups,
-  not fixed here):
+  not fixed here; Task 15 fixed items 1, 2, 3, and 7 and lists the rest as
+  README caveats):
   1. `std/json` is not re-exported, so `js.wait.foo(...).getStr` /
      `.getInt` / `.to(T)` and `%*` need `import std/json` in the app (the
      Task 13 recipe omits it). Candidate follow-up: re-export `std/json`
@@ -2202,12 +2226,15 @@ Notes for later tasks (Task 15):
        browser found" [ok]`.
     6. Manual checks in the page: refresh (same window id, status
        `connected`, no second `opened` hook); `kill -9 <pid>` (pid from
-       `asJson()`), press `whoAmI()` at once -> after about 8 s `gave up
-       reconnecting after 5 attempts`, later presses `connection is closed`.
+       `asJson()`): status switches to `reconnecting (close code 1006, ...)`
+       at once; press `whoAmI()` -> after about 8 s `gave up reconnecting
+       after 5 attempts` and status `closed (close code 1006, ...)`, later
+       presses `connection is closed`.
     7. Restart; `neel.close() (this window)` -> log `whoAmI() after close:
-       NeelDisconnectedError ... [ok]`, status `closed by neel.close()`; the
-       window stays open but dead; terminal `[hook] window 1 closed` after 3
-       s and `stresstest exited: erLastWindowClosed`.
+       NeelDisconnectedError ... [ok]`, status `closed (close code 1000,
+       neel.connected = false)` (via `neel.onclose`, Task 15); the window
+       stays open but dead; terminal `[hook] window 1 closed` after 3 s and
+       `stresstest exited: erLastWindowClosed`.
     8. Restart; `exitApp() (quit)` -> log `exitApp() -> null`, terminal
        `[hook] window 1 closed` and `stresstest exited: erQuit`, the Chrome
        window closes, process ends.
@@ -2227,6 +2254,30 @@ Notes for later tasks (Task 15):
   first.
 
 #### Task 15: Documentation
+**Status:** done
+
+Deviations: the optional shim event *was* added (about 30 lines):
+`neel.connected`, `neel.onclose(fn)`, `neel.onreconnect(fn)` (contract and
+browser verification under the Task 10 notes); the stresstest status label
+uses them. `nim doc` failed outright in `server.nim` rather than only
+warning: under `-d:nimdoc` `std/nativesockets` takes its Windows API shape
+and re-exports none of the POSIX symbols, so `server.nim` now selects its
+platform branches with `UseWinSockets = defined(windows) or
+defined(nimdoc)` (mirroring the stdlib; never true in a real POSIX build) -
+the only `src/` change outside the approved adjustments. `tests/t_neel.nim`
+no longer imports `std/json` / `std/options` itself, so the whole suite is
+the re-export check. Field-level `##` comments were added where object
+fields had none. The throwaway doc output and the browser harness lived in
+`/tmp/neeldoc` and `/tmp/neel15/` (deleted).
+
+What remains outside this plan: manual browser verification of the three
+examples on macOS, Windows, and Linux with real Chrome / Chromium (the Task
+14 checklist; only the IDE browser with a fake launcher has been used so
+far), the merge of `neel2-devel` into `master`, and the 2.0.0 release
+(tag, nimble publish). Candidates for a later version (not planned):
+`Edge` / `Brave` / `Opera` / `Vivaldi` specs, `wss:`, a JS-side unit test
+runner for `neel.js` once a JS runtime is acceptable as a dev dependency.
+
 - API adjustments first (approved after Task 14; small, in `src/`, with
   tests, so the README documents the final shape):
   - Re-export `std/json` and `std/options` from `src/neel.nim` so an app

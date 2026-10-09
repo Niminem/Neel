@@ -79,6 +79,7 @@ type
     ## so discovery can run on a pool worker (`openWindow` from an exposed
     ## proc).
     fileExists*: proc(path: string): bool {.gcsafe.}
+      ## Whether a regular file exists at `path`.
     findExe*: proc(name: string): string {.gcsafe.}
       ## Absolute path or `""` when `name` is not on `PATH`.
     getEnv*: proc(name: string): string {.gcsafe.}
@@ -92,6 +93,7 @@ type
   ProbeResult* = object
     ## What discovery looked at for one supported browser.
     browser*: Browser
+      ## The browser probed.
     candidates*: seq[string]
       ## Every location examined, in order, for the no-browser page.
     path*: string
@@ -113,6 +115,7 @@ type
     ## Result of `findBrowser`: the outcome plus everything that was probed,
     ## so the no-browser page can list it.
     found*: Option[FoundBrowser]
+      ## The browser to launch, or `none` when nothing usable was found.
     probed*: seq[ProbeResult]
       ## Supported browsers probed, in preference order, including the one
       ## found (if any). Empty when an override was used.
@@ -127,11 +130,14 @@ type
   LaunchOptions* = object
     ## Per-window launch parameters other than the URL and profile dir.
     size*: Option[WindowSize]
+      ## `--window-size=W,H` when given.
     position*: Option[WindowPosition]
+      ## `--window-position=X,Y` when given.
     extraFlags*: seq[string]
       ## Appended verbatim, in order, after Neel's own flags.
 
   LaunchKind* = enum
+    ## How a window was opened, which decides what `BrowserHandle` tracks.
     lkAppWindow
       ## A browser process Neel started in `--app` mode; `process` is live.
     lkDefaultBrowser
@@ -146,13 +152,16 @@ type
     ## connection is the source of truth for that, the process handle is for
     ## tearing the window down.
     kind*: LaunchKind
+      ## App-mode process or default-browser hand-off.
     browser*: Browser
+      ## The preference the launch resolved to.
     path*: string
       ## Executable started (`lkAppWindow`) or opener command
       ## (`lkDefaultBrowser`).
     args*: seq[string]
       ## Exact argument vector passed to `startProcess`.
     url*: string
+      ## The page URL the window was opened at.
     userDataDir*: string
       ## The profile dir handed to the browser; `""` for `lkDefaultBrowser`.
     process: Process
@@ -161,7 +170,9 @@ type
   OpenerCommand* = object
     ## Command and args that open a URL in the OS default browser.
     command*: string
+      ## Executable name, resolved on `PATH` (`open`, `xdg-open`, `rundll32.exe`).
     args*: seq[string]
+      ## Argument vector; the URL is always one element.
 
   NeelBrowserError* = object of CatchableError
     ## No usable browser was found and fallback is disabled, a `browserPath`
