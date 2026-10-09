@@ -2227,9 +2227,29 @@ Notes for later tasks (Task 15):
   first.
 
 #### Task 15: Documentation
+- API adjustments first (approved after Task 14; small, in `src/`, with
+  tests, so the README documents the final shape):
+  - Re-export `std/json` and `std/options` from `src/neel.nim` so an app
+    can use `js.wait.foo(...).getStr` / `.to(T)` / `%*` and
+    `window(id).isSome` / `.get` / `some((800, 600))` with `import neel`
+    alone. Update the Task 13 re-export list note and `tests/t_neel.nim`'s
+    surface test; drop the now-redundant imports from the examples.
+  - Add `requireWindow(id: int): Window` (in `window.nim`, re-exported)
+    that raises `NeelNoWindowError` ("window N is not open") instead of the
+    `UnpackDefect` from `window(id).get`; use it in `examples/roundtrip` and
+    `examples/stresstest` where they currently check `isNone` by hand.
+  - Optional, only if cheap: a page-side connection event in `neel.js`
+    (`neel.onclose(fn)` / `neel.onreconnect(fn)` or a `neel.connected`
+    getter) so a page can show its state; `neel.ready` only reports the
+    first open. Skip if it grows the shim noticeably; note the decision.
 - README rewrite: concepts, quick start, `expose`, `js`, `neel.js` API,
   windows, browsers and fallback, lifecycle, assets and build modes,
-  threading model and worker pool guidance, migration notes from 1.x.
+  threading model and worker pool guidance, migration notes from 1.x. Link
+  the three examples and the build/run commands from the Task 14 notes;
+  fold the Task 14 "API friction" list in as caveats (minus whatever the
+  adjustments above fix); include the facts the Task 13 notes say the README
+  must state; say that a fresh clone needs `nimble setup` (or an installed
+  `neel`) before the examples compile.
 - Doc comments on all public symbols; `nim doc` builds cleanly.
 
 ---
