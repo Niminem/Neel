@@ -36,7 +36,7 @@
 import std/[json, options, strutils, sysrand, uri, macros, os]
 import neel/[http, server, pool, protocol, expose, jsproxy, frontend, browser,
              window, assets]
-from neel/websocket import NeelFrameError
+from neel/websocket import NeelFrameError, DefaultMaxMessageSize
 
 # --- re-exports ------------------------------------------------------------------
 
@@ -58,7 +58,7 @@ export window.Window, ExitReason, WindowHook, Launcher, openWindow, closeWindow,
 export Browser, NeelBrowserError, LaunchOptions, WindowSize, WindowPosition
 export NeelProtocolError, NeelTimeoutError, NeelDisconnectedError, NeelRemoteError
 export NeelFrameError
-export DefaultWorkers, DefaultQueueCapacity
+export DefaultWorkers, DefaultQueueCapacity, DefaultMaxMessageSize
 export AssetSource
 
 const
@@ -271,6 +271,7 @@ proc runApp*(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
              startPath = "/"; port = 0; workers = DefaultWorkers;
              queueCapacity = DefaultQueueCapacity;
              callTimeoutMs = DefaultCallTimeoutMs;
+             maxMessageSize = DefaultMaxMessageSize;
              gracePeriodMs = DefaultGracePeriodMs;
              startupTimeoutMs = DefaultStartupTimeoutMs;
              browsers = @[Chrome, Chromium]; fallback = true; browserPath = "";
@@ -298,7 +299,8 @@ proc runApp*(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   app.tbl = newPendingTable()
   app.srv = newServer(onRequest = handleRequest, onMessage = handleMessage,
                       onOpen = connectionOpened, onClose = connectionClosed,
-                      workers = workers, queueCapacity = queueCapacity)
+                      workers = workers, queueCapacity = queueCapacity,
+                      maxMessageSize = maxMessageSize)
   try:
     initJsBridge(appSend, resolveWindow, app.tbl, callTimeoutMs)
     app.srv.listen(port)
@@ -352,6 +354,8 @@ macro startApp*(args: varargs[untyped]): untyped =
   ## - `port = 0` (ephemeral), `workers = DefaultWorkers`,
   ##   `queueCapacity = DefaultQueueCapacity`,
   ##   `callTimeoutMs = DefaultCallTimeoutMs` (`js.wait` default),
+  ##   `maxMessageSize = DefaultMaxMessageSize` (16 MiB; the largest single
+  ##   WebSocket message the server will accept),
   ##   `gracePeriodMs = DefaultGracePeriodMs` (exit this long after the last
   ##   window closes; at least `MinGracePeriodMs`),
   ##   `startupTimeoutMs = DefaultStartupTimeoutMs`.

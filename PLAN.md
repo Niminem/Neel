@@ -2270,10 +2270,17 @@ the re-export check. Field-level `##` comments were added where object
 fields had none. The throwaway doc output and the browser harness lived in
 `/tmp/neeldoc` and `/tmp/neel15/` (deleted).
 
+Post-task additions (after manual browser verification on macOS):
+- `maxMessageSize` exposed as a `startApp` / `runApp` parameter (default
+  `DefaultMaxMessageSize` = 16 MiB, forwarded to `newServer`); the constant
+  is re-exported. README parameters table and caveats updated.
+- README: `--app:gui` note expanded to cover macOS (`.app` bundle) in addition
+  to Windows; example descriptions for roundtrip and stresstest given concise
+  context notes.
+
 What remains outside this plan: manual browser verification of the three
-examples on macOS, Windows, and Linux with real Chrome / Chromium (the Task
-14 checklist; only the IDE browser with a fake launcher has been used so
-far), the merge of `neel2-devel` into `master`, and the 2.0.0 release
+examples on Windows and Linux with real Chrome / Chromium (macOS done),
+the merge of `neel2-devel` into `master`, and the 2.0.0 release
 (tag, nimble publish). Candidates for a later version (not planned):
 `Edge` / `Brave` / `Opera` / `Vivaldi` specs, `wss:`, a JS-side unit test
 runner for `neel.js` once a JS runtime is acceptable as a dev dependency.

@@ -423,6 +423,7 @@ suite "neel: startApp end to end":
     check NeelVersion == "2.0.0"
     check NeelJsPath == "/neel.js"
     check DefaultGracePeriodMs >= MinGracePeriodMs
+    check DefaultMaxMessageSize == 16 * 1024 * 1024
     check js.windowId == CurrentWindow
     check compiles(openWindow("/x"))
     check compiles(closeWindow(Window(id: 1, js: js)))

@@ -432,8 +432,8 @@ a `call` without an `id` is fire-and-forget):
 {"t":"call", "name":"logThis", "args":["hi"]}
 ```
 
-Messages larger than 16 MiB are refused (the server closes with 1009 and the
-shim reconnects).
+Messages larger than `maxMessageSize` (default 16 MiB, configurable in
+`startApp`) are refused (the server closes with 1009 and the shim reconnects).
 
 ## Windows
 
@@ -612,8 +612,10 @@ decoded (`/data%20file.json`). Single-range `Range` requests are honoured with
 unknown extensions as `application/octet-stream`; no `charset` is appended.
 The reserved routes are `/neel.js`, `/ws`, and `/neel/no-browser`.
 
-On Windows, add `--app:gui` to release builds so the application does not
-open a console window.
+Add `--app:gui` to release builds to avoid a visible terminal window:
+on Windows this suppresses the console window; on macOS it produces an
+`.app` bundle that launches without a Terminal session. On Linux most
+window managers already hide the terminal of a backgrounded process.
 
 ## Threading model
 
@@ -662,6 +664,7 @@ is that `webDir` may be given positionally (`startApp("web", port = 8000)`).
 | `workers` | `DefaultWorkers` (64) | pool threads running exposed procs and hooks |
 | `queueCapacity` | `DefaultQueueCapacity` (1024) | bounded task queue in front of the pool |
 | `callTimeoutMs` | `DefaultCallTimeoutMs` (10 000) | default timeout of `js.wait.*` |
+| `maxMessageSize` | `DefaultMaxMessageSize` (16 777 216 = 16 MiB) | largest single WebSocket message the server will accept; the peer receives a 1009 close for anything larger |
 | `gracePeriodMs` | `DefaultGracePeriodMs` (3 000 debug / 10 000 release) | exit this long after the last connection closes; at least `MinGracePeriodMs` (250) |
 | `startupTimeoutMs` | `DefaultStartupTimeoutMs` (30 000) | how long a window may take to connect before it is given up |
 | `browsers` | `@[Chrome, Chromium]` | preference list |
@@ -711,7 +714,8 @@ missing web directory when embedding, or passing `assets` / `dispatch` /
 - Re-using a `Thread[T]` variable for a second run requires `joinThread` after
   the first finished; `examples/stresstest` shows the lock + flag pattern.
 - One WebSocket message (a call or a reply, as JSON text) may be at most
-  16 MiB; the request header block at most 16 KiB.
+  `maxMessageSize` (default 16 MiB, configurable in `startApp`); the request
+  header block at most 16 KiB.
 - A page must not set a `no-referrer` referrer policy and should not use a
   `window` query parameter of its own (see [Windows](#windows)).
 - With `browsers = @[Default]` or after a fallback, the app runs in an
@@ -731,13 +735,14 @@ missing web directory when embedding, or passing `assets` / `dispatch` /
   a second window (`openWindow`, `requireWindow(id).js.wait(5000).ask(...)`,
   `closeWindow`, `windows()`), window hooks, and the four error kinds the
   first page can see (`PromptCancelled` forwarded from JS, `NeelTimeoutError`,
-  `NeelDisconnectedError`, `NeelNoWindowError`).
-- [`examples/stresstest`](examples/stresstest) - a manual test harness: every
-  supported type, every error kind with its exact message, 500 concurrent
-  calls, 1000 fire-and-forget calls, re-entrancy, 2 MB payloads, pushes from a
-  plain thread through `win.js`, broadcasts, closing a window with a pending
-  `js.wait`, `Range` requests, the connection-state label driven by
-  `neel.onclose` / `neel.onreconnect`, and `quitApp()`.
+  `NeelDisconnectedError`, `NeelNoWindowError`). Primarily a test of the
+  multi-window and bidirectional-return-value machinery, but also a compact
+  reference for how communication flows between windows.
+- [`examples/stresstest`](examples/stresstest) - a manual test harness that
+  exercises every feature in one page: every supported type, every error kind,
+  500 concurrent calls, 2 MB payloads, pushes from a plain thread, multi-window
+  broadcasts, lifecycle events, and more. Mainly for verifying Neel itself, but
+  useful as a reference for how each API behaves under load and in edge cases.
 
 ## Migrating from Neel 1.x
 
