@@ -73,8 +73,10 @@ so the binary can be moved anywhere (the grace period is 10 s there):
 nim c -d:release examples/filepicker/filepicker.nim && ./examples/filepicker/filepicker
 ```
 
-Expect Chromium's own stderr noise in the terminal: the browser inherits the
-application's stdio (a pipe nobody reads would eventually stall the browser).
+The browser inherits the application's stdio (a pipe nobody reads would
+eventually stall it), so on macOS expect Chromium's own stderr noise in the
+terminal. On Windows Chrome does not log to the console, so the terminal shows
+only your app's output.
 
 The test suite runs with `nimble test`; it needs no browser.
 
@@ -717,7 +719,9 @@ missing web directory when embedding, or passing `assets` / `dispatch` /
   `window` query parameter of its own (see [Windows](#windows)).
 - With `browsers = @[Default]` or after a fallback, the app runs in an
   ordinary browser tab: `size`, `position`, and `extraFlags` do not apply and
-  the browser process is not tracked.
+  the browser process is not tracked, so `closeWindow` disconnects the tab
+  but cannot close it. Chromium suppresses `prompt` / `alert` / `confirm` in a
+  background tab (`prompt` returns `null` at once).
 - The launch token is new on every start and is baked into `/neel.js`, so a
   page left open from a previous run cannot reconnect; refreshing it fetches a
   fresh shim.

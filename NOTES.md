@@ -19,10 +19,10 @@ How to use this file:
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` | passes (re-run: minimum Nim is now 2.2.12) | passes (Nim 2.2.12) | not run |
-| `examples/filepicker` | passes | in progress (shutdown crash fixed, needs re-run) | not run |
-| `examples/roundtrip` | passes | not run | not run |
-| other examples | pass | not run | not run |
+| `nimble test` | passed before Nim 2.2.12 (needs re-run) | passes (Nim 2.2.12) | not run |
+| `examples/filepicker` | passed before Nim 2.2.12 (needs re-run) | passes (Nim 2.2.12; debug and release, app and `@[Default]`) | not run |
+| `examples/roundtrip` | passed before Nim 2.2.12 (needs re-run) | passes (Nim 2.2.12; debug and release, app and `@[Default]`) | not run |
+| `examples/stresstest` | passed before Nim 2.2.12 (needs re-run) | passes (Nim 2.2.12; debug and release, app and `@[Default]`, kill/reconnect check) | not run |
 
 ## Gotchas
 
@@ -66,7 +66,7 @@ ever has to run on an older compiler.
 On the Windows machine `nimble test` compiles with the Nim that Nimble
 installed for the package (2.2.12, under `~/.nimble/pkgs2/nim-2.2.12-*`),
 while a plain `nim c -r examples/...` uses the choosenim toolchain on `PATH`
-(2.2.10). Check the "Info: using ... for compilation" line and `nim -v`
+(2.2.10 until 2026-10-09, now 2.2.12). Check the "Info: using ... for compilation" line and `nim -v`
 before comparing results across commands or machines.
 
 ## Findings
@@ -131,10 +131,26 @@ The wrong-token check replaced the first character with `0`; one launch token
 in 16 already starts with `0`, so the upgrade was (correctly) accepted.
 Fixed by picking a character that differs.
 
+### 2026-10-09 - Windows: no Chrome output in the terminal (not a bug)
+
+On macOS the terminal shows Chromium's stderr noise; on Windows it shows only
+the app's output. Same launch on both (`poParentStreams, poDaemon` in
+`src/neel/browser.nim`); `chrome.exe` is a GUI-subsystem binary that does not
+log to the console unless `--enable-logging` is passed. README updated.
+
+### 2026-10-09 - Windows: roundtrip in `@[Default]` mode (not a bug)
+
+`askSecond` returns `PromptCancelled` without any click: the second page is a
+background tab, where Chromium suppresses `prompt()` and returns `null`.
+`closeSecond` leaves the tab open (dead): a default-browser tab has no process
+handle, so Neel can only disconnect it. Both apply on every OS. README caveat
+added.
+
 ## Open items
 
-- Windows machine: the choosenim toolchain on `PATH` is 2.2.10, which Neel
-  now refuses to compile with. Switch it to 2.2.12 or newer (`choosenim
-  2.2.12`, or `choosenim stable` if that is at least 2.2.12) before running
-  the examples. Check the Mac's `nim -v` too.
-- Re-run every example on Windows with the shutdown fix and Nim >= 2.2.12.
+- stresstest's manual check "a page refresh after a restart works again"
+  assumes a fixed port; with the default `port = 0` the old page's URL is
+  dead after a restart. Not checked on Windows.
+- Mac: re-run `nimble test` and every example (Nim >= 2.2.12, shutdown
+  changes). Check `nim -v` first.
+- Linux: not run yet.
