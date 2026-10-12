@@ -33,6 +33,7 @@ Contents
 - [Caveats](#caveats)
 - [The examples](#the-examples)
 - [Migrating from Neel 1.x](#migrating-from-neel-1x)
+- [License](#license)
 
 ## Installation
 
@@ -72,7 +73,8 @@ nim c -r examples/stresstest/stresstest.nim
 These are debug builds: the example's `web/` directory is served from disk,
 so edits to the page show up on refresh, and the app exits 3 s after its last
 window closes. A release build embeds `web/` into the binary at compile time,
-so the binary can be moved anywhere (the grace period is 10 s there):
+so the binary can be moved anywhere (the grace period is 10 s there, except
+in `stresstest`, which sets 3 s for both builds):
 
 ```
 nim c -d:release examples/filepicker/filepicker.nim
@@ -232,8 +234,8 @@ Rules:
   `proc file_picker` is `neel.file_picker`, not `neel.filePicker`.
 - `startApp` must come after every `{.expose.}` proc in the module and after
   the imports of modules that contain exposed procs. It may sit inside
-  `proc main()`. Do not expose procs after the `startApp` call: they are not
-  registered, and the page cannot call them.
+  `proc main()`. A proc exposed after the `startApp` call is left out of the
+  dispatcher and of `/neel.js`, so the page cannot call it.
 - The names `call`, `send`, `expose`, `ready`, `windowId`, `close`,
   `connected`, `onclose`, `onreconnect` are reserved by the `neel` object; an
   exposed proc with one of those names is reachable only as
@@ -275,7 +277,9 @@ Errors the page sees, as the `name` / `message` of the rejection:
 | the Nim exception type name | the exception's `msg` | any `CatchableError` raised by the proc (`ValueError`, your own types, ...) |
 | the JS error name | the JS message | a `js.wait.*` call inside the proc failed on the JS side; the kind is forwarded unchanged |
 
-Defects (`IndexDefect`, `AssertionDefect`, ...) are bugs and are not caught.
+Defects (`IndexDefect`, `AssertionDefect`, ...) are bugs and are not caught:
+one raised in an exposed proc escapes the worker thread and terminates the
+app.
 
 A fire-and-forget call (`neel.add.send(1, 2)`) never gets a reply, even on
 failure. In debug builds a failing fire-and-forget call is written to stderr
@@ -488,13 +492,18 @@ Hooks: `startApp(onWindowOpen = ..., onWindowClose = ...)` take a
 `WindowHook = proc(w: Window) {.gcsafe.}`. `onWindowOpen` fires the first time
 a connection bound to the window opens (a page refresh does not fire it again).
 `onWindowClose` fires once per window: from `closeWindow` (on the caller's
-thread), when a window whose connection has been gone for a grace period is
-retired (on the main thread, inside `startApp`), or during teardown for windows
-still open when the app quits (main thread). Hooks run on whichever thread
-observes the event and may call `js` / `windows()`, except that a hook called
-during teardown sees an empty `windows()` and `js` raises
+thread), when a window is retired because its connection has been gone for a
+grace period or because it never connected within `startupTimeoutMs` (on the
+main thread, inside `startApp`), or during teardown for windows still open
+when the app quits (main thread). Hooks run on whichever thread
+observes the event and may call `w.js` / `windows()`, except that a hook called
+during teardown sees an empty `windows()` and `w.js` raises
 `NeelNoWindowError`; guard `js` calls in `onWindowClose` with `try`/`except`
 (see [Caveats](#caveats) for where an escaping exception ends up).
+`onWindowOpen` fires as soon as the shim connects, which can be before the
+page's own scripts have registered their `neel.expose` functions; a page
+that needs initial data should ask for it with a `neel.<name>()` call
+rather than wait for a push from the hook.
 
 How a page learns its window: the launch URL is
 `http://127.0.0.1:<port><path>?window=<id>`. The page's `<script
@@ -507,7 +516,11 @@ always gets a 404, so it can never take over another window.
 Consequences: do not use a `window` query parameter of your own, do not
 set a `no-referrer` referrer policy (`<meta name="referrer"
 content="no-referrer">` breaks every window but the first), and open additional
-pages with `openWindow`, not with `window.open` from the page.
+pages with `openWindow`, not with `window.open` from the page. A page that
+navigates within its window (a plain link, `location.href = "/other.html"`)
+drops `?window=<id>` from its URL; the new page gets its shim only while it is
+the single open window. In a multi-window app, carry the query along
+(`"/other.html" + location.search`) or keep each window on one page.
 
 Each window is its own browser process with a private profile directory
 (`<tmpdir>/neel-<pid>-<id>`, created by the browser, removed by Neel when the
@@ -688,11 +701,15 @@ window managers already hide the terminal of a backgrounded process.
 - Hooks run on the thread that observes the event (see [Multiple windows](#multiple-windows)).
 - Sizing `workers`: every `js.wait` and every slow exposed proc occupies a
   worker for its duration; `workers` is the number of such calls that can be
-  in flight at once. The default 64 handles the stress test's 500 concurrent
-  50 ms calls in under half a second; raise it for apps that block many
-  workers on long `js.wait`s, lower it for small tools. When the queue is
-  full, the IO thread stops reading from the connections whose messages it
-  cannot queue (TCP back-pressure); nothing is dropped.
+  in flight at once. The page's replies to `js.wait` are themselves handled
+  on the pool, so if every worker is blocked in `js.wait`, no worker is left
+  to deliver the replies and the waits end in `NeelTimeoutError`. Keep the
+  number of simultaneous `js.wait`s below `workers`. The default 64 handles
+  the stress test's 500 concurrent 50 ms calls in under half a second; raise
+  it for apps that block many workers on long `js.wait`s, lower it for small
+  tools. When the queue is full, the IO thread stops reading from the
+  connections whose messages it cannot queue (TCP back-pressure); nothing is
+  dropped.
 
 ## `startApp` parameters
 
@@ -761,10 +778,13 @@ run arbitrary commands or touch arbitrary paths without checking them.
 - A blocking dialog (`prompt`, `alert`, `confirm`) inside a JS function that
   Nim called blocks that page's event loop, so other Nim -> JS calls to the
   same window wait behind it, and a `js.wait` on it can time out.
-- An exposed proc that calls `quitApp()` returns normally and its Promise
-  resolves before the 1001 close arrives, so a page cannot await "the app has
-  exited"; later calls reject with `neel: connection is closed`.
-  `neel.onclose` fires when the close does arrive.
+- An exposed proc that calls `quitApp()` returns normally, and its Promise
+  usually resolves just before the 1001 close arrives. This is not
+  guaranteed: if shutdown begins before the reply is on the wire, the reply
+  is dropped and the call rejects with `NeelDisconnectedError` (`neel:
+  connection lost (close code 1001)`). Either way a page cannot await "the
+  app has exited"; later calls reject with `neel: connection is closed`, and
+  `neel.onclose` fires when the close arrives.
 - Chromium may discard a background tab or window (Memory Saver, memory
   pressure) and reload it only when the user returns to it. The discard closes
   the WebSocket, so to Neel it is a closed window: if the reload happens within
@@ -796,8 +816,15 @@ run arbitrary commands or touch arbitrary paths without checking them.
   suppresses `prompt` / `alert` / `confirm` in a background tab (`prompt`
   returns `null` at once).
 - The launch token is new on every start and is baked into `/neel.js`, so a
-  page left open from a previous run cannot reconnect; refreshing it fetches a
-  fresh shim.
+  page left open from a previous run cannot reconnect. With the default
+  ephemeral port the new run listens elsewhere, so refreshing the old page
+  fails too. With a fixed `port`, refreshing it fetches a fresh shim and the
+  page binds as the window its URL names, displacing the window the new run
+  opened under that id (which then closes with 1000).
+- `openWindow`, `closeWindow`, and `quitApp` require a running `startApp`;
+  called before it starts or after it returns they fail an assertion.
+  `windows()` is then empty, `window(id)` is `none`, and `js` raises
+  `NeelNoWindowError`. Only one `startApp` may run at a time per process.
 
 ## The examples
 
@@ -845,3 +872,7 @@ Neel 2.0 is a rewrite with a new API; nothing from 1.x compiles unchanged.
 Unchanged: the page loads `/neel.js` before its own script, assets use
 absolute paths and are served from the web directory at `/`, the start page is
 `index.html`, and the server listens on `127.0.0.1` only.
+
+## License
+
+MIT; see [`LICENSE`](LICENSE).

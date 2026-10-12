@@ -116,6 +116,25 @@ of the temp dir. Anything that changes where profiles live must change
 
 ## Findings
 
+### 2026-10-12 - All platforms: second README audit (docs only)
+
+README rechecked section by section against `src/`. Corrected: procs
+exposed after `startApp` are registered but left out of the dispatcher and
+`/neel.js`; `onWindowClose` also fires when a window never connects within
+`startupTimeoutMs`; hooks use `w.js` (the global `js` has no current window
+there); `stresstest` keeps a 3 s grace period in release; the `quitApp()`
+caveat no longer promises the reply beats the 1001 close (see "Open
+items"); the launch-token caveat now separates ephemeral and fixed ports
+(with a fixed port a refreshed old page displaces the new run's window).
+Added: a Defect in an exposed proc terminates the app (`pool.nim` catches
+only `CatchableError`); `js.wait` replies are handled on the pool, so
+`workers` simultaneous `js.wait`s starve their own replies and time out;
+in-window navigation drops `?window=`; `onWindowOpen` can fire before the
+page has registered its `neel.expose` functions; `openWindow` /
+`closeWindow` / `quitApp` assert outside a running `startApp`; a License
+section. The `--app:gui` paragraph was left as is (confirmed by hand on
+macOS). No code change, no test.
+
 ### 2026-10-12 - All platforms: a missing web directory failed silently in debug builds
 
 Symptom (README audit): with `embedAssets = false` and a `webDir` that does
@@ -558,6 +577,13 @@ added.
 - Request guard (2026-10-12 finding): verified on Windows and macOS. On
   Linux, `filepicker` in app mode and `@[Default]` covers it; a refusal
   shows as a `neel: refused: ...` page or a shim stuck reconnecting.
+- `quitApp()` from an exposed proc can lose that call's reply: shutdown's
+  `teardownAll` (`src/neel/server.nim`) writes the 1001 frame straight to
+  the socket and drops output still queued, so a reply queued after the IO
+  thread's last pass never arrives and the page sees
+  `NeelDisconnectedError`. Found by reading the code, not reproduced;
+  `t_neel` does not check for the reply. README documents it; a fix would
+  flush pending outbound data before the 1001 in `teardownAll`.
 - A page that navigates away from its launch URL (dropping `?window=<id>`)
   still relies on the single-window fallback for `/neel.js`; with more than
   one window open it gets a 404. Settled behaviour (README "Multiple windows"), noted
