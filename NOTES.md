@@ -19,9 +19,9 @@ How to use this file:
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the profile sweep; not rerun after the public-surface change) | passes (Nim 2.2.12, 2026-10-12, with the profile sweep and the public-surface change; after the request guard only `t_frontend` and `t_neel` were rerun, both pass) | not run |
+| `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the profile sweep, the public-surface change, and the request guard) | passes (Nim 2.2.12, 2026-10-12, with the profile sweep, the public-surface change, and the request guard) | not run |
 | profile sweep manual check (see "Open items") | passes (Nim 2.2.12, 2026-10-12; release roundtrip, normal exit and `kill -9` + Cmd+Q; no `neel-*` dir left in `$TMPDIR`) | passes (Nim 2.2.12, 2026-10-12; release roundtrip with Chrome and with `@[Edge]`, normal exit and Task Manager kill; no `neel-*` dir left in `%TEMP%`) | not run |
-| `examples/filepicker` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | not run |
+| `examples/filepicker` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`; rerun with the request guard, app and `@[Default]` with Safari as the default browser) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`; rerun with the request guard) | not run |
 | `examples/roundtrip` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | not run |
 | `examples/stresstest` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | not run |
 | examples with `browsers = @[Edge]` | will not be run (paths and flags checked against public sources only, 2026-10-12 finding) | passes (Nim 2.2.12, 2026-10-12; all three examples and their manual checks, no leftover `msedge` processes or profile dirs) | will not be run (as macOS) |
@@ -148,8 +148,9 @@ trailing-slash `Origin` on `/ws`). `tests/t_neel.nim` sends the real
 `/neel.js`, and the no-browser page (no token in the body), 403 for `/ws`
 upgrades with a foreign `Host`, a foreign or wrong-port `Origin`, none,
 or a cross-site fetch, and that `same-origin` / `none` still pass. Both
-pass on Windows (Nim 2.2.12); the full suite was not rerun. Real browsers
-not yet run against it (see "Open items").
+pass on Windows (Nim 2.2.12). Real browsers pass the checks: the examples
+on Windows, and `filepicker` in app mode and in a Safari tab (`@[Default]`)
+on macOS. `nimble test` passes on both (same day). Linux not run yet.
 
 ### 2026-10-12 - All platforms: test seams and internals removed from the public surface
 
@@ -524,11 +525,9 @@ added.
   and the sweep rightly skips a profile a live browser holds), run and quit
   again, and confirm the killed run's dir is gone. The POSIX `kill` /
   `SingletonLock` path runs for the first time there.
-- Request guard (2026-10-12 finding): run all three examples once with a
-  real browser on macOS and Windows (app mode and `@[Default]`, plus
-  `@[Edge]` on Windows) to confirm real `Host` / `Origin` /
-  `Sec-Fetch-Site` values pass; a refusal shows as a 403 page or a shim
-  stuck reconnecting. Then rerun `nimble test` on both.
+- Request guard (2026-10-12 finding): verified on Windows and macOS. On
+  Linux, `filepicker` in app mode and `@[Default]` covers it; a refusal
+  shows as a `neel: refused: ...` page or a shim stuck reconnecting.
 - Debug builds with a missing web directory start without error and serve
   404s; only embedding checks. Should fail early.
 - The README says `js.len()`, `js.add(...)`, `js.close()`, `js.open()`, and
@@ -536,5 +535,5 @@ added.
   `neel` re-exported `std/json` and `std/options`, and no test pins it.
 - A page that navigates away from its launch URL (dropping `?window=<id>`)
   still relies on the single-window fallback for `/neel.js`; with more than
-  one window open it gets a 404. Settled behaviour (README "Windows"), noted
+  one window open it gets a 404. Settled behaviour (README "Multiple windows"), noted
   here because the fallback is now narrower than before.
