@@ -19,8 +19,8 @@ How to use this file:
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the stale-tab fix; not re-run with the profile sweep) | passes (Nim 2.2.12, 2026-10-12, with the profile sweep) | not run |
-| profile sweep manual check (see "Open items") | not run | passes (Nim 2.2.12, 2026-10-12; release roundtrip with Chrome and with `@[Edge]`, normal exit and Task Manager kill; no `neel-*` dir left in `%TEMP%`) | not run |
+| `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the profile sweep) | passes (Nim 2.2.12, 2026-10-12, with the profile sweep) | not run |
+| profile sweep manual check (see "Open items") | passes (Nim 2.2.12, 2026-10-12; release roundtrip, normal exit and `kill -9` + Cmd+Q; no `neel-*` dir left in `$TMPDIR`) | passes (Nim 2.2.12, 2026-10-12; release roundtrip with Chrome and with `@[Edge]`, normal exit and Task Manager kill; no `neel-*` dir left in `%TEMP%`) | not run |
 | `examples/filepicker` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | not run |
 | `examples/roundtrip` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | not run |
 | `examples/stresstest` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | not run |
@@ -184,8 +184,9 @@ once window 1 is launched; it runs exactly once per `startApp`, with no
 window open, every profile dir already removed, every worker exited, and
 before `startApp` returns). `nimble test` passes on Windows (Nim 2.2.12);
 `src/neel.nim` and `tests/t_browser.nim` compile with `--os:linux` and
-`--os:macosx --compileOnly`. The POSIX branches (`kill`, `SingletonLock`)
-have only been compiled so far, not run.
+`--os:macosx --compileOnly`. macOS (same day): `nimble test` passes,
+which runs the POSIX branches (`kill`, `SingletonLock`) for real, and the
+manual check passes. Linux not run yet.
 
 ### 2026-10-12 - Windows, Edge: `closeSecond` does not close the window
 
@@ -435,8 +436,8 @@ added.
   run; their paths and flags are checked against public sources only (see
   the 2026-10-12 findings).
 - Abandoned profile dirs: swept at exit since 2026-10-12 (see the finding).
-  Passed by hand on Windows 2026-10-12 (Chrome and Edge). Still to check on
-  macOS and Linux: run roundtrip in release, open and
+  Passed by hand on Windows (Chrome and Edge) and macOS, 2026-10-12. Still
+  to check on Linux: run roundtrip in release, open and
   close the second window, close window 1 with its X, wait out the grace
   period, and confirm no `neel-*` dir is left in the temp dir
   (`ls -d "$TMPDIR"neel-*`); then `kill -9` the app, quit its orphaned
