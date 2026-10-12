@@ -16,7 +16,10 @@
 ##       release build: `web/` embedded; nothing is logged.
 ##
 ## Both builds use `gracePeriodMs = 3000` (the app exits 3 s after the last
-## window closes) and print the `ExitReason` on exit.
+## window closes) and print the `ExitReason` on exit. An optional first
+## argument is a fixed port (`./stresstest 8765`); the default is an
+## ephemeral one. A fixed port is needed for the "refresh after a restart"
+## check on the page, since the restarted app must answer at the old URL.
 ##
 ## Limits: one WebSocket message (one call or one reply as JSON text) may be
 ## at most 16 MiB (`DefaultMaxMessageSize`); the payload section stays under
@@ -24,7 +27,7 @@
 ## calling worker up to its timeout (default 10 s); the default pool has 64
 ## workers.
 
-import std/[tables, os, atomics, locks, typedthreads]
+import std/[tables, os, atomics, locks, typedthreads, strutils]
 import neel # also brings std/json and std/options
 
 # --- types -----------------------------------------------------------------------
@@ -208,6 +211,8 @@ proc askWindow(id: int; timeoutMs: int): JsonNode {.expose.} =
 proc exitApp() {.expose.} =
   quitApp() # only signals; startApp returns erQuit on the main thread
 
+let fixedPort = if paramCount() >= 1: parseInt(paramStr(1)) else: 0
 let reason = startApp(size = some((1100, 800)), gracePeriodMs = 3000,
+                      port = fixedPort,
                       onWindowOpen = onOpen, onWindowClose = onClose)
 echo "stresstest exited: ", reason

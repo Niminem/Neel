@@ -52,9 +52,21 @@
         <code>NeelDisconnectedError: neel: gave up reconnecting after 5
         attempts</code>; every later press rejects at once with
         <code>neel: connection is closed</code>; the status then reads
-        "closed (close code 1006 ...)". A page refresh after a restart of the
-        app works again (a new token is rendered into /neel.js), while the
-        old page cannot reconnect because its token is stale.
+        "closed (close code 1006 ...)".
+      </li>
+      <li>
+        <strong>Refresh after a restart</strong>: this needs a fixed port, so
+        start the app as <code>./stresstest 8765</code> (any free port). Note
+        the pid from asJson(), <code>kill -9 &lt;pid&gt;</code>, wait for the
+        shim to give up (status "closed"), then start
+        <code>./stresstest 8765</code> again. The new run opens a second
+        browser window at the same URL. Now refresh <em>this</em> (old)
+        window: it loads a fresh /neel.js with the new token, binds as window
+        1 and works again (press "whoAmI()"), while the window the restart
+        opened is displaced and goes dead ("server closed the connection
+        (close code 1000)": both pages carry <code>?window=1</code>, and the
+        most recent connection wins). Before refreshing, the old page cannot
+        reconnect on its own because its token is stale.
       </li>
       <li>
         <strong>No browser</strong>: run the binary on a machine without
