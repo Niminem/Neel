@@ -22,7 +22,7 @@ How to use this file:
 | `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the stale-tab fix) | passed 2026-10-09 (Nim 2.2.12); re-run after the stale-tab fix | not run |
 | `examples/filepicker` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | passes (Nim 2.2.12; debug and release, app and `@[Default]`) | not run |
 | `examples/roundtrip` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | passes (Nim 2.2.12; debug and release, app and `@[Default]`); re-run `@[Default]` after the stale-tab fix | not run |
-| `examples/stresstest` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect check; refresh-after-restart check not yet done, see Open items) | passes (Nim 2.2.12; debug and release, app and `@[Default]`, kill/reconnect check) | not run |
+| `examples/stresstest` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | passes (Nim 2.2.12; debug and release, app and `@[Default]`, kill/reconnect check; refresh-after-restart not run) | not run |
 
 ## Gotchas
 
@@ -203,13 +203,15 @@ added.
 
 - stresstest's manual check "a page refresh after a restart works again"
   needs the restarted app on the same port; with the default `port = 0` the
-  old page's URL is dead. stresstest now takes an optional port argument
-  (`./stresstest 8765`) and the page text gives the recipe. Not yet checked
-  on any platform.
+  old page's URL is dead. stresstest takes an optional port argument
+  (`./stresstest 8765`) and the page text gives the recipe. Passed on macOS
+  2026-10-12 (the refreshed old page displaces the window the restart
+  opened, as documented); not yet run on Windows.
 - Windows: re-run `nimble test`, roundtrip `@[Default]` (stale-tab recipe
   from the 2026-10-12 finding), roundtrip app mode, and the stresstest
-  kill/reconnect check after the stale-tab fix (`bindConnection` now closes
-  displaced connections; both reconnect paths go through it).
+  kill/reconnect and refresh-after-restart checks after the stale-tab fix
+  (`bindConnection` now closes displaced connections; both reconnect paths
+  go through it).
 - Linux: not run yet.
 - A page that navigates away from its launch URL (dropping `?window=<id>`)
   still relies on the single-window fallback for `/neel.js`; with more than
