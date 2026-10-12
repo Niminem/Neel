@@ -33,7 +33,7 @@ handled outside this plan.
 | Area | Decision |
 |---|---|
 | Compatibility | Clean break. No `exposeProcs`, `callJs`, or `callNim`. README rewritten. |
-| Repository | Rewrite on the `neel2-devel` branch (forked from `master` after the `init neel 2.0` reset); merged into `master` only once every task is implemented and verified on macOS, Windows, and Linux. 1.x is preserved by tag `v1.1.0`. |
+| Repository | Rewrite on the `neel2-devel` branch (forked from `master` after the `init neel 2.0` reset); merged into `master` once every task is implemented and verified on macOS and Windows _(Linux verification moved to 2.1; see "Post-implementation changes")_. 1.x is preserved by tag `v1.1.0`. |
 | Nim / dependencies | Nim >= 2.2.12 _(raised from 2.2.0 during verification: older allocators crash when a block is freed after its thread exited; see "Post-implementation changes")_. Zero external dependencies (hand-rolled SHA-1). |
 | Server | Own HTTP/1.1 + WebSocket server. Single IO thread on `std/selectors`, configurable worker pool. Binds `127.0.0.1` only. |
 | Exposure | `{.expose.}` pragma on top-level procs. Emits an exported `<name>NeelSym` wrapper plus a `neelRegister` call. Compile-time registry of bound symbols; `startApp` generates the dispatch. |
@@ -2286,9 +2286,10 @@ Post-task additions (after manual browser verification on macOS):
   to Windows; example descriptions for roundtrip and stresstest given concise
   context notes.
 
-What remains outside this plan: the Linux verification pass (macOS and
-Windows are done; see the verification matrix in `NOTES.md`), the merge of
-`neel2-devel` into `master`, and the 2.0.0 release (tag, nimble publish).
+What remains outside this plan: the merge of `neel2-devel` into `master`
+and the 2.0.0 release (tag, nimble publish). macOS and Windows are verified
+(see the verification matrix in `NOTES.md`); the Linux verification pass
+moved to 2.1 (see "Post-implementation changes").
 Candidates for a later version (not planned): `Brave` / `Opera` /
 `Vivaldi` specs, `wss:`, a JS-side unit test
 runner for `neel.js` once a JS runtime is acceptable as a dev dependency.
@@ -2430,6 +2431,14 @@ supersede the task notes they mention.
   `findBrowser`, so nothing is bound or launched. `diskAssets` itself still
   accepts a missing directory. Reason: a typo in `webDir` used to open a
   window that showed only 404s (NOTES.md 2026-10-12).
+- Release scope (replaces the "verified on macOS, Windows, and Linux"
+  merge condition in the "Repository" decision): 2.0 merges into `master`
+  and is released once verified on macOS and Windows. Linux is expected to
+  work as is (the POSIX code paths run on macOS, and the Linux-specific
+  pieces, `findExe` discovery and `xdg-open`, are covered by unit tests and
+  compile checks) but is not run by hand until 2.1, which carries the full
+  Linux pass from `NOTES.md` "Open items" and any fixes it produces. The
+  README already states this. Decided 2026-10-12.
 
 ---
 

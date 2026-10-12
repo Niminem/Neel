@@ -3,7 +3,9 @@
 Tasks 1-15 in `PLAN.md` are implemented. This file is the working log of the
 phase after that: running `nimble test` and every example on macOS, Windows,
 and Linux, trying to break things, and fixing what breaks. `neel2-devel`
-merges into `master` only when every platform passes everything below.
+merges into `master` once macOS and Windows pass everything below; the
+Linux column is filled in 2.1 (`PLAN.md` "Post-implementation changes",
+release scope).
 
 How to use this file:
 
@@ -559,8 +561,9 @@ added.
 
 ## Open items
 
-- Linux: not run yet. Run the full matrix, including the stale-tab recipe
-  and both stresstest manual checks.
+- Linux: not run yet; scheduled for 2.1 (not a 2.0 merge blocker). Run the
+  full matrix, including the stale-tab recipe and both stresstest manual
+  checks.
 - Edge: verified on Windows only (2026-10-12). macOS and Linux will not be
   run; their paths and flags are checked against public sources only (see
   the 2026-10-12 findings).
