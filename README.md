@@ -634,7 +634,8 @@ used as is.
 `embedAssets` is a compile-time switch whose default is `defined(release)`:
 
 - `false` (debug builds): files are read from disk on every request. Edit a
-  page and refresh.
+  page and refresh. A missing directory makes `startApp` raise `OSError`
+  before any window opens.
 - `true` (release builds): the whole directory is walked at compile time and
   every file is embedded into the binary, which no longer needs the `web/`
   directory. `webDir` must be a constant then, and a missing directory is a
@@ -717,7 +718,8 @@ is that `webDir` may be given positionally (`startApp("web", port = 8000)`).
 | `onWindowClose` | `nil` | `WindowHook` fired when a window is closed or retired |
 
 `startApp` raises `NeelBrowserError` (no browser and `fallback = false`, or a
-bad `browserPath`), `OSError` (the port is taken), or `ValueError` (a
+bad `browserPath`), `OSError` (the port is taken, or the web directory does
+not exist in a debug build), or `ValueError` (a
 non-positive size); everything has been torn down when the exception leaves.
 
 Compile-time errors from the macro point at your `startApp(...)` line: a

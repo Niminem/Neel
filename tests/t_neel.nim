@@ -610,6 +610,26 @@ suite "neel: startApp end to end":
     check dirs.len == 1
     check not dirExists(dirs[0])
 
+  test "a missing web directory fails before anything starts":
+    resetShared()
+    setTestLauncher(fakeLaunch)
+    setTestProfileSweep(recordSweep)
+    var msg = ""
+    try:
+      startApp(webDir = "fixtures/no-such-web", embedAssets = false,
+               browsers = @[])
+    except OSError as e:
+      msg = e.msg
+    finally:
+      setTestLauncher(nil)
+      setTestProfileSweep(nil)
+    check "web directory not found" in msg
+    check "no-such-web" in msg
+    acquire shared.lock
+    check shared.launches.len == 0
+    check shared.sweeps == 0
+    release shared.lock
+
   test "the public surface re-exports what applications need":
     check NeelVersion == "2.0.0"
     check DefaultGracePeriodMs >= MinGracePeriodMs

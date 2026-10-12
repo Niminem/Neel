@@ -2425,6 +2425,11 @@ supersede the task notes they mention.
   browser could capture the token by loading `/neel.js` with a `<script>`
   tag and connect to `/ws` itself, or use DNS rebinding (NOTES.md
   2026-10-12).
+- Missing web directory in disk mode (adds to Task 13's `runApp` sequence):
+  `runApp` raises `OSError` (`neel: web directory not found: <root>`) before
+  `findBrowser`, so nothing is bound or launched. `diskAssets` itself still
+  accepts a missing directory. Reason: a typo in `webDir` used to open a
+  window that showed only 404s (NOTES.md 2026-10-12).
 
 ---
 

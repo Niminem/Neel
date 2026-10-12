@@ -337,9 +337,13 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   ## launch and the sweep (tests inject fakes); both are read once here.
   ## When no browser is found and `fallback` is `false`, the error page has
   ## been opened in the default browser: it is served for `gracePeriodMs`,
-  ## then the `NeelBrowserError` propagates after teardown.
+  ## then the `NeelBrowserError` propagates after teardown. A disk-mode web
+  ## directory that does not exist raises `OSError` before anything starts
+  ## (embedding already fails at compile time).
   doAssert not dispatch.isNil, "runApp: dispatch is nil"
   doAssert not app.running, "startApp is already running in this process"
+  if assets.mode == amDisk and not dirExists(assets.root):
+    raise newException(OSError, "neel: web directory not found: " & assets.root)
   let launcher = testLauncher()
   let profileSweep = testProfileSweep()
   let search = findBrowser(browsers, browserPath)

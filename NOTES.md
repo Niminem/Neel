@@ -116,6 +116,19 @@ of the temp dir. Anything that changes where profiles live must change
 
 ## Findings
 
+### 2026-10-12 - All platforms: a missing web directory failed silently in debug builds
+
+Symptom (README audit): with `embedAssets = false` and a `webDir` that does
+not exist, `startApp` opened a window that showed only 404s. Embedding
+already failed at compile time. Fix: `runApp` (`src/neel.nim`) raises
+`OSError` (`neel: web directory not found: <root>`) before `findBrowser`, so
+nothing is bound, launched, or swept. A runtime check rather than a
+compile-time one, because a disk-mode `webDir` may be a non-constant string
+and the directory can move after the build. `diskAssets` still accepts a
+missing directory (`t_assets` relies on that). Test: `tests/t_neel.nim` "a
+missing web directory fails before anything starts" (the message names the
+directory; no launch, no sweep).
+
 ### 2026-10-12 - All platforms: other websites could drive a Neel app
 
 Symptom (README audit, by reading the code; not reproduced): nothing
@@ -528,8 +541,6 @@ added.
 - Request guard (2026-10-12 finding): verified on Windows and macOS. On
   Linux, `filepicker` in app mode and `@[Default]` covers it; a refusal
   shows as a `neel: refused: ...` page or a shim stuck reconnecting.
-- Debug builds with a missing web directory start without error and serve
-  404s; only embedding checks. Should fail early.
 - The README says `js.len()`, `js.add(...)`, `js.close()`, `js.open()`, and
   `js.alert(...)` reach the page; this comes from spike (b) on 2.2.10, before
   `neel` re-exported `std/json` and `std/options`, and no test pins it.
