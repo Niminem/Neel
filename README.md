@@ -350,16 +350,19 @@ answers the page with that kind):
 
 Fire-and-forget (`js.foo(...)`) raises only `NeelNoWindowError`.
 
+Name collisions: `js.foo(...)` reaches the page only when no Nim proc in
+scope accepts `js` as its first argument. If one does, Nim calls that proc
+instead, with no error and no message to the page. `js.echo("x")` calls Nim's
+`echo`, `js.repr()` calls `repr`, `js.wait(...)` is the blocking form above,
+and so would one of your own procs that accepts any type (`proc log[T](x:
+T)` captures `js.log(...)`). Names whose Nim procs take other types, such as
+`js.len()`, `js.add(...)`, `js.close()`, `js.open()`, and `js.alert(...)`,
+reach the page as intended. `js.console.log(...)` does not compile.
+
 Escape hatch: `js.foo(...)` is sugar for `jsSend(js, "foo", @[...])` and
 `js.wait.foo(...)` for `jsCallWait(js.wait, "foo", @[...])`; both take the
-name as a `string` and the arguments as a `seq[JsonNode]`. Use them for
-dynamic names and for names that collide with Nim procs: Nim's method-call
-syntax wins over the dot operator, so `js.echo("x")` calls Nim's `echo`,
-`js.repr()` calls `repr`, `js.wait(...)` is the blocking form above (a JS
-function named `wait` needs `jsSend`), and `js.console.log(...)` does not
-compile. (`js.len()`,
-`js.add(...)`, `js.close()`, `js.open()`, `js.alert(...)` reach the page as
-intended.)
+name as a `string` and the arguments as a `seq[JsonNode]`, and never collide.
+Use them for colliding names and for dynamic names.
 
 ```nim
 proc jsEcho(text: string) {.expose.} =

@@ -675,3 +675,17 @@ suite "neel: startApp end to end":
     check not compiles(connectionOpened(1))
     check not compiles(resetJsBridge())
     check not compiles(waitForAppExit())
+
+  test "js.<name> reaches the page unless a Nim proc accepts the proxy":
+    # What README "Calling the page from Nim" promises, checked with the
+    # names `import neel` brings into scope (`std/json`, `std/options`, ...).
+    let win = Window(id: 1, js: js)
+    check typeof(js.wait.len()) is JsonNode
+    check typeof(js.wait.add(1)) is JsonNode
+    check typeof(js.wait.close()) is JsonNode
+    check typeof(js.wait.open("/x")) is JsonNode
+    check typeof(js.wait.alert("hi")) is JsonNode
+    check typeof(win.js.wait.close()) is JsonNode
+    # The documented collisions: Nim's own procs win.
+    check typeof(js.wait.echo()) is void
+    check typeof(js.wait.repr()) is string

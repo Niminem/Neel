@@ -428,6 +428,22 @@ suite "js: escape hatch":
     check msgs[2].msg.name == "len"
     check msgs[2].msg.hasId
 
+  jsTest "names of Nim procs that do not take the proxy reach the page":
+    # README "Calling the page from Nim" lists these as safe.
+    setCurrentWindow(WinA)
+    js.len()
+    js.add(1)
+    js.close()
+    js.open("/x")
+    js.alert("hi")
+    let msgs = sentMsgs()
+    check msgs.len == 5
+    check msgs[0].msg == callMsg("len", @[])
+    check msgs[1].msg == callMsg("add", @[%1])
+    check msgs[2].msg == callMsg("close", @[])
+    check msgs[3].msg == callMsg("open", @[%"/x"])
+    check msgs[4].msg == callMsg("alert", @[%"hi"])
+
   jsTest "dynamic names and explicit proxies work through the escape hatch":
     let name = "handler" & $3
     jsSend(initJsProxy(WinB), name, @[%1])

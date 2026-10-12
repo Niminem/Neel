@@ -189,6 +189,23 @@ clears them afterwards; the public-surface test now checks that `runApp`,
 passes on Windows (Nim 2.2.12); all three examples compile, and one was run
 by hand.
 
+### 2026-10-12 - All platforms: `js.<name>` collisions pinned by tests
+
+The README's list of names that reach the page (`js.len()`, `js.add(...)`,
+`js.close()`, `js.open()`, `js.alert(...)`) came from spike (b) on 2.2.10,
+before `neel` re-exported `std/json` and `std/options`, and no test pinned
+it. A collision is silent: when a Nim proc in scope accepts the proxy, Nim
+calls it and nothing reaches the page. No library change. README "Name
+collisions" paragraph now says the misroute is silent and that an app's own
+generic procs (`proc log[T](x: T)`) capture names the same way.
+
+Tests: `tests/t_jsproxy.nim` "names of Nim procs that do not take the proxy
+reach the page" (the sent `call` messages); `tests/t_neel.nim` "js.<name>
+reaches the page unless a Nim proc accepts the proxy" (types through
+`import neel`: `JsonNode` for those names and `win.js`, `void` / `string`
+for `echo` / `repr`). `nimble test` passes on Windows. If a future Nim
+changes one of these, drop the name from the README.
+
 ### 2026-10-12 - All platforms: README audit against the code
 
 README checked section by section against `src/`. Corrected: `neel.onclose`
@@ -541,9 +558,6 @@ added.
 - Request guard (2026-10-12 finding): verified on Windows and macOS. On
   Linux, `filepicker` in app mode and `@[Default]` covers it; a refusal
   shows as a `neel: refused: ...` page or a shim stuck reconnecting.
-- The README says `js.len()`, `js.add(...)`, `js.close()`, `js.open()`, and
-  `js.alert(...)` reach the page; this comes from spike (b) on 2.2.10, before
-  `neel` re-exported `std/json` and `std/options`, and no test pins it.
 - A page that navigates away from its launch URL (dropping `?window=<id>`)
   still relies on the single-window fallback for `/neel.js`; with more than
   one window open it gets a 404. Settled behaviour (README "Multiple windows"), noted
