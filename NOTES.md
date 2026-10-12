@@ -128,6 +128,28 @@ against the current API.
 
 ## Findings
 
+### 2026-10-12 - All platforms: README review feedback (docs only)
+
+README changes after review: the note under the pitch and a Features
+bullet now say the server is Neel's own thread-based HTTP/WebSocket server,
+in the spirit of Mummy (one IO thread, a worker pool, no async). The
+directory-structure text no longer says the start page "must be named
+index.html": `/` serves `index.html` and is the default `startPath`, and
+with another `startPath` no `index.html` is needed (`IndexFile` in
+`src/neel/assets.nim`, `startPath` in `src/neel.nim`); `startPath` joined
+the README's parameter table, and the guide's migration note says "default
+start page". `neel.expose` got its own subsection ("Calling JS from Nim")
+showing a plain and an async function, matching the shim (a thenable
+result is awaited, anything else is sent as is). The examples section
+recommends `filepicker` and says `roundtrip` and `stresstest` exist mostly
+for manual and stress testing of Neel. "Future Work" lists custom routes
+(app-defined request handlers, e.g. for template engines); the design
+constraints are under the `PLAN.md` Task 15 "Candidates" line. Links that
+a Markdown editor had broken in the previous commit (backticks wrapped
+around whole links, split link text, broken bold around `wss:`) are fixed.
+No code change, no test; the new snippets are JavaScript and an inline
+`startApp(startPath = ...)` call, neither compiled.
+
 ### 2026-10-12 - All platforms: docs split into README and guide (docs only)
 
 The 880-line README moved, content unchanged, to `docs/GUIDE.md`, which is

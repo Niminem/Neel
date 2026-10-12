@@ -2292,7 +2292,15 @@ and the 2.0.0 release (tag, nimble publish). macOS and Windows are verified
 moved to 2.1 (see "Post-implementation changes").
 Candidates for a later version (not planned): `Brave` / `Opera` /
 `Vivaldi` specs, `wss:`, a JS-side unit test
-runner for `neel.js` once a JS runtime is acceptable as a dev dependency.
+runner for `neel.js` once a JS runtime is acceptable as a dev dependency,
+and custom routes (app-defined Nim request handlers, e.g. for template
+engines; added 2026-10-12, listed in the README's "Future Work"). Custom
+routes must stay behind `requestRefusal`, run on pool workers (GC-safe),
+need a public request / response API (`HttpRequest` and the `http.nim`
+response helpers are not re-exported), need request bodies for anything
+but `GET` / `HEAD` (the parser skips bodies and `handleRequest` answers
+405), and a page they render still needs `?window=<id>` in its URL so its
+`/neel.js` resolves to the right window.
 
 - API adjustments first (approved after Task 14; small, in `src/`, with
   tests, so the README documents the final shape):

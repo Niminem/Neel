@@ -873,8 +873,9 @@ Neel 2.0 is a rewrite with a new API; nothing from 1.x compiles unchanged.
 | re-exported `std/os`, `std/osproc`, `std/strutils`, `std/json`, `std/threadpool`, `std/browsers`, `std/jsonutils`, Mummy | re-exports only `std/json` and `std/options`; import the rest yourself; no external dependencies |
 
 Unchanged: the page loads `/neel.js` before its own script, assets use
-absolute paths and are served from the web directory at `/`, the start page is
-`index.html`, and the server listens on `127.0.0.1` only.
+absolute paths and are served from the web directory at `/`, the default start
+page is `index.html` (`startPath` picks another), and the server listens on
+`127.0.0.1` only.
 
 ## License
 

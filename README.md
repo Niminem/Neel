@@ -2,14 +2,15 @@
 
 Neel is a Nim library for making lightweight Electron-like HTML/JS GUI apps, with full access to Nim capabilities.
 
-Write the user interface in HTML, CSS, and JavaScript and everything else in Nim. Mark a Nim proc with `{.expose.}` and the page calls it as `neel.<name>(...)`, getting the return value back through a Promise; register a JS function with `neel.expose` and Nim calls it as `js.<name>(...)`, or as `js.wait.<name>(...)` when it needs the answer. Neel takes care of the server, the browser window, the JSON conversion, and the errors in between.
+Write the user interface in HTML, CSS, and JavaScript and everything else in Nim. Mark a Nim proc with `{.expose.}` and the HTML page calls it as `neel.<name>(...)`, getting the return value back through a Promise; register a JS function with `neel.expose` and Nim calls it as `js.<name>(...)`, or as `js.wait.<name>(...)` when it needs the answer. Neel takes care of the server, the browser window, the JSON conversion, and the errors in between.
 
-> Neel runs a small HTTP/WebSocket server on `127.0.0.1` and opens Chrome, Chromium, or Edge in app mode on it, so your app gets its own window without tabs or an address bar. When none of them is installed, or when you ask for it, the app opens in a tab of your default browser instead.
+> Neel runs its own thread-based HTTP/WebSocket server on `127.0.0.1`, in the spirit of [Mummy](https://github.com/guzba/mummy): one IO thread owns the sockets, a pool of worker threads runs your procs, and there is no async anywhere. It opens Chrome, Chromium, or Edge in app mode on that server, so your app gets its own window without tabs or an address bar. When none of them is installed, or when you ask for it, the app opens in a tab of your default browser instead.
 
-**This README gets you started. Every detail (the full type list, error messages, browser discovery, lifecycle, threading, and caveats) is in the [Neel 2.0 guide](docs/GUIDE.md).**
+**This README gets you started and very well may be all you need. Every detail (the full type list, error messages, browser discovery, lifecycle, threading, and caveats) is in the [Neel 2.0 guide](docs/GUIDE.md).**
 
 Features:
 
+- Its own thread-based HTTP/WebSocket server, similar to Mummy: an IO thread plus a worker pool, no async
 - Return values in both directions: Promises in JS, blocking `js.wait` calls with timeouts in Nim
 - `{.expose.}` on any top-level proc, in any module of your app
 - Automatic type conversion, including objects, `Option`, `Table`, and default parameter values
@@ -28,14 +29,13 @@ Neel is inspired by [Eel](https://github.com/python-eel/Eel), its Python cousin.
 
 ## Introduction
 
-Nim's options for writing GUI applications are limited, and if you want to use HTML/JS instead you can expect a lot of boilerplate: a web server, a WebSocket protocol, JSON in and out of every call, and a browser to launch and clean up after.
+If you want to use HTML/JS as a GUI option for Nim you can expect a lot of boilerplate: a web server, a WebSocket protocol, JSON in and out of every call, and a browser to launch and clean up after.
 
 The best visualization libraries that exist are in JavaScript, and the most powerful capabilities of software can be harnessed with Nim. The goal of Neel is to combine the two languages, write the glue for you, and help you create some killer applications.
 
 ## Requirements and Platforms
 
 - Nim >= 2.2.12. Neel refuses to compile with older versions, whose allocators crash when memory is freed across threads.
-- No compiler flags: ORC and threads are the Nim 2 defaults.
 - No Nimble dependencies, only the standard library.
 - Google Chrome, Chromium, or Microsoft Edge for app-mode windows; without one of them, any default browser, in a tab.
 
@@ -58,6 +58,7 @@ nim c -r examples/filepicker/filepicker.nim
 ```
 
 
+
 ## Usage
 
 
@@ -71,7 +72,7 @@ main.nim            <----\
 database.nim        <-------- Nim files (exposed procs may live in any of them)
 other.nim           <----/
 web/                <-------- Web folder: "web" by default, any name via startApp's webDir
-  index.html        <-------- The start page (must be named index.html, at the root of the web folder)
+  index.html        <-------- The default start page ("/" serves index.html. startApp's startPath param can pick another)
   css/
     style.css
   js/
@@ -79,7 +80,7 @@ web/                <-------- Web folder: "web" by default, any name via startAp
 ```
 
 - The web folder is resolved relative to the Nim source file that calls `startApp`, not the working directory, so the app runs from anywhere. An absolute path works too.
-- The web folder is served at `/`, and the first window opens `/`, which serves `index.html`.
+- The web folder is served at `/`. The first window opens `/`, which serves `index.html` from the root of the web folder; to start on another page, pass `startPath` (`startApp(startPath = "/app.html")`), and `index.html` is then not needed.
 - Use absolute paths for assets in your pages: `<script src="/js/main.js">`, `<link rel="stylesheet" href="/css/style.css">`.
 
 
@@ -90,7 +91,7 @@ web/                <-------- Web folder: "web" by default, any name via startAp
 
 #### Nim / Backend
 
-We begin with a complete example, `[examples/filepicker](examples/filepicker)`: the page asks for a directory and Nim picks a random entry from it (something a browser alone cannot do). From there I'll explain each part in detail.
+We begin with a complete example, [`examples/filepicker`](examples/filepicker): the page asks for a directory and Nim picks a random entry from it (something a browser alone cannot do). From there I'll explain each part in detail.
 
 (filepicker.nim)
 
@@ -136,7 +137,7 @@ The full rules, the type list, and every error message: [Exposing Nim procs to t
 
 ##### #3 js and js.wait
 
-The file picker never calls back into the page, so there is no `#3` above. When you need to, `js` calls a JS function the page registered with `neel.expose` (or a global function such as `alert`):
+The file picker never calls back into the page, so there is no `#3` above. When you need to, `js` calls a JS function the page registered with `neel.expose` (see [Calling JS from Nim](#calling-js-from-nim-neelexpose)) or a global function such as `alert`:
 
 ```nim
 proc notify(text: string) {.expose.} =
@@ -173,6 +174,7 @@ startApp(webDir = "web", size = some((1100, 800)), position = some((80, 80)),
 | Parameter                       | Default                     | Meaning                                                                                                                |
 | ------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `webDir`                        | `"web"`                     | the web folder, relative to this source file unless absolute                                                           |
+| `startPath`                     | `"/"`                       | the page the first window opens (`"/"` serves `index.html`)                                                            |
 | `port`                          | `0`                         | port on `127.0.0.1`; 0 picks a free one                                                                                |
 | `size`, `position`              | none                        | `some((width, height))`, `some((x, y))` for app-mode windows                                                           |
 | `browsers`                      | `@[Chrome, Chromium, Edge]` | browsers to try, in order; `@[Default]` always opens a default-browser tab                                             |
@@ -181,7 +183,7 @@ startApp(webDir = "web", size = some((1100, 800)), position = some((80, 80)),
 | `onWindowOpen`, `onWindowClose` | `nil`                       | window hooks (see [Multiple Windows](#multiple-windows))                                                               |
 
 
-Every parameter (workers, timeouts, message size, extra browser flags, `browserPath`, ...): `startApp` [parameters](docs/GUIDE.md#startapp-parameters).
+Every parameter (workers, timeouts, message size, extra browser flags, `browserPath`, ...): [`startApp` parameters](docs/GUIDE.md#startapp-parameters).
 
 #### JavaScript / Frontend
 
@@ -197,7 +199,7 @@ The page side of the file picker:
   <title>Neel file picker</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
-  <script src="/neel.js"></script>
+  <script src="/neel.js"></script> <!-- LOAD THIS FIRST!!! -->
   <script src="/main.js" defer></script>
 </head>
 <body>
@@ -250,20 +252,32 @@ form.addEventListener("submit", (event) => {
 - Load `/neel.js` with a classic `<script>` tag before your own scripts. Neel serves it for each window; it defines one global, `neel` (module scripts read it as `window.neel`).
 - `neel.filePicker(...)` exists because the Nim proc is exposed. It returns a Promise that resolves with the return value or rejects with the Nim exception as `e.name` / `e.message`, which is how the page above shows `MissingDirectoryError: no such directory: ...`.
 - `neel.filePicker.send(...)` is the fire-and-forget form: no Promise, no reply, and failures are not reported.
-- `neel.expose(fn)` registers a function for Nim's `js.<name>(...)` under `fn.name`; `neel.expose({answer, showToast})` registers several at once. A function may be async: Nim's `js.wait` receives the resolved value.
-  ```javascript
-  neel.expose(async function answer(question) {
-    return prompt(question);
-  });
-  ```
 - `neel.ready` is a Promise resolved once the connection is up. Calls made before that are queued and sent on connect, so you rarely need it.
 - `neel.onclose((code, reconnecting) => ...)` tells the page when the connection closes. After an unexpected drop the page reconnects by itself; `reconnecting` says whether another attempt follows.
 
-The full API: [The](docs/GUIDE.md#the-neeljs-api) `neel.js` [API](docs/GUIDE.md#the-neeljs-api).
+
+
+##### Calling JS from Nim: neel.expose
+
+The other direction, the page side of `#3` above: `neel.expose` registers JS functions that Nim calls with `js.<name>(...)` and `js.wait.<name>(...)`. A function may be plain or async. A plain function's return value goes straight back to Nim; a returned Promise is awaited first, so `js.wait` receives the resolved value. A throw (or a rejected Promise) reaches Nim as a `NeelRemoteError` carrying the JS error's name and message.
+
+```javascript
+neel.expose(function showToast(text) {          // plain: Nim's js.showToast(text)
+  document.getElementById("toast").textContent = text;
+});
+
+neel.expose(async function answer(question) {   // async: Nim's js.wait.answer(question)
+  return prompt(question);
+});
+```
+
+`neel.expose(fn)` registers `fn` under `fn.name`, `neel.expose("name", fn)` under an explicit name, and `neel.expose({showToast, answer})` several at once. Nim can also call global functions such as `alert` without registering them.
+
+The full API: [The `neel.js` API](docs/GUIDE.md#the-neeljs-api).
 
 ### Multiple Windows
 
-Each browser window is a `Window` handle with an `id` and its own `js`. `startApp` opens the first window; open more from Nim with `openWindow`. From `[examples/roundtrip](examples/roundtrip)`:
+Each browser window is a `Window` handle with an `id` and its own `js`. `startApp` opens the first window; open more from Nim with `openWindow`. From [`examples/roundtrip`](examples/roundtrip):
 
 ```nim
 proc openSecond(): int {.expose.} =
@@ -326,9 +340,12 @@ More in [Threading model](docs/GUIDE.md#threading-model), [Security](docs/GUIDE.
 
 Run them from the repository root with `nim c -r examples/<name>/<name>.nim`:
 
-- [File picker](examples/filepicker): the example above; one exposed proc with a return value and two structured errors.
+- [File picker](examples/filepicker): the example above, and the one to start with; one exposed proc with a return value and two structured errors.
+
+The other two exist mostly for manual (and stress) testing of Neel itself, but they are interesting to read to see how Neel does things:
+
 - [Round trip](examples/roundtrip): return values in both directions, a second window, window hooks, and the errors a page sees when the other window is slow, closed, or throws.
-- [Stress test](examples/stresstest): a manual test harness that exercises every feature in one page, under load and in edge cases.
+- [Stress test](examples/stresstest): exercises every feature in one page, under load and in edge cases (every supported type, every error kind, hundreds of concurrent calls, large payloads, pushes from a plain thread).
 
 
 
@@ -357,10 +374,11 @@ The vision for this library is to eventually have it be as full-fledged as Elect
 - [ ] **Linux verification (2.1).** Linux is expected to work today; 2.1 runs the full verification pass on it and fixes whatever that turns up.
 - [ ] **Brave, Opera, and Vivaldi.** They are already members of the `Browser` enum, reserved and skipped during discovery for now.
 - [ ] **Webview capabilities.** [Webview](https://github.com/webview/webview) is an MIT licensed cross-platform webview library for C/C++. Uses WebKit (GTK/Cocoa) and Edge WebView2 (Windows). Having a webview target will get us closer to a solid framework for shipping commercial builds.
-- [ ] **Secure WebSockets (**`wss:`**).** The page side already switches to `wss:` when served over `https:`; the server does not speak TLS yet.
+- [ ] **Custom routes.** Let an app answer HTTP requests with its own Nim handlers next to the web folder, so pages can be rendered with template engines and the like.
+- [ ] **Secure WebSockets (`wss:`).** The page side already switches to `wss:` when served over `https:`; the server does not speak TLS yet.
 
 
 
 ## License
 
-MIT; see `[LICENSE](LICENSE)`.
+MIT; see [`LICENSE`](LICENSE).
