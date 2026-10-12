@@ -424,12 +424,6 @@ added.
 
 ## Open items
 
-- stresstest's manual check "a page refresh after a restart works again"
-  needs the restarted app on the same port; with the default `port = 0` the
-  old page's URL is dead. stresstest takes an optional port argument
-  (`./stresstest 8765`) and the page text gives the recipe. Passed on macOS
-  2026-10-12 and on Windows 2026-10-12 (the refreshed old page displaces
-  the window the restart opened, as documented).
 - Linux: not run yet. Run the full matrix, including the stale-tab recipe
   and both stresstest manual checks.
 - Edge: verified on Windows only (2026-10-12). macOS and Linux will not be

@@ -2283,11 +2283,11 @@ Post-task additions (after manual browser verification on macOS):
   to Windows; example descriptions for roundtrip and stresstest given concise
   context notes.
 
-What remains outside this plan: manual browser verification of the three
-examples on Windows and Linux with real Chrome / Chromium (macOS done),
-the merge of `neel2-devel` into `master`, and the 2.0.0 release
-(tag, nimble publish). Candidates for a later version (not planned):
-`Edge` / `Brave` / `Opera` / `Vivaldi` specs, `wss:`, a JS-side unit test
+What remains outside this plan: the Linux verification pass (macOS and
+Windows are done; see the verification matrix in `NOTES.md`), the merge of
+`neel2-devel` into `master`, and the 2.0.0 release (tag, nimble publish).
+Candidates for a later version (not planned): `Brave` / `Opera` /
+`Vivaldi` specs, `wss:`, a JS-side unit test
 runner for `neel.js` once a JS runtime is acceptable as a dev dependency.
 
 - API adjustments first (approved after Task 14; small, in `src/`, with
