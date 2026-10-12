@@ -497,7 +497,9 @@ pages with `openWindow`, not with `window.open` from the page.
 
 Each window is its own browser process with a private profile directory
 (`<tmpdir>/neel-<pid>-<id>`, created by the browser, removed by Neel when the
-window closes). This costs a full browser instance per window but makes the
+window closes). If the app or the browser is killed or crashes, the directory
+stays behind; the next Neel app to exit normally deletes it, once neither the
+app nor a browser is still using it (see [Lifecycle](#lifecycle)). This costs a full browser instance per window but makes the
 process handle reliable: terminating it closes exactly that window. Closing a
 window with the OS close button is detected through its WebSocket closing; the
 window is retired (and `onWindowClose` fired) after the grace period, since a
@@ -582,8 +584,12 @@ is discardable):
 
 Before returning, `startApp` sends a 1001 close to every window, waits for
 every in-flight hook, terminates the browser processes it started, removes the
-profile directories, and tears everything down. A `startApp` can be called
-again afterwards in the same process.
+profile directories, and tears everything down. Last, it deletes profile
+directories that killed or crashed Neel apps left in the temp directory:
+only `neel-<pid>-<id>` directories whose app is no longer running and that no
+browser still uses, never anything else, and for at most about 2 seconds
+(whatever is left waits for the next exit). Usually there is nothing to
+delete. A `startApp` can be called again afterwards in the same process.
 
 The grace period defaults to `DefaultGracePeriodMs`: 3 s in debug builds, 10 s
 with `-d:release`. It exists because a page refresh, Chromium reloading a
@@ -697,6 +703,7 @@ is that `webDir` may be given positionally (`startApp("web", port = 8000)`).
 | `onWindowOpen` | `nil` | `WindowHook` fired when a window's page first connects |
 | `onWindowClose` | `nil` | `WindowHook` fired when a window is closed or retired |
 | `launcher` | `nil` | test seam replacing the browser launch (`Launcher` type); tests inject a fake |
+| `profileSweep` | `nil` | test seam replacing the exit-time cleanup of abandoned profile directories (`ProfileSweep` type) |
 
 `startApp` raises `NeelBrowserError` (no browser and `fallback = false`, or a
 bad `browserPath`), `OSError` (the port is taken), or `ValueError` (a

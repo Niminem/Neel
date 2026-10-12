@@ -1,11 +1,14 @@
 ## t_browser.nim - spec table, discovery with injected probes, launch args,
 ## opener commands, and the no-browser page URL.
 ##
-## Nothing here launches a process or depends on an installed browser: every
+## Nothing here launches a browser or depends on an installed one: every
 ## probe goes through a canned `Discovery` and the launch side is exercised
-## through the pure `buildLaunchArgs` / `defaultBrowserCommand` only.
+## through the pure `buildLaunchArgs` / `defaultBrowserCommand` only. The
+## profile sweep runs on canned `ProfileProbes`, plus one real-filesystem
+## case in a private temp dir whose "dead app" is a short `nim --version`.
 
-import std/[unittest, options, strutils, sequtils, sets, tables, os]
+import std/[unittest, options, strutils, sequtils, sets, tables, os, osproc,
+            monotimes, times]
 import neel/browser
 
 const
@@ -616,3 +619,210 @@ suite "browser: handle without a process":
     e.searched = @["Google Chrome"]
     check e of CatchableError
     check e.searched == @["Google Chrome"]
+
+# --- abandoned profiles ------------------------------------------------------------
+
+type
+  ProfileFake = ref object
+    ## Canned temp dir and process table plus a log of the probes asked.
+    names: seq[string]
+    alive: HashSet[int]
+    held: HashSet[string]       # dirs a live browser holds
+    existing: HashSet[string]   # for dirExists
+    failList: bool
+    failRemove: HashSet[string]
+    failPid: HashSet[int]
+    failLock: HashSet[string]
+    askedPids: seq[int]
+    askedLocks: seq[string]
+    removed: seq[string]
+    clockMs: int
+    removeCostMs: int           # the fake clock advances this much per removeDir
+
+proc probes(f: ProfileFake): ProfileProbes =
+  ProfileProbes(
+    listDirs: proc(dir: string): seq[string] =
+      if f.failList:
+        raise newException(OSError, "listing failed")
+      f.names,
+    dirExists: proc(dir: string): bool = dir in f.existing,
+    pidAlive: proc(pid: int): bool =
+      f.askedPids.add pid
+      if pid in f.failPid:
+        raise newException(OSError, "pid check failed")
+      pid in f.alive,
+    profileInUse: proc(dir: string): bool =
+      f.askedLocks.add dir
+      if dir in f.failLock:
+        raise newException(OSError, "lock check failed")
+      dir in f.held,
+    removeDir: proc(dir: string) =
+      f.clockMs += f.removeCostMs
+      if dir in f.failRemove:
+        raise newException(OSError, "cannot remove " & dir)
+      f.removed.add dir
+      f.existing.excl(dir),
+    now: proc(): MonoTime = MonoTime() + initDuration(milliseconds = f.clockMs))
+
+const
+  Root = "/tmp"
+  OwnPid = 500
+
+proc sweep(f: ProfileFake; budgetMs = SweepBudgetMs): int =
+  sweepProfiles(Root, ownPid = OwnPid, budgetMs = budgetMs, probes = f.probes)
+
+suite "browser: abandoned profile sweep":
+  test "names: only neel-<pid>-<windowId> with plain positive decimals parse":
+    check parseUserDataDirName("neel-1-1") == (1, 1)
+    check parseUserDataDirName("neel-4242-17") == (4242, 17)
+    check parseUserDataDirName("neel-2147483647-3") == (2147483647, 3)
+    check parseUserDataDirName(extractFilename(
+      userDataDirFor(3, pid = 99, tempDir = "/tmp"))) == (99, 3)
+    for bad in ["", "neel", "neel-", "neel-1", "neel-1-", "neel--1", "neel-1--2",
+                "neel-+1-2", "neel--1-2", "neel-1-+2", "neel-1_000-2", "neel-0-1",
+                "neel-1-0", "neel-01-2", "neel-1-02", "neel-1-2-3", "neel-1-2 ",
+                " neel-1-2", "Neel-1-2", "NEEL-1-2", "neel-1-2x", "neel-a-b",
+                "neel-1.5-2", "neel-2147483648-1", "neel-99999999999-1",
+                "neel_1_2", "neel-1-2.old", "chrome-1-2", "other"]:
+      check parseUserDataDirName(bad) == (0, 0)
+
+  test "SingletonLock target: the pid after the last dash":
+    check singletonLockPid("myhost-1234") == 1234
+    check singletonLockPid("my-host.local-77") == 77
+    for bad in ["", "nohost", "host-", "host-12a", "host--", "host-0", "host-+5"]:
+      check singletonLockPid(bad) == 0
+
+  test "garbage and unrelated names are ignored without any probe":
+    let f = ProfileFake(names: @["other", "neel-x-1", "neel-1", "neel-7-1-2",
+                                 "neel_7_1", "Neel-7-1", "neel-07-1"])
+    check f.sweep() == 0
+    check f.askedPids.len == 0
+    check f.askedLocks.len == 0
+    check f.removed.len == 0
+
+  test "a live owner is skipped before its lock is looked at":
+    let f = ProfileFake(names: @["neel-10-1"], alive: toHashSet([10]))
+    check f.sweep() == 0
+    check f.askedPids == @[10]
+    check f.askedLocks.len == 0
+    check f.removed.len == 0
+
+  test "our own pid is never touched, whatever the probes say":
+    let f = ProfileFake(names: @["neel-" & $OwnPid & "-1", "neel-" & $OwnPid & "-2"])
+    check f.sweep() == 0
+    check f.askedPids.len == 0
+    check f.removed.len == 0
+
+  test "a dead owner whose browser still holds the profile is skipped":
+    let f = ProfileFake(names: @["neel-10-1"], held: toHashSet([Root / "neel-10-1"]))
+    check f.sweep() == 0
+    check f.askedLocks == @[Root / "neel-10-1"]
+    check f.removed.len == 0
+
+  test "a dead owner with no browser lock is deleted; the rest is left alone":
+    let f = ProfileFake(
+      names: @["neel-10-1", "other", "neel-11-2", "neel-12-1", "neel-13-1",
+               "neel-" & $OwnPid & "-1"],
+      alive: toHashSet([12]), held: toHashSet([Root / "neel-13-1"]))
+    check f.sweep() == 2
+    check f.removed == @[Root / "neel-10-1", Root / "neel-11-2"]
+
+  test "the time budget stops the sweep part-way; the next sweep goes on":
+    let f = ProfileFake(names: @["neel-1-1", "neel-2-1", "neel-3-1", "neel-4-1",
+                                 "neel-5-1"],
+                        removeCostMs: 1000)
+    check f.sweep(budgetMs = 2000) == 2
+    check f.removed == @[Root / "neel-1-1", Root / "neel-2-1"]
+    check f.askedPids == @[1, 2]
+    f.names = f.names[2 .. ^1]
+    check f.sweep(budgetMs = 2000) == 2
+    check f.removed.len == 4
+    check ProfileFake(names: @["neel-1-1"]).sweep(budgetMs = 0) == 0
+
+  test "the sweep never raises: listing, checks, and removal may all fail":
+    let f = ProfileFake(failList: true)
+    check f.sweep() == 0
+    let g = ProfileFake(
+      names: @["neel-1-1", "neel-2-1", "neel-3-1", "neel-4-1"],
+      failRemove: toHashSet([Root / "neel-1-1"]), failPid: toHashSet([2]),
+      failLock: toHashSet([Root / "neel-3-1"]))
+    check g.sweep() == 1
+    check g.removed == @[Root / "neel-4-1"]
+    check g.askedPids == @[1, 2, 3, 4]
+
+  test "incomplete probes are a usage error":
+    var p = ProfileFake().probes
+    p.now = nil
+    expect AssertionDefect:
+      discard sweepProfiles(Root, probes = p)
+    expect AssertionDefect:
+      clearStaleUserDataDir(Root / "neel-1-1", p)
+
+  test "a stale dir with our pid is deleted before launch; nothing else is done":
+    let dir = userDataDirFor(4, pid = OwnPid, tempDir = Root)
+    let f = ProfileFake(existing: toHashSet([dir]))
+    clearStaleUserDataDir(dir, f.probes)
+    check f.removed == @[dir]
+    check dir notin f.existing
+    let g = ProfileFake()
+    clearStaleUserDataDir(dir, g.probes)
+    check g.removed.len == 0
+    let h = ProfileFake(existing: toHashSet([dir]), failRemove: toHashSet([dir]))
+    clearStaleUserDataDir(dir, h.probes) # in use: ignored, the launch goes on
+    check dir in h.existing
+
+  test "real filesystem: only the dead app's free profile is deleted":
+    const NimExe = getCurrentCompilerExe()
+    let root = getTempDir() / ("neel_t_browser_sweep_" & $getCurrentProcessId())
+    let own = getCurrentProcessId()
+    removeDir(root)
+    createDir(root)
+    # A process that has exited is our dead app. The `Process` stays open
+    # until the end so Windows cannot hand its pid to someone else.
+    let p = startProcess(NimExe, args = ["--version"])
+    defer: p.close()
+    check p.waitForExit() == 0
+    let dead = p.processID
+    let real = systemProfileProbes()
+    check not real.pidAlive(dead)
+    check real.pidAlive(own)
+    let free = root / ("neel-" & $dead & "-1")
+    let held = root / ("neel-" & $dead & "-2")
+    let mine = root / ("neel-" & $own & "-1")
+    let garbage = root / ("neel-" & $dead & "-x")
+    let unrelated = root / ("notes-" & $dead & "-1")
+    let plainFile = root / ("neel-" & $dead & "-3")
+    for d in [free / "Default", held, mine, garbage, unrelated]:
+      createDir(d)
+    writeFile(free / "Default" / "Preferences", "{}")
+    writeFile(mine / "Preferences", "{}")
+    writeFile(plainFile, "not a dir")
+    when defined(windows):
+      # Chromium keeps `lockfile` open without delete sharing; so does fopen.
+      var lock = open(held / "lockfile", fmWrite)
+    else:
+      createSymlink("somehost-" & $own, held / "SingletonLock")
+      let target = root / "target"
+      createDir(target)
+      writeFile(target / "keep", "x")
+      createSymlink(target, root / ("neel-" & $dead & "-4"))
+    try:
+      check sweepProfiles(root, ownPid = own) == 1
+      check not dirExists(free)
+      check dirExists(held)
+      check dirExists(mine)
+      check fileExists(mine / "Preferences")
+      check dirExists(garbage)
+      check dirExists(unrelated)
+      check fileExists(plainFile)
+      when not defined(windows):
+        check fileExists(root / "target" / "keep")
+        check symlinkExists(root / ("neel-" & $dead & "-4"))
+      # The pre-launch check on a real dir.
+      clearStaleUserDataDir(mine)
+      check not dirExists(mine)
+      clearStaleUserDataDir(mine)
+    finally:
+      when defined(windows):
+        lock.close()
+      removeDir(root)

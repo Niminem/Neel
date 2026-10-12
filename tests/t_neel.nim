@@ -61,6 +61,11 @@ type
     workersSeen: int        # workers that ran `markWorker`
     workersExited: int      # ... and have since exited
     exitedAtWindowClose: int  # `workersExited` when `onWindowClose` ran
+    sweeps: int             # `profileSweep` calls
+    sweepOpenWindows: int   # `windows().len` when it ran
+    sweepDirsLeft: int      # launched profile dirs still on disk when it ran
+    sweepExited: int        # `workersExited` when it ran
+    sweepAfterReturn: bool  # `startApp` had already returned when it ran
 
 var shared: Shared
 initLock shared.lock
@@ -96,6 +101,22 @@ proc recordWindowClose(w: Window) {.gcsafe.} =
     shared.exitedAtWindowClose = shared.workersExited
     release shared.lock
 
+proc recordSweep() {.gcsafe.} =
+  ## `profileSweep`: must run once, last, with every window, profile dir, and
+  ## worker of the run already gone, and before `startApp` returns.
+  {.cast(gcsafe).}:
+    let open = windows().len
+    acquire shared.lock
+    inc shared.sweeps
+    shared.sweepOpenWindows = open
+    shared.sweepDirsLeft = 0
+    for d in shared.userDataDirs:
+      if dirExists(d):
+        inc shared.sweepDirsLeft
+    shared.sweepExited = shared.workersExited
+    shared.sweepAfterReturn = shared.done
+    release shared.lock
+
 proc fakeLaunch(url, userDataDir: string; opts: LaunchOptions): BrowserHandle
     {.gcsafe.} =
   ## Stands in for the browser: records the URL, publishes the port.
@@ -129,7 +150,7 @@ proc appThread(run: int) {.thread.} =
                               browsers = @[], gracePeriodMs = Grace,
                               startupTimeoutMs = 2000, callTimeoutMs = 2000,
                               workers = 4, queueCapacity = 32,
-                              launcher = fakeLaunch,
+                              launcher = fakeLaunch, profileSweep = recordSweep,
                               onWindowClose = recordWindowClose)
         finish(reason)
       else:
@@ -137,7 +158,7 @@ proc appThread(run: int) {.thread.} =
                               browsers = @[], gracePeriodMs = Grace,
                               startupTimeoutMs = 2000, callTimeoutMs = 2000,
                               workers = 4, queueCapacity = 32,
-                              launcher = fakeLaunch)
+                              launcher = fakeLaunch, profileSweep = recordSweep)
         finish(reason)
     except CatchableError as e:
       finish(erStartupTimeout, "startApp raised " & $e.name & ": " & e.msg)
@@ -152,6 +173,11 @@ proc resetShared() =
   shared.workersSeen = 0
   shared.workersExited = 0
   shared.exitedAtWindowClose = -1
+  shared.sweeps = 0
+  shared.sweepOpenWindows = -1
+  shared.sweepDirsLeft = -1
+  shared.sweepExited = -1
+  shared.sweepAfterReturn = false
   release shared.lock
 
 proc sharedPort(): int =
@@ -311,7 +337,9 @@ suite "neel: startApp end to end":
       acquire shared.lock
       check shared.launches == @[base & "/?window=1"]
       let profileDir = shared.userDataDirs[0]
+      let sweptAtStart = shared.sweeps
       release shared.lock
+      check sweptAtStart == 0 # the sweep never runs before or during launch
       check dirExists(profileDir)
 
       # /neel.js for window 1, named by the page URL in Referer.
@@ -476,7 +504,18 @@ suite "neel: startApp end to end":
     let seen = shared.workersSeen
     let exited = shared.workersExited
     let exitedAtClose = shared.exitedAtWindowClose
+    let sweeps = shared.sweeps
+    let sweepOpen = shared.sweepOpenWindows
+    let sweepDirs = shared.sweepDirsLeft
+    let sweepExited = shared.sweepExited
+    let sweepLate = shared.sweepAfterReturn
     release shared.lock
+    # The exit sweep ran once, after teardown and the joins, before returning.
+    check sweeps == 1
+    check sweepOpen == 0
+    check sweepDirs == 0
+    check sweepExited == seen
+    check not sweepLate
     check dirs.len == 2
     check not dirExists(dirs[0])   # removed by teardown
     check not dirExists(dirs[1])   # removed by closeWindow
@@ -513,7 +552,11 @@ suite "neel: startApp end to end":
     check shared.reason == erLastWindowClosed
     acquire shared.lock
     let dirs = shared.userDataDirs
+    let sweeps = shared.sweeps
+    let sweepDirs = shared.sweepDirsLeft
     release shared.lock
+    check sweeps == 1
+    check sweepDirs == 0
     check dirs.len == 1
     check not dirExists(dirs[0])
 

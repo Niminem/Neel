@@ -2380,6 +2380,22 @@ supersede the task notes they mention.
   `browserPath` override gets the flags of the first app-mode preference).
   Reason: a fresh Edge profile signs in with the Windows Microsoft account
   and starts sync (NOTES.md 2026-10-12).
+- Abandoned profile sweep (adds to the Task 11/12/13 profile notes; the
+  `userDataDirFor` layout `<tmp>/neel-<pid>-<windowId>` is unchanged).
+  `runApp` runs `sweepProfiles()` last, after `shutdown` returns: it deletes
+  `neel-<pid>-<windowId>` dirs in the temp dir whose owning app is not
+  running and whose profile no browser holds (POSIX `SingletonLock` pid,
+  Windows `lockfile`), never our own pid's, within `SweepBudgetMs` (2 s),
+  never raising. `openWindow` calls `clearStaleUserDataDir(userDataDirFor(id))`
+  before launching (pid reuse). API in `browser.nim`: `ProfileProbes`,
+  `systemProfileProbes`, `sweepProfiles(tempDir, ownPid, budgetMs, probes):
+  int`, `clearStaleUserDataDir(dir, probes)`, `parseUserDataDirName`,
+  `singletonLockPid`, `SweepBudgetMs`. `runApp` / `startApp` gained
+  `profileSweep: ProfileSweep = nil` (`ProfileSweep = proc() {.gcsafe.}`,
+  exported by `neel`), a test seam like `launcher`. Reason: a killed or
+  crashed app leaves 16-120 MB per window and Windows never cleans `%TEMP%`
+  (NOTES.md 2026-10-12, which also says why not a `<tmp>/neel/` subfolder
+  and not a background thread).
 
 ---
 

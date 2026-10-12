@@ -424,7 +424,8 @@ proc openWindow*(path = "/"; size = none(WindowSize);
   ## defaults when given; `extraFlags` are appended to the default extra
   ## flags. The window id is allocated first (monotonic from 1), the record
   ## is registered before the launch so a fast page load can already bind,
-  ## then the launcher runs (`launchWithFallback`: a `NeelBrowserError` or a
+  ## a leftover profile dir with this pid and id is deleted
+  ## (`clearStaleUserDataDir`), then the launcher runs (`launchWithFallback`: a `NeelBrowserError` or a
   ## `ValueError` for a bad size propagates and the record is dropped).
   ## Callable from an exposed proc on a pool worker; blocks only for the
   ## launch itself.
@@ -442,6 +443,7 @@ proc openWindow*(path = "/"; size = none(WindowSize);
     opts.extraFlags.add f
   let url = launchUrl(m.baseUrl, path, id)
   let dir = userDataDirFor(id)
+  clearStaleUserDataDir(dir)
   let rec = cast[ptr WindowRecord](allocShared0(sizeof(WindowRecord)))
   rec.id = id
   rec.path = path

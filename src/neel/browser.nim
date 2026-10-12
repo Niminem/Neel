@@ -30,11 +30,23 @@
 ## tab; `fallback = false` opens the default browser at the Neel-served error
 ## page (`NoBrowserPath`, rendered by `startApp`) and raises `NeelBrowserError`
 ## carrying the list of browsers searched.
+##
+## Abandoned profiles: a killed or crashed app or browser leaves its
+## `neel-<pid>-<windowId>` dir behind. `sweepProfiles` (run by `startApp` at
+## exit) deletes those whose owning app and browser are both gone, and
+## `clearStaleUserDataDir` (run by `openWindow` before each launch) deletes a
+## leftover dir that happens to carry our pid. Their probes go through a
+## `ProfileProbes` record (`systemProfileProbes()` is the real one).
 
 import std/[os, osproc, options, strutils, monotimes, times]
 
 when defined(windows):
   import std/registry
+  from std/winlean import openProcess, getExitCodeProcess, closeHandle,
+    getLastError, DWORD, PROCESS_QUERY_LIMITED_INFORMATION, STILL_ACTIVE,
+    ERROR_ACCESS_DENIED
+else:
+  from std/posix import kill, Pid, errno, EPERM
 
 type
   Browser* = enum
@@ -184,6 +196,28 @@ type
     searched*: seq[string]
       ## Display names of the browsers probed (for the no-browser case).
 
+  ProfileProbes* = object
+    ## The probes `sweepProfiles` and `clearStaleUserDataDir` use. Tests fill
+    ## these with canned answers; `systemProfileProbes()` returns the real
+    ## ones. Any probe may raise; the callers never let it escape.
+    listDirs*: proc(dir: string): seq[string] {.gcsafe.}
+      ## Names (not paths) of the real subdirectories of `dir`; files,
+      ## symlinks, and junctions are left out.
+    dirExists*: proc(dir: string): bool {.gcsafe.}
+      ## Whether a directory exists at `dir`.
+    pidAlive*: proc(pid: int): bool {.gcsafe.}
+      ## Whether a process with this id is running, or exists but cannot be
+      ## queried.
+    profileInUse*: proc(dir: string): bool {.gcsafe.}
+      ## Whether a browser still holds the profile in `dir`. The real one:
+      ## Windows tries to delete the profile's `lockfile` (Chromium keeps it
+      ## open without delete sharing); POSIX reads the `SingletonLock`
+      ## symlink (`<host>-<browserPid>`) and checks that pid.
+    removeDir*: proc(dir: string) {.gcsafe.}
+      ## Deletes `dir` recursively; raises `OSError` on failure.
+    now*: proc(): MonoTime {.gcsafe.}
+      ## The clock the time budget is measured with.
+
 const
   CurrentHostOs* =
     when defined(macosx): hoMacos
@@ -262,6 +296,10 @@ const
     ## giving up on reading its exit code.
   TerminateGraceMs* = 2000
     ## Default time `terminate` gives the browser between SIGTERM and SIGKILL.
+  SweepBudgetMs* = 2000
+    ## Default time `sweepProfiles` may keep starting deletions.
+  UserDataDirPrefix = "neel-"
+    ## Name prefix of every window profile dir (`userDataDirFor`).
 
 proc isSupported*(b: Browser): bool =
   ## `true` for `Chrome`, `Chromium`, `Edge`, and `Default` in 2.0.
@@ -509,7 +547,7 @@ proc userDataDirFor*(windowId: int; pid = getCurrentProcessId();
   ## (`--no-first-run` suppresses the welcome flow); `removeUserDataDir`
   ## deletes it after the process is gone.
   doAssert windowId > 0, "userDataDirFor: window id must be positive"
-  tempDir / ("neel-" & $pid & "-" & $windowId)
+  tempDir / (UserDataDirPrefix & $pid & "-" & $windowId)
 
 proc buildLaunchArgs*(url, userDataDir: string;
                       size = none(WindowSize); position = none(WindowPosition);
@@ -715,4 +753,136 @@ proc removeUserDataDir*(h: BrowserHandle) =
   try:
     removeDir(h.userDataDir)
   except OSError:
+    discard
+
+# --- Abandoned profiles ------------------------------------------------------
+
+proc parseDecimal(s: string): int =
+  ## `s` as a positive decimal of ASCII digits only (no sign, `_`, or leading
+  ## zero) up to `int32.high`; `0` for anything else.
+  if s.len == 0 or s.len > 10 or s[0] == '0':
+    return 0
+  var n = 0'i64
+  for c in s:
+    if c notin {'0' .. '9'}:
+      return 0
+    n = n * 10 + int64(ord(c) - ord('0'))
+  if n > int32.high: 0 else: int(n)
+
+proc parseUserDataDirName*(name: string): tuple[pid, windowId: int] =
+  ## `(pid, windowId)` for a dir name `userDataDirFor` produces
+  ## (`neel-<pid>-<windowId>`), `(0, 0)` for anything else. Strict, because
+  ## the sweep deletes what parses: both numbers are positive plain decimals.
+  if not name.startsWith(UserDataDirPrefix):
+    return
+  let rest = name[UserDataDirPrefix.len .. ^1]
+  let dash = rest.find('-')
+  if dash < 0:
+    return
+  let pid = parseDecimal(rest[0 ..< dash])
+  let windowId = parseDecimal(rest[dash + 1 .. ^1])
+  if pid > 0 and windowId > 0:
+    result = (pid, windowId)
+
+proc singletonLockPid*(target: string): int =
+  ## The browser pid in the target of Chromium's POSIX `SingletonLock`
+  ## symlink (`<hostname>-<pid>`); `0` when it does not parse.
+  let dash = target.rfind('-')
+  if dash < 0: 0 else: parseDecimal(target[dash + 1 .. ^1])
+
+proc processAlive(pid: int): bool {.gcsafe.} =
+  ## Whether process `pid` exists. Unknown counts as alive, so the sweep
+  ## errs towards keeping a dir. A non-positive pid is never probed:
+  ## `kill(0, 0)` and `kill(-1, 0)` address process groups.
+  if pid <= 0 or pid > int32.high:
+    return true
+  when defined(windows):
+    let h = openProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, DWORD(pid))
+    if h == 0:
+      return getLastError() == ERROR_ACCESS_DENIED
+    var code: int32
+    let ok = getExitCodeProcess(h, code) != 0
+    discard closeHandle(h)
+    not ok or code == STILL_ACTIVE
+  else:
+    kill(Pid(pid), 0) == 0 or errno == EPERM
+
+proc browserHoldsProfile(dir: string): bool {.gcsafe.} =
+  ## The real `profileInUse` (see `ProfileProbes`). On Windows a missing
+  ## `lockfile` counts as free and a deleted one stays deleted (the dir is
+  ## removed next). A `SingletonLock` that does not parse counts as held.
+  when defined(windows):
+    not tryRemoveFile(dir / "lockfile")
+  else:
+    let lock = dir / "SingletonLock"
+    if not symlinkExists(lock):
+      return false
+    let pid = singletonLockPid(expandSymlink(lock))
+    pid == 0 or processAlive(pid)
+
+proc listSubdirs(dir: string): seq[string] {.gcsafe.} =
+  for kind, name in walkDir(dir, relative = true):
+    if kind == pcDir:
+      result.add name
+
+proc systemProfileProbes*(): ProfileProbes =
+  ## Probes that hit the real machine: `walkDir`, `dirExists`, `kill(pid, 0)`
+  ## (POSIX) or `OpenProcess` + `GetExitCodeProcess` (Windows), the browser
+  ## lock check described in `ProfileProbes`, `removeDir`, `getMonoTime`.
+  ProfileProbes(
+    listDirs: listSubdirs,
+    dirExists: proc(dir: string): bool {.gcsafe.} = dirExists(dir),
+    pidAlive: processAlive,
+    profileInUse: browserHoldsProfile,
+    removeDir: proc(dir: string) {.gcsafe.} = removeDir(dir),
+    now: proc(): MonoTime {.gcsafe.} = getMonoTime())
+
+proc checkProfileProbes(p: ProfileProbes) =
+  doAssert p.listDirs != nil and p.dirExists != nil and p.pidAlive != nil and
+    p.profileInUse != nil and p.removeDir != nil and p.now != nil,
+    "ProfileProbes: every probe must be set (use systemProfileProbes() as a base)"
+
+proc sweepProfiles*(tempDir = getTempDir(); ownPid = getCurrentProcessId();
+                    budgetMs = SweepBudgetMs;
+                    probes = systemProfileProbes()): int {.gcsafe.} =
+  ## Deletes abandoned window profiles: every `neel-<pid>-<windowId>` dir
+  ## directly in `tempDir` (see `parseUserDataDirName`) whose owning app
+  ## `pid` is not running and that no browser still holds. Dirs of `ownPid`
+  ## are never touched; other names, files, and symlinks are ignored. Stops
+  ## starting deletions once `budgetMs` has passed (one already running
+  ## finishes); the rest waits for the next sweep. Never raises: a failing
+  ## listing ends the sweep, a failing check or deletion skips that dir.
+  ## Returns the number of dirs removed.
+  checkProfileProbes(probes)
+  try:
+    let deadline = probes.now() + initDuration(milliseconds = max(budgetMs, 0))
+    for name in probes.listDirs(tempDir):
+      if probes.now() >= deadline:
+        break
+      let pid = parseUserDataDirName(name).pid
+      if pid == 0 or pid == ownPid:
+        continue
+      let dir = tempDir / name
+      try:
+        if probes.pidAlive(pid) or probes.profileInUse(dir):
+          continue
+        probes.removeDir(dir)
+        inc result
+      except CatchableError:
+        discard
+  except CatchableError:
+    discard
+
+proc clearStaleUserDataDir*(dir: string; probes = systemProfileProbes()) {.gcsafe.} =
+  ## Deletes `dir` if it already exists. `openWindow` calls it before
+  ## launching with `userDataDirFor(id)`: a dir with our pid that we have not
+  ## launched yet is left over from an earlier process with the same pid (or
+  ## an earlier `startApp` in this one). Costs one existence check when there
+  ## is nothing to do. Best effort: if it cannot be deleted (a browser still
+  ## holds it) the launch goes ahead anyway. Never raises.
+  checkProfileProbes(probes)
+  try:
+    if probes.dirExists(dir):
+      probes.removeDir(dir)
+  except CatchableError:
     discard

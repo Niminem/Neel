@@ -19,7 +19,8 @@ How to use this file:
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the stale-tab fix) | passes (Nim 2.2.12, 2026-10-12, with the stale-tab fix) | not run |
+| `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the stale-tab fix; not re-run with the profile sweep) | passes (Nim 2.2.12, 2026-10-12, with the profile sweep) | not run |
+| profile sweep manual check (see "Open items") | not run | passes (Nim 2.2.12, 2026-10-12; release roundtrip with Chrome and with `@[Edge]`, normal exit and Task Manager kill; no `neel-*` dir left in `%TEMP%`) | not run |
 | `examples/filepicker` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | not run |
 | `examples/roundtrip` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | not run |
 | `examples/stresstest` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | not run |
@@ -91,7 +92,100 @@ launch change on a Windows machine signed in with a Microsoft account.
 Anything a browser needs on every launch goes in its spec's `launchFlags`,
 not in the common flags of `buildLaunchArgs`.
 
+### Profile dirs: only `<tmp>/neel-<pid>-<id>`, deleted only when owner and browser are dead
+
+Window profiles live only at `userDataDirFor(id)` =
+`<tmp>/neel-<pid>-<windowId>`; the exit sweep deletes nothing else. It
+deletes such a dir only when its name parses strictly, the pid is not ours,
+the owning app is not running, and no browser holds the profile. Keep it
+that way: never widen the name match, never delete on a failed or
+uncertain check (unknown counts as alive), never pass a parsed pid to
+`kill` without the positive-decimal check, and never follow a symlink out
+of the temp dir. Anything that changes where profiles live must change
+`userDataDirFor`, `parseUserDataDirName`, and the sweep together.
+
 ## Findings
+
+### 2026-10-12 - All platforms: abandoned profile dirs are swept at exit
+
+Symptom (Windows): six stale `neel-<pid>-<id>` dirs, about 390 MB, in
+`%TEMP%`. Every window's profile (16-120 MB) is deleted only by Neel when the
+window closes; a killed or crashed app (Ctrl+C, Task Manager) or browser
+leaves it behind, and Windows never cleans `%TEMP%` (macOS ages out
+`$TMPDIR`; Linux varies).
+
+Fix (`src/neel/browser.nim`, `src/neel.nim`, `src/neel/window.nim`):
+- `sweepProfiles` runs last in `runApp`'s `finally`, after `shutdown`
+  (windows torn down, browsers terminated, every thread joined), on the
+  main thread. It lists the temp dir and deletes a dir only when its name
+  parses strictly as `neel-<pid>-<windowId>` (plain positive decimals; no
+  sign, `_`, or leading zero, so `kill` never sees 0 or -1), the pid is not
+  ours, the owning app is not running, and no browser still holds the
+  profile. Owner check: POSIX `kill(pid, 0)` (`EPERM` = alive), Windows
+  `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` (`ERROR_ACCESS_DENIED` =
+  alive) + `GetExitCodeProcess` (`STILL_ACTIVE` = alive). Browser check:
+  POSIX `SingletonLock` -> `<host>-<pid>`, skip if that pid is alive or does
+  not parse; Windows delete the profile's `lockfile` (Chromium holds it
+  without delete sharing), skip if that fails. Only real dirs are listed
+  (no symlinks or junctions). Budget `SweepBudgetMs` (2 s), checked before
+  each dir; a deletion already running finishes, the rest waits for the
+  next exit. Never raises.
+- `clearStaleUserDataDir` in `openWindow` before each launch: a dir with our
+  pid and this window id that we have not launched yet is left over from an
+  earlier process with the same pid (or an earlier `startApp` in this
+  process); it is deleted so the window gets a fresh profile. One
+  `dirExists` when there is nothing to do; a failed delete (a browser still
+  holds it) is ignored and the launch goes ahead.
+- Probes are injectable (`ProfileProbes`: listing, `dirExists`, pid check,
+  lock check, `removeDir`, clock; `systemProfileProbes()` is the real one),
+  and `runApp` / `startApp` take `profileSweep` (`nil` = `sweepProfiles()`)
+  as a test seam like `launcher`.
+
+Why at exit and not on a background thread at startup: nothing runs before
+or during a launch, there is no thread to join and no cross-thread memory
+to think about, and the `finally` also runs when `NeelBrowserError`
+propagates. Cost: a killed run is cleaned up by the next clean exit of any
+Neel app, not the next start. Normally there is nothing to delete and the
+sweep takes milliseconds; it comes after the grace period, which
+`quitApp()` skips.
+
+Why the layout did not change (`<tmp>/neel/<pid>-<id>` was considered):
+on Linux `/tmp` is shared between users, so a shared `neel` subfolder
+would belong to whoever created it first (other users could not create
+profiles in it) and could be pre-created as a symlink. The flat
+`<tmp>/neel-<pid>-<id>` dirs are created by the browser, as before; other
+users' dirs look alive (`EPERM`) or cannot be deleted (sticky `/tmp`), and
+both are ignored. The browser's `--user-data-dir` is unchanged, so no
+launch behaviour changed. A per-user cache dir (`std/appdirs`) was also
+considered and rejected: nothing ever ages it out, and it would change the
+path on every OS.
+
+Accepted residual risks: a reused pid makes a dead owner look alive (the
+dir waits for a later sweep); on POSIX the hostname in `SingletonLock` is
+not compared; a new app that gets a dead owner's pid between the check and
+the delete could lose its just-created profile (milliseconds, needs pid
+reuse onto the same window id).
+
+Tests: `tests/t_browser.nim` suite "browser: abandoned profile sweep" (strict
+name parsing including signs, `_`, leading zeros, overflow, extra dashes;
+`SingletonLock` target parsing; garbage names never probed; live owner
+skipped before the lock is looked at; own pid never touched whatever the
+probes say; dead owner with a held lock skipped; dead owner, free lock
+deleted; the budget stops part-way and the next sweep continues; listing,
+pid, lock, and removal failures never raise; incomplete probes are a usage
+error; stale own-pid dir deleted, absent dir untouched, failed delete
+ignored; real filesystem in a private temp dir with the pid of an exited
+`nim --version`: only the free dead-owner dir goes, while the held one
+(open `lockfile` on Windows, `SingletonLock` to our pid on POSIX), our own,
+garbage names, an unrelated name, a plain file, and on POSIX a symlinked
+dir and its target stay). `tests/t_window.nim` (a leftover dir for window 1
+is gone when the launcher runs). `tests/t_neel.nim` (the sweep has not run
+once window 1 is launched; it runs exactly once per `startApp`, with no
+window open, every profile dir already removed, every worker exited, and
+before `startApp` returns). `nimble test` passes on Windows (Nim 2.2.12);
+`src/neel.nim` and `tests/t_browser.nim` compile with `--os:linux` and
+`--os:macosx --compileOnly`. The POSIX branches (`kill`, `SingletonLock`)
+have only been compiled so far, not run.
 
 ### 2026-10-12 - Windows, Edge: `closeSecond` does not close the window
 
@@ -340,10 +434,16 @@ added.
 - Edge: verified on Windows only (2026-10-12). macOS and Linux will not be
   run; their paths and flags are checked against public sources only (see
   the 2026-10-12 findings).
-- Abandoned profile dirs: a killed or crashed app or browser leaves its
-  `neel-<pid>-<id>` dir in the temp dir, and Windows never cleans `%TEMP%`
-  (16-120 MB each). Planned: an automatic sweep that never slows startup
-  (at shutdown, or on a background thread), in its own session.
+- Abandoned profile dirs: swept at exit since 2026-10-12 (see the finding).
+  Passed by hand on Windows 2026-10-12 (Chrome and Edge). Still to check on
+  macOS and Linux: run roundtrip in release, open and
+  close the second window, close window 1 with its X, wait out the grace
+  period, and confirm no `neel-*` dir is left in the temp dir
+  (`ls -d "$TMPDIR"neel-*`); then `kill -9` the app, quit its orphaned
+  browser with Cmd+Q (on macOS closing the window leaves Chrome running,
+  and the sweep rightly skips a profile a live browser holds), run and quit
+  again, and confirm the killed run's dir is gone. The POSIX `kill` /
+  `SingletonLock` path runs for the first time there.
 - A page that navigates away from its launch URL (dropping `?window=<id>`)
   still relies on the single-window fallback for `/neel.js`; with more than
   one window open it gets a 404. Settled behaviour (README "Windows"), noted

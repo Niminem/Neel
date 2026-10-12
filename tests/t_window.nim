@@ -47,6 +47,7 @@ type
     opened: seq[int]   # window ids passed to onWindowOpen
     closed: seq[int]   # window ids passed to onWindowClose
     failLaunch: bool
+    dirExistedAtLaunch: seq[bool]
     table: PendingTable
 
 var fake: Fake
@@ -64,6 +65,7 @@ proc fakeLaunch(url, userDataDir: string; opts: LaunchOptions): BrowserHandle
   {.cast(gcsafe).}:
     acquire fake.lock
     fake.launches.add((url, userDataDir, opts))
+    fake.dirExistedAtLaunch.add dirExists(userDataDir)
     let fail = fake.failLaunch
     release fake.lock
   if fail:
@@ -100,6 +102,7 @@ proc resetFake() =
   fake.opened = @[]
   fake.closed = @[]
   fake.failLaunch = false
+  fake.dirExistedAtLaunch = @[]
   release fake.lock
   fake.table = newPendingTable()
 
@@ -230,6 +233,18 @@ suite "window: opening":
     check l[0].userDataDir == userDataDirFor(1)
     check l[1].url == Base & "/two?x=1&window=2"
     check l[1].userDataDir == userDataDirFor(2)
+
+  winTest "a leftover profile dir with our pid and id is gone before the launch":
+    # Left by an earlier process with the same pid (or an earlier run here).
+    let stale = userDataDirFor(1)
+    createDir(stale / "Default")
+    writeFile(stale / "Default" / "Preferences", "{}")
+    discard openWindow()
+    acquire fake.lock
+    let existed = fake.dirExistedAtLaunch
+    release fake.lock
+    check existed == @[false]
+    check not fileExists(stale / "Default" / "Preferences")
 
   test "launchUrl handles queries, fragments, missing slashes, trailing slashes":
     check launchUrl(Base, "/", 1) == Base & "/?window=1"

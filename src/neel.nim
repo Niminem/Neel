@@ -79,6 +79,10 @@ const
     ## so the `/ws` query needs no percent-decoding).
 
 type
+  ProfileSweep* = proc() {.gcsafe.}
+    ## What `runApp` runs at exit to delete abandoned profile dirs; `nil`
+    ## means `sweepProfiles()`. A test seam like `Launcher`.
+
   AppState = object
     ## Everything the hooks need, written once by `runApp` before `listen`
     ## and cleared during `shutdown`, once no hook can be running. Hooks
@@ -297,6 +301,17 @@ proc releaseSharedState() {.gcsafe.} =
     teardownWindows()
     app.tbl = nil
 
+proc sweepAbandonedProfiles(sweep: ProfileSweep) =
+  ## The last step of `runApp`: every window, browser, and thread of this run
+  ## is gone. Never raises, so it cannot mask the run's own exception.
+  try:
+    if sweep.isNil:
+      discard sweepProfiles()
+    else:
+      sweep()
+  except CatchableError:
+    discard
+
 proc runApp*(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
              startPath = "/"; port = 0; workers = DefaultWorkers;
              queueCapacity = DefaultQueueCapacity;
@@ -308,7 +323,8 @@ proc runApp*(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
              size = none(WindowSize); position = none(WindowPosition);
              extraFlags: seq[string] = @[];
              onWindowOpen: WindowHook = nil; onWindowClose: WindowHook = nil;
-             launcher: Launcher = nil): ExitReason {.discardable.} =
+             launcher: Launcher = nil;
+             profileSweep: ProfileSweep = nil): ExitReason {.discardable.} =
   ## The proc behind `startApp`; call `startApp` instead unless you build
   ## the dispatcher and asset source yourself (tests do). Blocks the calling
   ## thread and returns why the app ended. Sequence: `findBrowser` (fails
@@ -316,7 +332,9 @@ proc runApp*(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   ## `initJsBridge`, `listen`, `initWindows`, `openWindow(startPath)`,
   ## `waitForAppExit`; then always `shutdown` with `releaseSharedState` as
   ## its `beforeJoin` (`resetJsBridge`, `teardownWindows`, the table is
-  ## dropped). `launcher` replaces the
+  ## dropped), and last `profileSweep` (`nil` = `sweepProfiles()`: delete
+  ## profile dirs abandoned by killed or crashed apps, within
+  ## `SweepBudgetMs`). `launcher` replaces the
   ## browser launch (tests inject a fake); `nil` launches for real. When no
   ## browser is found and `fallback` is `false`, the error page has been
   ## opened in the default browser: it is served for `gracePeriodMs`, then
@@ -353,6 +371,7 @@ proc runApp*(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   finally:
     app.srv.shutdown(beforeJoin = releaseSharedState)
     app = AppState()
+    sweepAbandonedProfiles(profileSweep)
 
 proc stampCallSite(n, site: NimNode) =
   ## Gives every node the macro created (recognisable by carrying this
@@ -393,6 +412,8 @@ macro startApp*(args: varargs[untyped]): untyped =
   ##   `extraFlags: seq[string] = @[]`.
   ## - `onWindowOpen`, `onWindowClose: WindowHook = nil`.
   ## - `launcher: Launcher = nil`: test seam replacing the browser launch.
+  ## - `profileSweep: ProfileSweep = nil`: test seam replacing the exit-time
+  ##   sweep of abandoned profile dirs.
   ##
   ## Everything except `webDir` and `embedAssets` is forwarded verbatim to
   ## `runApp`. Must come after every `{.expose.}` proc and after the imports
