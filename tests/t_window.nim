@@ -334,6 +334,13 @@ suite "window: connection mapping":
     check windowIdOf(ConnA) == NoWindow
     check windowIdOf(ConnB) == 1
     check connectionCount() == 2
+    # The displaced connection is told to go (a no-op when it already has),
+    # so it cannot linger counted but unmapped.
+    check closes() == @[(ConnA, CloseNormal)]
+    # Re-binding the same connection displaces nothing.
+    check bindConnection(1, ConnB)
+    check closes().len == 1
+    check windowIdOf(ConnB) == 1
     connectionClosed(ConnA)
     check w.isConnected
     check windowIdOf(ConnB) == 1
@@ -730,11 +737,30 @@ suite "window: integration with the server":
       # Refresh of window 1: same id, new connection.
       c1.sock.close()
       check waitUntil(IoTimeout, proc(): bool = connectionCount() == 0)
+      var (c2a, st2a) = handshake(integ.srv.port, 1)
+      check st2a.startsWith("HTTP/1.1 101")
+      c2a.sendMsg(callMsg("whoami", @[], id = 3))
+      check c2a.readMsg() == retMsg(3, %1)
+      check waitUntil(IoTimeout, proc(): bool = connectionCount() == 1)
+      # A second live connection for window 1 (a duplicated tab): the newest
+      # binding wins and the displaced one is closed with 1000 rather than
+      # lingering counted but mapped to no window.
       var (c2, st2) = handshake(integ.srv.port, 1)
       check st2.startsWith("HTTP/1.1 101")
+      var dupClosed = false
+      for _ in 0 .. 1:
+        let f = c2a.readFrame()
+        if f.opcode == opClose:
+          check decodeClose(f).code == CloseNormal
+          dupClosed = true
+          break
+      check dupClosed
+      c2a.sock.send(encodeClose(CloseNormal, "", Key))
+      c2a.sock.close()
+      check waitUntil(IoTimeout, proc(): bool = connectionCount() == 1)
       c2.sendMsg(callMsg("whoami", @[], id = 3))
       check c2.readMsg() == retMsg(3, %1)
-      check waitUntil(IoTimeout, proc(): bool = connectionCount() == 1)
+      check w1.isConnected
       check openedIds() == @[1]
       # Window 2 connects too, then its user closes it.
       var (c3, st3) = handshake(integ.srv.port, 2)

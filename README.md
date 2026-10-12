@@ -485,9 +485,12 @@ during teardown sees an empty `windows()` and `js` raises
 How a page learns its window: the launch URL is
 `http://127.0.0.1:<port><path>?window=<id>`. The page's `<script
 src="/neel.js">` request carries that URL in its `Referer` header, and the
-server renders the shim for the id in the `window=` query (falling back to the
-single open window when there is exactly one, and answering 404 when it cannot
-tell). Consequences: do not use a `window` query parameter of your own, do not
+server renders the shim for the id in the `window=` query. A page whose URL
+names no window gets the single open window when there is exactly one and a
+404 otherwise; a page whose URL names a window that is no longer open (a tab
+left behind by `closeWindow` in a default-browser setup, then refreshed)
+always gets a 404, so it can never take over another window.
+Consequences: do not use a `window` query parameter of your own, do not
 set a `no-referrer` referrer policy (`<meta name="referrer"
 content="no-referrer">` breaks every window but the first), and open additional
 pages with `openWindow`, not with `window.open` from the page.
@@ -720,8 +723,10 @@ missing web directory when embedding, or passing `assets` / `dispatch` /
 - With `browsers = @[Default]` or after a fallback, the app runs in an
   ordinary browser tab: `size`, `position`, and `extraFlags` do not apply and
   the browser process is not tracked, so `closeWindow` disconnects the tab
-  but cannot close it. Chromium suppresses `prompt` / `alert` / `confirm` in a
-  background tab (`prompt` returns `null` at once).
+  but cannot close it; refreshing that dead tab gets a 404 for `/neel.js`
+  (its page scripts then fail with `neel is not defined`). Chromium
+  suppresses `prompt` / `alert` / `confirm` in a background tab (`prompt`
+  returns `null` at once).
 - The launch token is new on every start and is baked into `/neel.js`, so a
   page left open from a previous run cannot reconnect; refreshing it fetches a
   fresh shim.

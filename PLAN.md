@@ -2343,6 +2343,21 @@ supersede the task notes they mention.
   sequence `shutdown` -> `resetJsBridge` -> `teardownWindows`):
   `shutdown(beforeJoin = releaseSharedState)` where the hook does
   `resetJsBridge`, `teardownWindows`, and drops the pending table.
+- `/neel.js` window-id rule (replaces the Task 13 `neelJsWindowId` note):
+  a `Referer` whose `window=` names a window that is not open is a 404
+  (`neel.js: window <n> is not open; this page belongs to a window Neel has
+  closed`), never the single-window fallback. The fallback applies only
+  when the page names no window (no `Referer`, unparsable, no valid
+  `window=`) and exactly one window is open; otherwise the existing
+  "cannot tell" 404. Reason: in a default-browser tab a closed window's
+  page survives `closeWindow`; refreshing it was served the surviving
+  window's shim and displaced that window's real connection (NOTES.md
+  2026-10-12).
+- `bindConnection` (Task 12) closes the connection it displaces with 1000
+  when that connection is still alive, so no connection can stay counted
+  in `connCount` while mapped to no window. A refresh or shim reconnect is
+  unaffected (the old connection is already gone; `Server.close` returns
+  `false`).
 
 ---
 

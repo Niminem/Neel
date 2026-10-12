@@ -19,10 +19,10 @@ How to use this file:
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` | passed before Nim 2.2.12 (needs re-run) | passes (Nim 2.2.12) | not run |
-| `examples/filepicker` | passed before Nim 2.2.12 (needs re-run) | passes (Nim 2.2.12; debug and release, app and `@[Default]`) | not run |
-| `examples/roundtrip` | passed before Nim 2.2.12 (needs re-run) | passes (Nim 2.2.12; debug and release, app and `@[Default]`) | not run |
-| `examples/stresstest` | passed before Nim 2.2.12 (needs re-run) | passes (Nim 2.2.12; debug and release, app and `@[Default]`, kill/reconnect check) | not run |
+| `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the stale-tab fix) | passed 2026-10-09 (Nim 2.2.12); re-run after the stale-tab fix | not run |
+| `examples/filepicker` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | passes (Nim 2.2.12; debug and release, app and `@[Default]`) | not run |
+| `examples/roundtrip` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | passes (Nim 2.2.12; debug and release, app and `@[Default]`); re-run `@[Default]` after the stale-tab fix | not run |
+| `examples/stresstest` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect check; refresh-after-restart check not yet done, see Open items) | passes (Nim 2.2.12; debug and release, app and `@[Default]`, kill/reconnect check) | not run |
 
 ## Gotchas
 
@@ -61,6 +61,16 @@ thread in `beforeJoin` / reserve capacity up front (see `rehome` and
 `releaseState` in `tests/t_server.nim`); that is the pattern to use if a test
 ever has to run on an older compiler.
 
+### Never guess a window for a page that names one
+
+`/neel.js` is the only place a page learns its window id (and the token).
+Serving it for a window other than the one the page's URL names lets that
+page bind as the other window and displace its real connection. So the
+"single open window" fallback applies only when the page names *no*
+window; a `window=` that is not open is a 404, however many windows are
+open. Keep this in mind for anything that resolves a page to a window
+(`neelJsWindowId`, `bindConnection`, future routes).
+
 ### `nimble test` and `nim c` may use different compilers
 
 On the Windows machine `nimble test` compiles with the Nim that Nimble
@@ -70,6 +80,49 @@ while a plain `nim c -r examples/...` uses the choosenim toolchain on `PATH`
 before comparing results across commands or machines.
 
 ## Findings
+
+### 2026-10-12 - macOS, `@[Default]`: a refreshed stale tab stole window 1's identity
+
+Symptom (`examples/roundtrip` in a default-browser tab): open window 2,
+close it with the button (the tab stays, see the 2026-10-09 finding),
+refresh that tab, then use "Nim -> JS -> Nim" on window 1: it fails with
+`NeelNoWindowError: no current window on this thread`. Later the terminal
+prints `window 1 closed` while window 1 is still on screen, and the app
+does not exit until that tab is closed by hand. Not reproducible in app
+mode (there `closeWindow` kills the process, so nothing is left to refresh).
+
+Cause: `neelJsWindowId` in `src/neel.nim` fell back to "the single open
+window" whenever the `Referer`'s `window=` did not name an *open* window.
+The refreshed stale tab asked for `/neel.js` with `Referer ...?window=2`;
+window 2 was closed, only window 1 was open, so it was served window 1's
+shim. Its `/ws?window=1` upgrade then went through `bindConnection`'s
+refresh path, which re-pointed window 1 at the new connection and dropped
+the real page's connection from `connToWindow`. From then on the real
+page's calls ran with `windowIdOf(conn) == NoWindow` (hence the error);
+when the imposter tab closed, window 1 was marked disconnected and
+retired by `waitForAppExit` (hence `window 1 closed`); and the real page's
+socket stayed counted in `connCount` but mapped to nothing, so the app
+could not exit until it was closed.
+
+Fix: `neelJsWindowId` now returns `(id, named)`; a `Referer` that names a
+window which is not open gets a 404 (`neel.js: window <n> is not open;
+this page belongs to a window Neel has closed`) and never the fallback.
+The fallback remains only for pages that name no window at all (no
+`Referer`, unparsable, no `window=`). Sibling: `bindConnection` closes a
+*displaced* connection with 1000 when it is still alive (a duplicated tab),
+so a connection can no longer linger counted but unmapped; for a normal
+refresh or shim reconnect the old connection is already gone and the close
+is a no-op (`Server.close` returns `false`).
+
+Tests: `tests/t_neel.nim` (a `?window=9` `Referer` is 404 and leaks no
+token; `openSecond` / `closeSecond` exposed procs replay the scenario
+end-to-end: window 2's shim while open, 404 with two windows and no
+`Referer`, 404 and 403 for the stale tab after `closeWindow`, window 1
+still answers `whichWindow` and `askJs` afterwards), `tests/t_window.nim`
+("a reconnect re-associates ..." checks the 1000 to the displaced
+connection and that re-binding the same connection sends nothing; the
+integration test opens a second live connection for window 1 and reads the
+1000 on the first).
 
 ### 2026-10-09 - Windows: `t_browser` expected POSIX separators
 
@@ -149,8 +202,16 @@ added.
 ## Open items
 
 - stresstest's manual check "a page refresh after a restart works again"
-  assumes a fixed port; with the default `port = 0` the old page's URL is
-  dead after a restart. Not checked on Windows.
-- Mac: re-run `nimble test` and every example (Nim >= 2.2.12, shutdown
-  changes). Check `nim -v` first.
+  needs the restarted app on the same port; with the default `port = 0` the
+  old page's URL is dead. stresstest now takes an optional port argument
+  (`./stresstest 8765`) and the page text gives the recipe. Not yet checked
+  on any platform.
+- Windows: re-run `nimble test`, roundtrip `@[Default]` (stale-tab recipe
+  from the 2026-10-12 finding), roundtrip app mode, and the stresstest
+  kill/reconnect check after the stale-tab fix (`bindConnection` now closes
+  displaced connections; both reconnect paths go through it).
 - Linux: not run yet.
+- A page that navigates away from its launch URL (dropping `?window=<id>`)
+  still relies on the single-window fallback for `/neel.js`; with more than
+  one window open it gets a 404. Settled behaviour (README "Windows"), noted
+  here because the fallback is now narrower than before.

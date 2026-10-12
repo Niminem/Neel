@@ -16,8 +16,9 @@
 ## (they drive the connection count); `windowIdOf(conn)` is what `onMessage`
 ## wraps `handleCall` with (`withCurrentWindow`). A page refresh or a shim
 ## reconnect presents the same window id on a new `ConnId`: `bindConnection`
-## re-associates, and `connectionClosed` clears a window's connection only if
-## it still points at the closing `ConnId`.
+## re-associates (and closes the displaced connection, should it still be
+## alive), and `connectionClosed` clears a window's connection only if it
+## still points at the closing `ConnId`.
 ##
 ## API: `openWindow(path, size, position, extraFlags)` allocates an id (1, 2,
 ## 3, ...), builds `<base><path>?window=<id>` (`frontend.WindowQueryParam`),
@@ -291,10 +292,17 @@ proc bindConnection*(windowId: int; conn: ConnId): bool {.gcsafe.} =
   ## (the handler should then refuse the upgrade). A known id already bound
   ## to another connection is re-associated (page refresh or shim reconnect):
   ## the new `ConnId` replaces the old one, and the old connection's
-  ## `connectionClosed` will not disturb the new binding.
+  ## `connectionClosed` will not disturb the new binding. The displaced
+  ## connection is also closed with 1000: normally it is already gone (the
+  ## browser dropped it when the page unloaded, which is why the shim is
+  ## reconnecting), but if it is still alive (a duplicated tab) it would
+  ## otherwise linger counted but mapped to no window, so its calls would
+  ## run without a current window and it would keep the app from exiting.
   let m = mgr
   if m == nil:
     return false
+  var displaced: ConnId
+  var hasDisplaced = false
   acquire m.lock
   let rec = m.windows.getOrDefault(windowId)
   if rec == nil or rec.closed:
@@ -302,10 +310,15 @@ proc bindConnection*(windowId: int; conn: ConnId): bool {.gcsafe.} =
     return false
   if rec.hasConn:
     m.connToWindow.del(rec.conn)
+    if rec.conn != conn:
+      displaced = rec.conn
+      hasDisplaced = true
   rec.conn = conn
   rec.hasConn = true
   m.connToWindow[conn] = windowId
   release m.lock
+  if hasDisplaced:
+    discard m.closeConn(displaced, CloseNormal)
   true
 
 proc connectionOpened*(conn: ConnId) {.gcsafe.} =

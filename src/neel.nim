@@ -25,7 +25,9 @@
 ## - `/ws`: the WebSocket upgrade; requires the launch token and a known
 ##   window id in the query, otherwise 403.
 ## - `/neel.js`: the browser shim rendered for one window (token, window id,
-##   exposed names), `Cache-Control: no-store`.
+##   exposed names), `Cache-Control: no-store`. The window is the `window=`
+##   of the page URL in `Referer`; 404 when it names a window that is not
+##   open, or when it names none and more than one window is open.
 ## - `/neel/no-browser`: the page shown when no browser was found and
 ##   `fallback = false`.
 ## - everything else: the web directory through `neel/assets`.
@@ -207,22 +209,30 @@ proc handleWs(a: ptr AppState; conn: ConnId; req: HttpRequest): RequestAction =
       return upgrade()
   respond(initResponse(403, "403 Forbidden", "text/plain"))
 
-proc neelJsWindowId(req: HttpRequest): int =
-  ## The window `/neel.js` is being loaded for: the `window=` query of the
-  ## page URL in `Referer` when it names an open window, else the single
-  ## open window when there is exactly one, else `NoWindow`.
+proc neelJsWindowId(req: HttpRequest): tuple[id, named: int] =
+  ## The window `/neel.js` is being loaded for. `named` is the `window=`
+  ## query of the page URL in `Referer` (`NoWindow` when there is no
+  ## `Referer`, it does not parse, or it carries no valid id). `id` is
+  ## `named` when that window is open; the single open window when the page
+  ## named none and exactly one is open; otherwise `NoWindow`. A page that
+  ## names a window which is *not* open gets `NoWindow`, never the fallback:
+  ## it belongs to a window Neel has closed or retired (typically a stale
+  ## default-browser tab being refreshed), and handing it the shim of a
+  ## window that is still open would let it bind as that window and displace
+  ## the real page (see NOTES.md, 2026-10-12).
   let referer = req.getHeader("Referer")
   if referer.len > 0:
     try:
-      let id = windowIdIn(parseUri(referer).query)
-      if id != NoWindow and window(id).isSome:
-        return id
+      result.named = windowIdIn(parseUri(referer).query)
     except UriParseError:
       discard
+  if result.named != NoWindow:
+    if window(result.named).isSome:
+      result.id = result.named
+    return
   let open = windows()
   if open.len == 1:
-    return open[0].id
-  NoWindow
+    result.id = open[0].id
 
 proc handleRequest(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
   ## The route table (see the module header).
@@ -233,11 +243,16 @@ proc handleRequest(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
     return respond(methodNotAllowed())
   case req.path
   of NeelJsPath:
-    let id = neelJsWindowId(req)
+    let (id, named) = neelJsWindowId(req)
     if id == NoWindow:
-      return respond(initResponse(404,
-        "neel.js: cannot tell which window this page belongs to; open the " &
-        "page through Neel (its URL carries ?window=<id>)", "text/plain"))
+      let reason =
+        if named != NoWindow:
+          "neel.js: window " & $named & " is not open; this page belongs " &
+          "to a window Neel has closed"
+        else:
+          "neel.js: cannot tell which window this page belongs to; open the " &
+          "page through Neel (its URL carries ?window=<id>)"
+      return respond(initResponse(404, reason, "text/plain"))
     var r = okResponse(renderNeelJs(a.token, id, a.exposed), "application/javascript")
     r.addHeader("Cache-Control", "no-store")
     respond(r)

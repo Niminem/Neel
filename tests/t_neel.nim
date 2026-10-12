@@ -6,7 +6,9 @@
 ## browser with a scripted HTTP/WebSocket client: fetches `/neel.js` (with and
 ## without a `Referer`), the index page, a nested asset, a 404, a 405, the
 ## no-browser page, is refused on `/ws` with a wrong token or window, upgrades
-## with the right ones, calls exposed procs, answers a Nim -> JS call, and
+## with the right ones, calls exposed procs, answers a Nim -> JS call, opens
+## and closes a second window (a stale page of a closed window gets a 404
+## shim, never the surviving window's), and
 ## finally either calls `quitApp()` through an exposed proc (first run, disk
 ## assets) or just disconnects and lets the grace period end the app (second
 ## run, embedded assets). Every wait and read is bounded (3 s max).
@@ -79,6 +81,12 @@ proc markWorker() {.expose.} =
       acquire shared.lock
       inc shared.workersExited
       release shared.lock)
+
+proc openSecond(): int {.expose.} =
+  openWindow("/sub/page.html").id
+
+proc closeSecond(id: int) {.expose.} =
+  closeWindow(requireWindow(id))
 
 proc recordWindowClose(w: Window) {.gcsafe.} =
   ## `onWindowClose`: `teardownWindows` fires it for a window still open at
@@ -316,15 +324,24 @@ suite "neel: startApp end to end":
       check token.len == 32
       check token.allCharsInSet({'0' .. '9', 'a' .. 'f'})
       check ("const WINDOW_ID = 1;") in shim.body
-      const exposedNames = @["add", "askJs", "whichWindow", "stop", "markWorker"]
+      const exposedNames = @["add", "askJs", "whichWindow", "stop", "markWorker",
+                             "openSecond", "closeSecond"]
       check ("const EXPOSED = " & jsStringArrayLiteral(exposedNames) & ";") in shim.body
       check shim.body == renderNeelJs(token, 1, exposedNames)
-      # Without a Referer the single open window is assumed; an unknown id
-      # in the Referer falls back the same way.
+      # A page that names no window (no Referer, an unparsable one, no
+      # `window=`) gets the single open window.
       check http(port, NeelJsPath).body == shim.body
-      check http(port, NeelJsPath, headers = @[("Referer", base & "/?window=9")]).body ==
-        shim.body
       check http(port, NeelJsPath, headers = @[("Referer", "not a url")]).body == shim.body
+      check http(port, NeelJsPath, headers = @[("Referer", base & "/")]).body == shim.body
+      check http(port, NeelJsPath, headers = @[("Referer", base & "/?window=x")]).body ==
+        shim.body
+      # A page that names a window which is not open never gets another
+      # window's shim.
+      let stale = http(port, NeelJsPath, headers = @[("Referer", base & "/?window=9")])
+      check stale.status == 404
+      check stale.body == "neel.js: window 9 is not open; this page belongs to a " &
+        "window Neel has closed"
+      check token notin stale.body
 
       # Assets through the real server.
       let index = http(port, "/")
@@ -402,12 +419,47 @@ suite "neel: startApp end to end":
       c.sendMsg(callMsg("add", @[%40, %2], id = 7))
       check c.readMsg() == retMsg(7, %42)
 
+      # A second window, then the stale-tab scenario from the roundtrip
+      # example in a default-browser tab (NOTES.md, 2026-10-12): after
+      # closeWindow the tab survives; refreshing it must not hand it window
+      # 1's shim, or it would bind as window 1 and displace this connection.
+      c.sendMsg(callMsg("openSecond", @[], id = 8))
+      check c.readMsg() == retMsg(8, %2)
+      acquire shared.lock
+      check shared.launches.len == 2
+      check shared.launches[1] == base & "/sub/page.html?window=2"
+      release shared.lock
+      let second = http(port, NeelJsPath,
+                        headers = @[("Referer", base & "/sub/page.html?window=2")])
+      check second.status == 200
+      check ("const WINDOW_ID = 2;") in second.body
+      # With two windows open a page that names none cannot be placed.
+      check http(port, NeelJsPath).status == 404
+      c.sendMsg(callMsg("closeSecond", @[%2], id = 9))
+      check c.readMsg() == retMsg(9, newJNull())
+      # The stale tab refreshes: no shim, no upgrade.
+      let gone = http(port, NeelJsPath,
+                      headers = @[("Referer", base & "/sub/page.html?window=2")])
+      check gone.status == 404
+      check "window 2 is not open" in gone.body
+      let staleWs = handshake(port, token, 2)
+      check staleWs.status.startsWith("HTTP/1.1 403")
+      staleWs.client.sock.close()
+      # ... and window 1 is untouched: still mapped, `js` still has a target.
+      c.sendMsg(callMsg("whichWindow", @[], id = 10))
+      check c.readMsg() == retMsg(10, %1)
+      c.sendMsg(callMsg("askJs", @[%5], id = 11))
+      let probe = c.readMsg()
+      check probe.name == "jsDouble"
+      c.sendMsg(retMsg(probe.id, %10))
+      check c.readMsg() == retMsg(11, %10)
+
       # A worker that will report its own exit (checked after the run).
-      c.sendMsg(callMsg("markWorker", @[], id = 8))
-      check c.readMsg() == retMsg(8, newJNull())
+      c.sendMsg(callMsg("markWorker", @[], id = 12))
+      check c.readMsg() == retMsg(12, newJNull())
 
       # quitApp from an exposed proc ends the app; shutdown says goodbye.
-      c.sendMsg(callMsg("stop", @[], id = 9))
+      c.sendMsg(callMsg("stop", @[], id = 13))
       var sawClose = false
       for _ in 0 .. 2:
         let f = c.readFrame()
@@ -425,8 +477,9 @@ suite "neel: startApp end to end":
     let exited = shared.workersExited
     let exitedAtClose = shared.exitedAtWindowClose
     release shared.lock
-    check dirs.len == 1
-    check not dirExists(dirs[0])
+    check dirs.len == 2
+    check not dirExists(dirs[0])   # removed by teardown
+    check not dirExists(dirs[1])   # removed by closeWindow
     # Window teardown ran while every worker was still alive (they free
     # their blocks), and the workers were joined afterwards.
     check seen == 1
