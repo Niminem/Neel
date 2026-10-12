@@ -21,11 +21,10 @@
 ## ephemeral one. A fixed port is needed for the "refresh after a restart"
 ## check on the page, since the restarted app must answer at the old URL.
 ##
-## Limits: one WebSocket message (one call or one reply as JSON text) may be
-## at most 16 MiB (`DefaultMaxMessageSize`); the payload section stays under
-## that (a 2 MB string, 100k ints, nesting depth 50). `js.wait` blocks the
-## calling worker up to its timeout (default 10 s); the default pool has 64
-## workers.
+## Limits (all `startApp` defaults here): a message from the page to Nim may
+## be at most `maxMessageSize` (16 MiB); the payload section stays under that
+## (a 2 MiB string, 100k ints, nesting depth 50). `js.wait` blocks a worker up
+## to `callTimeoutMs` (10 s); the pool has `workers` (64) threads.
 
 import std/[tables, os, atomics, locks, typedthreads, strutils]
 import neel # also brings std/json and std/options

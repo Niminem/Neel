@@ -230,9 +230,9 @@ section("Concurrency",
   ]);
 
 section("Payloads",
-  "Large messages both ways (the limit is 16 MiB per message).",
+  "Large messages both ways (page to Nim is capped at maxMessageSize, 16 MiB by default).",
   [
-    ["2 MB string", async (log) => {
+    ["2 MiB string", async (log) => {
       const n = 2 * 1024 * 1024;
       const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
       const s = alphabet.repeat(Math.ceil(n / alphabet.length)).slice(0, n - 4) + "\"\\\n\t";
