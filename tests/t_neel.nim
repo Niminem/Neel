@@ -677,7 +677,7 @@ suite "neel: startApp end to end":
     check not compiles(waitForAppExit())
 
   test "js.<name> reaches the page unless a Nim proc accepts the proxy":
-    # What README "Calling the page from Nim" promises, checked with the
+    # What docs/GUIDE.md "Calling the page from Nim" promises, checked with the
     # names `import neel` brings into scope (`std/json`, `std/options`, ...).
     let win = Window(id: 1, js: js)
     check typeof(js.wait.len()) is JsonNode

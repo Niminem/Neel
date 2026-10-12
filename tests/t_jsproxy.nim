@@ -429,7 +429,7 @@ suite "js: escape hatch":
     check msgs[2].msg.hasId
 
   jsTest "names of Nim procs that do not take the proxy reach the page":
-    # README "Calling the page from Nim" lists these as safe.
+    # docs/GUIDE.md "Calling the page from Nim" lists these as safe.
     setCurrentWindow(WinA)
     js.len()
     js.add(1)

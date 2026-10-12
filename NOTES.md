@@ -116,7 +116,42 @@ uncertain check (unknown counts as alive), never pass a parsed pid to
 of the temp dir. Anything that changes where profiles live must change
 `userDataDirFor`, `parseUserDataDirName`, and the sweep together.
 
+### Docs live in two files; the guide is the master
+
+`docs/GUIDE.md` holds every detail; `README.md` is the introduction and
+links into the guide by section anchor. A behaviour or API change updates
+the guide first, then the README wherever it summarises the same thing
+(features, the walk-through, the `startApp` table, "Before You Start", the
+renames). Renaming a guide heading breaks the README's anchor links, so
+check them after any heading change. Code shown in the README must compile
+against the current API.
+
 ## Findings
+
+### 2026-10-12 - All platforms: docs split into README and guide (docs only)
+
+The 880-line README moved, content unchanged, to `docs/GUIDE.md`, which is
+now the master reference: retitled "Neel 2.0 guide", a link back to the
+README added, and the `examples/` and `LICENSE` links made relative to
+`docs/` (section anchors and the Contents list are unchanged). The new
+README follows the v1.1.0 structure and tone: pitch, features, requirements
+and platforms (macOS and Windows verified, Linux in 2.1, Edge on Windows
+only), installation, a numbered walk-through of `examples/filepicker`, the
+`neel.js` basics, multiple windows, compilation (the `--app:gui` paragraph
+copied verbatim), "Before You Start", examples, the main 1.x renames, and
+future work (Linux verification, Brave / Opera / Vivaldi, Webview, `wss:`).
+Each README section links to the guide section that has the details. Left
+to the guide only: the full type list, error messages, reconnect timings,
+the wire format, browser search paths and Edge flags, profile-dir sweeping,
+threading internals and worker sizing, the `quitApp()` reply caveat, the
+stale-tab and fixed-port refresh details, and the serving rules. Every
+README claim was checked against `src/`; no disagreement was found. The
+README's Nim snippets (the walk-through in debug and release, the `js`,
+escape-hatch, multi-window, and `startApp` snippets) compile with Nim
+2.2.12 in a throwaway project outside the repo. References to README
+sections whose content moved now point at the guide (comments in
+`tests/t_jsproxy.nim` and `tests/t_neel.nim`, and the entries below). No
+code change, no test.
 
 ### 2026-10-12 - All platforms: second README audit (docs only)
 
@@ -170,7 +205,8 @@ where browsers omit the default port; `localhost` is refused),
 older browsers), and a `/ws` request needs `Origin`
 `http://127.0.0.1:<port>` (none is refused: browsers always send it on a
 WebSocket handshake). The launch URL is built from the new
-`frontend.LoopbackHost`. README "Security" section added.
+`frontend.LoopbackHost`. README "Security" section added (now in
+`docs/GUIDE.md`; the README keeps a two-sentence summary).
 
 Tests: `tests/t_frontend.nim` suite "frontend: requestRefusal" (own
 requests pass, header names case-insensitive; wrong, missing, `localhost`,
@@ -212,12 +248,13 @@ by hand.
 
 ### 2026-10-12 - All platforms: `js.<name>` collisions pinned by tests
 
-The README's list of names that reach the page (`js.len()`, `js.add(...)`,
-`js.close()`, `js.open()`, `js.alert(...)`) came from spike (b) on 2.2.10,
-before `neel` re-exported `std/json` and `std/options`, and no test pinned
-it. A collision is silent: when a Nim proc in scope accepts the proxy, Nim
-calls it and nothing reaches the page. No library change. README "Name
-collisions" paragraph now says the misroute is silent and that an app's own
+The README's list (now in `docs/GUIDE.md`) of names that reach the page
+(`js.len()`, `js.add(...)`, `js.close()`, `js.open()`, `js.alert(...)`)
+came from spike (b) on 2.2.10, before `neel` re-exported `std/json` and
+`std/options`, and no test pinned it. A collision is silent: when a Nim proc
+in scope accepts the proxy, Nim calls it and nothing reaches the page. No
+library change. The "Name collisions" paragraph (README then,
+`docs/GUIDE.md` now) says the misroute is silent and that an app's own
 generic procs (`proc log[T](x: T)`) capture names the same way.
 
 Tests: `tests/t_jsproxy.nim` "names of Nim procs that do not take the proxy
@@ -225,7 +262,7 @@ reach the page" (the sent `call` messages); `tests/t_neel.nim` "js.<name>
 reaches the page unless a Nim proc accepts the proxy" (types through
 `import neel`: `JsonNode` for those names and `win.js`, `void` / `string`
 for `echo` / `repr`). `nimble test` passes on Windows. If a future Nim
-changes one of these, drop the name from the README.
+changes one of these, drop the name from `docs/GUIDE.md`.
 
 ### 2026-10-12 - All platforms: README audit against the code
 
@@ -380,7 +417,7 @@ leaves the profile signed in) and `--no-service-autorun` ("disable Edge
 prelaunch and other background processes on startup"). Both added to Edge's
 `launchFlags`. Chromium keeps only the last `--disable-features`, so a user
 `--disable-features=...` in `extraFlags` re-enables implicit sign-in
-(README says to include `msImplicitSignin`). Paths checked against public
+(`docs/GUIDE.md` says to include `msImplicitSignin`). Paths checked against public
 sources, since Edge is verified on Windows only: macOS
 `/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge` (Edge
 WebDriver docs, Playwright); bundle id `com.microsoft.edgemac` in most
@@ -433,8 +470,8 @@ is a page refresh (same window id, no second `onWindowOpen`, page-side state
 gone); a later reload finds the window retired, and the app gone if it was
 the last one. Neel has no idle timeout on either side, so a keep-alive would
 not help; an app meant to sit in a background tab should raise
-`gracePeriodMs` to minutes. README "Caveats" updated (`b74d3d8`). No code
-change, no test.
+`gracePeriodMs` to minutes. README "Caveats" (now in `docs/GUIDE.md`)
+updated (`b74d3d8`). No code change, no test.
 
 ### 2026-10-12 - macOS, `@[Default]`: a refreshed stale tab stole window 1's identity
 
@@ -549,7 +586,8 @@ Fixed by picking a character that differs.
 On macOS the terminal shows Chromium's stderr noise; on Windows it shows only
 the app's output. Same launch on both (`poParentStreams, poDaemon` in
 `src/neel/browser.nim`); `chrome.exe` is a GUI-subsystem binary that does not
-log to the console unless `--enable-logging` is passed. README updated.
+log to the console unless `--enable-logging` is passed. README updated
+(now `docs/GUIDE.md` "Running the examples").
 
 ### 2026-10-09 - Windows: roundtrip in `@[Default]` mode (not a bug)
 
@@ -557,7 +595,7 @@ log to the console unless `--enable-logging` is passed. README updated.
 background tab, where Chromium suppresses `prompt()` and returns `null`.
 `closeSecond` leaves the tab open (dead): a default-browser tab has no process
 handle, so Neel can only disconnect it. Both apply on every OS. README caveat
-added.
+added (now `docs/GUIDE.md` "Caveats").
 
 ## Open items
 
@@ -585,9 +623,11 @@ added.
   the socket and drops output still queued, so a reply queued after the IO
   thread's last pass never arrives and the page sees
   `NeelDisconnectedError`. Found by reading the code, not reproduced;
-  `t_neel` does not check for the reply. README documents it; a fix would
+  `t_neel` does not check for the reply. `docs/GUIDE.md` "Caveats"
+  documents it; a fix would
   flush pending outbound data before the 1001 in `teardownAll`.
 - A page that navigates away from its launch URL (dropping `?window=<id>`)
   still relies on the single-window fallback for `/neel.js`; with more than
-  one window open it gets a 404. Settled behaviour (README "Multiple windows"), noted
+  one window open it gets a 404. Settled behaviour (`docs/GUIDE.md`
+  "Multiple windows"; the README keeps a one-line summary), noted
   here because the fallback is now narrower than before.
