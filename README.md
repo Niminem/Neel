@@ -704,9 +704,15 @@ missing web directory when embedding, or passing `assets` / `dispatch` /
   resolves before the 1001 close arrives, so a page cannot await "the app has
   exited"; later calls reject with `neel: connection is closed`.
   `neel.onclose` fires when the close does arrive.
-- Chromium may discard and later reload a background tab or window. To Neel
-  this looks like a page refresh: same window id, `onWindowOpen` does not fire
-  again, page-side state is gone.
+- Chromium may discard a background tab or window (Memory Saver, memory
+  pressure) and reload it only when the user returns to it. The discard closes
+  the WebSocket, so to Neel it is a closed window: if the reload happens within
+  `gracePeriodMs` it looks like a page refresh (same window id, `onWindowOpen`
+  does not fire again, page-side state is gone); if it happens later the window
+  has been retired and, if it was the last one, the app has exited. An app
+  meant to sit in a background tab should raise `gracePeriodMs` (minutes rather
+  than seconds). Neither side closes an idle connection on its own, so there is
+  no need for a keep-alive.
 - `onWindowClose` fired during teardown (after `quitApp()`, for windows still
   open) runs with the window table already empty: `windows()` is `@[]` and
   `js` raises `NeelNoWindowError`. An exception escaping a hook is swallowed
