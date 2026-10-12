@@ -19,10 +19,10 @@ How to use this file:
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the stale-tab fix) | passed 2026-10-09 (Nim 2.2.12); re-run after the stale-tab fix | not run |
-| `examples/filepicker` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | passes (Nim 2.2.12; debug and release, app and `@[Default]`) | not run |
-| `examples/roundtrip` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | passes (Nim 2.2.12; debug and release, app and `@[Default]`); re-run `@[Default]` after the stale-tab fix | not run |
-| `examples/stresstest` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | passes (Nim 2.2.12; debug and release, app and `@[Default]`, kill/reconnect check; refresh-after-restart not run) | not run |
+| `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the stale-tab fix) | passes (Nim 2.2.12, 2026-10-12, with the stale-tab fix) | not run |
+| `examples/filepicker` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | not run |
+| `examples/roundtrip` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | not run |
+| `examples/stresstest` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | not run |
 
 ## Gotchas
 
@@ -81,6 +81,18 @@ before comparing results across commands or machines.
 
 ## Findings
 
+### 2026-10-12 - All platforms: discarded background tabs (not a bug)
+
+Chromium may discard a background tab or window (Memory Saver, memory
+pressure) and reload it only when the user returns to it. The discard closes
+the WebSocket, so Neel sees a closed window: a reload within `gracePeriodMs`
+is a page refresh (same window id, no second `onWindowOpen`, page-side state
+gone); a later reload finds the window retired, and the app gone if it was
+the last one. Neel has no idle timeout on either side, so a keep-alive would
+not help; an app meant to sit in a background tab should raise
+`gracePeriodMs` to minutes. README "Caveats" updated (`b74d3d8`). No code
+change, no test.
+
 ### 2026-10-12 - macOS, `@[Default]`: a refreshed stale tab stole window 1's identity
 
 Symptom (`examples/roundtrip` in a default-browser tab): open window 2,
@@ -113,6 +125,11 @@ The fallback remains only for pages that name no window at all (no
 so a connection can no longer linger counted but unmapped; for a normal
 refresh or shim reconnect the old connection is already gone and the close
 is a no-op (`Server.close` returns `false`).
+
+What a pass looks like: the refreshed stale tab shows only the page's static
+HTML (no buttons, "window ?"), and its console shows the `/neel.js` 404 and
+`ReferenceError: neel is not defined` from the page script. Window 1 keeps
+working, and closing it exits the app with the dead tab still open.
 
 Tests: `tests/t_neel.nim` (a `?window=9` `Referer` is 404 and leaks no
 token; `openSecond` / `closeSecond` exposed procs replay the scenario
@@ -205,14 +222,10 @@ added.
   needs the restarted app on the same port; with the default `port = 0` the
   old page's URL is dead. stresstest takes an optional port argument
   (`./stresstest 8765`) and the page text gives the recipe. Passed on macOS
-  2026-10-12 (the refreshed old page displaces the window the restart
-  opened, as documented); not yet run on Windows.
-- Windows: re-run `nimble test`, roundtrip `@[Default]` (stale-tab recipe
-  from the 2026-10-12 finding), roundtrip app mode, and the stresstest
-  kill/reconnect and refresh-after-restart checks after the stale-tab fix
-  (`bindConnection` now closes displaced connections; both reconnect paths
-  go through it).
-- Linux: not run yet.
+  2026-10-12 and on Windows 2026-10-12 (the refreshed old page displaces
+  the window the restart opened, as documented).
+- Linux: not run yet. Run the full matrix, including the stale-tab recipe
+  and both stresstest manual checks.
 - A page that navigates away from its launch URL (dropping `?window=<id>`)
   still relies on the single-window fallback for `/neel.js`; with more than
   one window open it gets a 404. Settled behaviour (README "Windows"), noted
