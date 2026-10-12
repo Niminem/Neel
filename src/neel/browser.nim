@@ -5,8 +5,8 @@
 ## bundle-id fallback, Windows candidates under Program Files / Program Files
 ## (x86) / LocalAppData plus the registry `App Paths` key, Linux executable
 ## names via `findExe`, and a `supportsAppMode` flag. An explicit
-## `browserPath` override wins and is used as-is. For 2.0 only `Chrome`,
-## `Chromium`, and `Default` are supported; `Edge`, `Brave`, `Opera`, and
+## `browserPath` override wins and is used as-is. For 2.0 `Chrome`,
+## `Chromium`, `Edge`, and `Default` are supported; `Brave`, `Opera`, and
 ## `Vivaldi` are *reserved*: present in the enum and table with empty specs and
 ## skipped by discovery. Every filesystem, environment, `mdfind`, and registry
 ## probe goes through a `Discovery` record of procs so tests inject results and
@@ -14,9 +14,10 @@
 ##
 ## Launch uses `startProcess` with an args array, never a shell string:
 ## `--app=<url>`, `--user-data-dir=<dir>`, `--window-size`, `--window-position`,
-## `--disable-http-cache`, `--no-first-run`, `--no-default-browser-check`, then
-## user-provided flags verbatim (`buildLaunchArgs` is pure; `launchBrowser`
-## starts the process). Each window gets its *own* user-data-dir
+## `--disable-http-cache`, `--no-first-run`, `--no-default-browser-check`, the
+## browser's own `launchFlags` from the spec table (currently only Edge has any), then
+## user-provided flags verbatim
+## (`buildLaunchArgs` is pure; `launchBrowser` starts the process). Each window gets its *own* user-data-dir
 ## (`userDataDirFor`): Chromium hands a second `--app` launch with the same
 ## profile dir to the already-running instance and the launcher exits at once,
 ## so a shared dir would leave every window but the first untracked. The
@@ -72,6 +73,9 @@ type
       ## `SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\` (HKCU, HKLM).
     linuxExecutables*: seq[string]
       ## Names resolved on `PATH` with `findExe`.
+    launchFlags*: seq[string]
+      ## Flags this browser always gets, after Neel's common flags and before
+      ## the user's `extraFlags`.
 
   Discovery* = object
     ## The probes `findBrowser` uses. Tests fill these with canned answers;
@@ -211,13 +215,36 @@ const
       # would make a Chromium preference resolve to Google Chrome.
       windowsAppPathsKeys: @[],
       linuxExecutables: @["chromium", "chromium-browser"]),
-    Edge: BrowserSpec(name: "Microsoft Edge"),
+    Edge: BrowserSpec(
+      name: "Microsoft Edge", supported: true, supportsAppMode: true,
+      macAppPaths: @[
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "~/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
+      # Sources disagree on which id Spotlight indexes.
+      macBundleIds: @["com.microsoft.edgemac", "com.microsoft.Edge"],
+      macExecutable: "Contents/MacOS/Microsoft Edge",
+      windowsRelativePaths: @[r"Microsoft\Edge\Application\msedge.exe"],
+      windowsAppPathsKeys: @["msedge.exe"],
+      linuxExecutables: @["microsoft-edge", "microsoft-edge-stable"],
+      # A fresh Edge profile signs itself in with the Windows Microsoft
+      # account, starts sync (a modal prompt over the app window), and
+      # installs the account's extensions, whose welcome tabs open in a
+      # separate window. `--no-service-autorun` stops prelaunch and
+      # background processes that would outlive the window. On Windows Edge
+      # may relaunch itself through the compatibility layer under a new PID
+      # and exit the one we started, leaving the handle unable to terminate
+      # the window or delete its profile; `--edge-skip-compat-layer-relaunch`
+      # prevents that.
+      launchFlags: @["--disable-sync", "--disable-extensions",
+                     "--disable-features=msImplicitSignin",
+                     "--no-service-autorun",
+                     "--edge-skip-compat-layer-relaunch"]),
     Brave: BrowserSpec(name: "Brave"),
     Opera: BrowserSpec(name: "Opera"),
     Vivaldi: BrowserSpec(name: "Vivaldi"),
     Default: BrowserSpec(name: "Default browser", supported: true)]
-    ## The spec table. Reserved members (`Edge`, `Brave`, `Opera`, `Vivaldi`)
-    ## carry only a display name; they are not supported in 2.0.
+    ## The spec table. Reserved members (`Brave`, `Opera`, `Vivaldi`) carry
+    ## only a display name; they are not supported in 2.0.
 
   NoBrowserPath* = "/neel/no-browser"
     ## Route of the error page `startApp` serves when no browser was found and
@@ -237,12 +264,12 @@ const
     ## Default time `terminate` gives the browser between SIGTERM and SIGKILL.
 
 proc isSupported*(b: Browser): bool =
-  ## `true` for `Chrome`, `Chromium`, and `Default` in 2.0.
+  ## `true` for `Chrome`, `Chromium`, `Edge`, and `Default` in 2.0.
   BrowserSpecs[b].supported
 
 proc isReserved*(b: Browser): bool =
   ## `true` for enum members that exist for forward compatibility only
-  ## (`Edge`, `Brave`, `Opera`, `Vivaldi`); discovery skips them.
+  ## (`Brave`, `Opera`, `Vivaldi`); discovery skips them.
   not BrowserSpecs[b].supported
 
 proc displayName*(b: Browser): string =
@@ -278,10 +305,17 @@ static:
         $b & " has mdfind bundle ids but no macExecutable"
       for rel in spec.windowsRelativePaths:
         doAssert '/' notin rel, $b & ": Windows paths use backslashes"
+      for flag in spec.launchFlags:
+        doAssert flag.startsWith("--"), $b & ": launch flag '" & flag & "' must start with --"
+        doAssert not flag.startsWith("--app=") and
+          not flag.startsWith("--user-data-dir="),
+          $b & ": launch flags must not override --app or --user-data-dir"
     else:
       doAssert not spec.supportsAppMode, $b & " is reserved: supportsAppMode must be false"
       doAssert not spec.hasAnyCandidates, $b & " is reserved: spec must be empty"
       doAssert spec.macExecutable.len == 0, $b & " is reserved: spec must be empty"
+    if not spec.supportsAppMode:
+      doAssert spec.launchFlags.len == 0, $b & " has no app mode: launchFlags must be empty"
 
 # --- Discovery ---------------------------------------------------------------
 
@@ -479,14 +513,16 @@ proc userDataDirFor*(windowId: int; pid = getCurrentProcessId();
 
 proc buildLaunchArgs*(url, userDataDir: string;
                       size = none(WindowSize); position = none(WindowPosition);
-                      extraFlags: openArray[string] = []): seq[string] =
+                      extraFlags: openArray[string] = [];
+                      browserFlags: openArray[string] = []): seq[string] =
   ## The exact argument vector for an app-mode launch, in this order:
   ## `--app=<url>`, `--user-data-dir=<dir>`, `--window-size=W,H` (if
   ## `size`), `--window-position=X,Y` (if `position`),
   ## `--disable-http-cache`, `--no-first-run`, `--no-default-browser-check`,
-  ## then `extraFlags` verbatim. Each element is one argv entry: nothing is
-  ## quoted or escaped because no shell is involved. Pure. A non-positive
-  ## width or height raises `ValueError`.
+  ## `browserFlags` (a spec's `launchFlags`), then `extraFlags` verbatim.
+  ## Each element is one argv entry: nothing is quoted or escaped because no
+  ## shell is involved. Pure. A non-positive width or height raises
+  ## `ValueError`.
   doAssert url.len > 0, "buildLaunchArgs: url is empty"
   doAssert userDataDir.len > 0, "buildLaunchArgs: userDataDir is empty"
   result = @["--app=" & url, "--user-data-dir=" & userDataDir]
@@ -502,12 +538,23 @@ proc buildLaunchArgs*(url, userDataDir: string;
   result.add "--disable-http-cache"
   result.add "--no-first-run"
   result.add "--no-default-browser-check"
+  for flag in browserFlags:
+    result.add flag
   for flag in extraFlags:
     result.add flag
 
 proc buildLaunchArgs*(url, userDataDir: string; opts: LaunchOptions): seq[string] =
-  ## `buildLaunchArgs` over a `LaunchOptions` record.
+  ## `buildLaunchArgs` over a `LaunchOptions` record, with no browser flags.
   buildLaunchArgs(url, userDataDir, opts.size, opts.position, opts.extraFlags)
+
+proc buildLaunchArgs*(b: Browser; url, userDataDir: string;
+                      opts = LaunchOptions()): seq[string] =
+  ## The argument vector `launchBrowser` uses for `b`: `opts` plus
+  ## `BrowserSpecs[b].launchFlags`. `b` must be app-mode capable.
+  doAssert BrowserSpecs[b].supportsAppMode,
+    "buildLaunchArgs: " & $b & " has no app mode"
+  buildLaunchArgs(url, userDataDir, opts.size, opts.position, opts.extraFlags,
+                  BrowserSpecs[b].launchFlags)
 
 proc startBrowserProcess(path: string; args: seq[string]): Process {.gcsafe.} =
   ## `startProcess` with the browser's own stdio (a pipe nobody reads would
@@ -521,15 +568,17 @@ proc startBrowserProcess(path: string; args: seq[string]): Process {.gcsafe.} =
 
 proc launchBrowser*(found: FoundBrowser; url, userDataDir: string;
                     opts = LaunchOptions()): BrowserHandle {.gcsafe.} =
-  ## Starts `found.path` in app mode with `buildLaunchArgs(url, userDataDir,
-  ## opts)` and returns the handle owning the process. `found.browser` must
+  ## Starts `found.path` in app mode with `buildLaunchArgs(found.browser, url,
+  ## userDataDir, opts)` and returns the handle owning the process. With a
+  ## `browserPath` override `found.browser` is the first app-mode preference,
+  ## so its `launchFlags` apply. `found.browser` must
   ## not be `Default` (use `openDefaultBrowser`). Raises `NeelBrowserError`
   ## if the process cannot be started. The caller supplies `userDataDir`
   ## (normally `userDataDirFor(windowId)`); it must be unique per live window
   ## or the handle will not track the window (see the module header).
   doAssert found.browser != Default, "launchBrowser: Default has no executable"
   doAssert found.path.len > 0, "launchBrowser: empty executable path"
-  let args = buildLaunchArgs(url, userDataDir, opts)
+  let args = buildLaunchArgs(found.browser, url, userDataDir, opts)
   BrowserHandle(kind: lkAppWindow, browser: found.browser, path: found.path,
                 args: args, url: url, userDataDir: userDataDir,
                 process: startBrowserProcess(found.path, args))

@@ -41,7 +41,7 @@ handled outside this plan.
 | JS API | `neel.<procName>(...)` generated at compile time, returns a Promise. `neel.<procName>.send(...)` for fire-and-forget. `neel.expose(fn)` / `neel.expose({name: fn})` registers Nim->JS targets (falls back to `window[name]`). |
 | Nim API | `js.<fnName>(...)` via experimental dot operators. Fire-and-forget by default; `js.wait.<fnName>(...)` / `js.wait(timeoutMs).<fnName>(...)` blocks and returns `JsonNode`; `win.js.<fnName>(...)` targets a specific window. _(Revised by Task 2 spike (b) from `js.<fnName>(...).wait()`, which is not implementable; veto in review.)_ |
 | Windows | Full multi-window API: `openWindow`, `closeWindow`, `windows()`, `currentWindow()`, per-window `js`. |
-| Browsers | `Browser` enum + per-browser spec table. Ordered preference list (`seq[Browser]`). `Default` = default-browser tab. `fallback: bool` (true -> open app in default-browser tab; false -> open default-browser tab showing a Neel error page listing the browsers searched). 2.0 ships `Chrome`, `Chromium`, `Default`. Dedicated `--user-data-dir`; size/position via launch flags. No shell string construction. |
+| Browsers | `Browser` enum + per-browser spec table. Ordered preference list (`seq[Browser]`). `Default` = default-browser tab. `fallback: bool` (true -> open app in default-browser tab; false -> open default-browser tab showing a Neel error page listing the browsers searched). 2.0 ships `Chrome`, `Chromium`, `Default`. _(Revised during verification: `Edge` is supported too and the default list is `@[Chrome, Chromium, Edge]`; see "Post-implementation changes".)_ Dedicated `--user-data-dir`; size/position via launch flags. No shell string construction. |
 | Lifecycle | Exit after the last connection closes plus a configurable grace period (connection-count based). Explicit `quit()` _(named `quitApp()` since Task 12: a zero-argument `quit()` is ambiguous with `system.quit`)_. Browser launched only after `listen` succeeds. |
 | Security | Per-launch random token baked into `neel.js`, required on WebSocket upgrade. |
 | Assets | `embedAssets: static bool = defined(release)`. `std/mimetypes` for MIME, `Range` support (media), real 404s. |
@@ -2358,6 +2358,28 @@ supersede the task notes they mention.
   in `connCount` while mapped to no window. A refresh or shim reconnect is
   unaffected (the old connection is already gone; `Server.close` returns
   `false`).
+- `Edge` is supported on macOS, Windows, and Linux (replaces "2.0 ships
+  `Chrome`, `Chromium`, `Default`" and the Task 11/13 notes that list `Edge`
+  as reserved). Spec: `/Applications` and `~/Applications/Microsoft
+  Edge.app/Contents/MacOS/Microsoft Edge`, `mdfind` by
+  `com.microsoft.edgemac`; Windows roots + `Microsoft\Edge\Application\msedge.exe`,
+  then registry `App Paths\msedge.exe`; Linux `microsoft-edge`,
+  `microsoft-edge-stable`. Same app-mode flags as Chrome. The `startApp`
+  default is `browsers = @[Chrome, Chromium, Edge]` on every OS. Reserved
+  members are now `Brave`, `Opera`, `Vivaldi`. Reason: Windows ships Edge,
+  so a machine without Chrome still gets an app window (NOTES.md
+  2026-10-12).
+- Per-browser launch flags (replaces the Task 11 argv note): `BrowserSpec`
+  has `launchFlags: seq[string]`, inserted after `--no-default-browser-check`
+  and before the user's `extraFlags`. Only Edge has any:
+  `--disable-sync --disable-extensions --disable-features=msImplicitSignin
+  --no-service-autorun --edge-skip-compat-layer-relaunch`. Edge's macOS `mdfind` ids are
+  `com.microsoft.edgemac`, then `com.microsoft.Edge`. `buildLaunchArgs` gained a trailing
+  `browserFlags` parameter and an overload `buildLaunchArgs(b: Browser; url,
+  userDataDir; opts = LaunchOptions())`, which `launchBrowser` uses (a
+  `browserPath` override gets the flags of the first app-mode preference).
+  Reason: a fresh Edge profile signs in with the Windows Microsoft account
+  and starts sync (NOTES.md 2026-10-12).
 
 ---
 

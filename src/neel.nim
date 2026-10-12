@@ -176,7 +176,7 @@ proc noBrowserPage(search: BrowserSearch; fallback: bool): string =
   "</code>, so Neel did not open it in your default browser. It looked for:</p>\n" &
   "<ul>\n" & items & "</ul>\n" &
   "<p>To fix this, do one of the following and start the application again:</p>\n" &
-  "<ul>\n<li>install Google Chrome or Chromium;</li>\n" &
+  "<ul>\n<li>install Google Chrome, Chromium, or Microsoft Edge;</li>\n" &
   "<li>pass <code>browserPath = \"/path/to/the/browser\"</code> to " &
   "<code>startApp</code>;</li>\n" &
   "<li>pass <code>fallback = true</code> to run the application in this " &
@@ -304,7 +304,7 @@ proc runApp*(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
              maxMessageSize = DefaultMaxMessageSize;
              gracePeriodMs = DefaultGracePeriodMs;
              startupTimeoutMs = DefaultStartupTimeoutMs;
-             browsers = @[Chrome, Chromium]; fallback = true; browserPath = "";
+             browsers = @[Chrome, Chromium, Edge]; fallback = true; browserPath = "";
              size = none(WindowSize); position = none(WindowPosition);
              extraFlags: seq[string] = @[];
              onWindowOpen: WindowHook = nil; onWindowClose: WindowHook = nil;
@@ -388,7 +388,7 @@ macro startApp*(args: varargs[untyped]): untyped =
   ##   `gracePeriodMs = DefaultGracePeriodMs` (exit this long after the last
   ##   window closes; at least `MinGracePeriodMs`),
   ##   `startupTimeoutMs = DefaultStartupTimeoutMs`.
-  ## - `browsers = @[Chrome, Chromium]`, `fallback = true`, `browserPath = ""`,
+  ## - `browsers = @[Chrome, Chromium, Edge]`, `fallback = true`, `browserPath = ""`,
   ##   `size = none(WindowSize)`, `position = none(WindowPosition)`,
   ##   `extraFlags: seq[string] = @[]`.
   ## - `onWindowOpen`, `onWindowClose: WindowHook = nil`.

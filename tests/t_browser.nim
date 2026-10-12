@@ -16,6 +16,12 @@ const
   ChromeWinX86 = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
   ChromeWinLocal = r"C:\Users\me\AppData\Local\Google\Chrome\Application\chrome.exe"
   ChromiumWin = r"C:\Program Files\Chromium\Application\chrome.exe"
+  EdgeMac = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+  EdgeWin = r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+  EdgeWinX86 = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+  EdgeFlags = @["--disable-sync", "--disable-extensions",
+                "--disable-features=msImplicitSignin", "--no-service-autorun",
+                "--edge-skip-compat-layer-relaunch"]
 
 type
   Fake = ref object
@@ -55,18 +61,20 @@ proc fake(files: openArray[string] = []; exes: openArray[(string, string)] = [];
 proc emptyFake(): Fake = fake()
 
 suite "browser: spec table":
-  test "Chrome, Chromium, Default are supported; the rest are reserved":
+  test "Chrome, Chromium, Edge, Default are supported; the rest are reserved":
     check Chrome.isSupported
     check Chromium.isSupported
+    check Edge.isSupported
     check Default.isSupported
-    for b in [Edge, Brave, Opera, Vivaldi]:
+    for b in [Brave, Opera, Vivaldi]:
       check b.isReserved
       check not b.isSupported
     check not Chrome.isReserved
+    check not Edge.isReserved
     check not Default.isReserved
 
   test "populated entries have candidates on every OS and app-mode support":
-    for b in [Chrome, Chromium]:
+    for b in [Chrome, Chromium, Edge]:
       let spec = BrowserSpecs[b]
       check spec.supportsAppMode
       for os in HostOs:
@@ -85,7 +93,7 @@ suite "browser: spec table":
       check not spec.hasCandidates(os)
 
   test "reserved members have a name only":
-    for b in [Edge, Brave, Opera, Vivaldi]:
+    for b in [Brave, Opera, Vivaldi]:
       let spec = BrowserSpecs[b]
       check spec.name.len > 0
       check not spec.supportsAppMode
@@ -95,8 +103,15 @@ suite "browser: spec table":
       check spec.windowsRelativePaths.len == 0
       check spec.windowsAppPathsKeys.len == 0
       check spec.linuxExecutables.len == 0
+      check spec.launchFlags.len == 0
       for os in HostOs:
         check not spec.hasCandidates(os)
+
+  test "only Edge has browser-specific launch flags":
+    check BrowserSpecs[Edge].launchFlags == EdgeFlags
+    check BrowserSpecs[Chrome].launchFlags.len == 0
+    check BrowserSpecs[Chromium].launchFlags.len == 0
+    check BrowserSpecs[Default].launchFlags.len == 0
 
   test "display names and expected supportsAppMode values":
     check Chrome.displayName == "Google Chrome"
@@ -104,8 +119,9 @@ suite "browser: spec table":
     check Edge.displayName == "Microsoft Edge"
     check BrowserSpecs[Chrome].supportsAppMode
     check BrowserSpecs[Chromium].supportsAppMode
+    check BrowserSpecs[Edge].supportsAppMode
     check not BrowserSpecs[Default].supportsAppMode
-    check not BrowserSpecs[Edge].supportsAppMode
+    check not BrowserSpecs[Brave].supportsAppMode
 
   test "CurrentHostOs matches the compile target":
     when defined(macosx):
@@ -216,12 +232,59 @@ suite "browser: probeBrowser per OS":
       check r.path == ""
       check r.candidates == @["chromium (on PATH)", "chromium-browser (on PATH)"]
 
+  test "macOS: Edge bundle path, then mdfind by com.microsoft.edgemac":
+    block:
+      let f = fake(files = [EdgeMac])
+      let r = probeBrowser(Edge, f.discovery, hoMacos)
+      check r.path == EdgeMac
+      check r.candidates == @[EdgeMac]
+    block:
+      let app = "/Volumes/Apps/Microsoft Edge.app"
+      let exe = app & "/Contents/MacOS/Microsoft Edge"
+      let f = fake(files = [exe], bundles = {"com.microsoft.edgemac": @[app]})
+      let r = probeBrowser(Edge, f.discovery, hoMacos)
+      check r.path == exe
+      check r.candidates == @[EdgeMac, exe]
+      check "mdfind com.microsoft.Edge" notin f.asked
+
+  test "macOS: Edge falls back to the com.microsoft.Edge bundle id":
+    let app = "/Volumes/Apps/Microsoft Edge.app"
+    let exe = app & "/Contents/MacOS/Microsoft Edge"
+    let f = fake(files = [exe], bundles = {"com.microsoft.Edge": @[app]})
+    let r = probeBrowser(Edge, f.discovery, hoMacos)
+    check r.path == exe
+    check r.candidates == @[EdgeMac,
+      "mdfind kMDItemCFBundleIdentifier == 'com.microsoft.edgemac'", exe]
+
+  test "Windows: Edge under Program Files (x86), registry msedge.exe last":
+    let env = {"ProgramFiles": r"C:\Program Files",
+               "ProgramFiles(x86)": r"C:\Program Files (x86)"}
+    block:
+      let f = fake(files = [EdgeWinX86], env = env)
+      let r = probeBrowser(Edge, f.discovery, hoWindows)
+      check r.path == EdgeWinX86
+      check r.candidates == @[EdgeWin, EdgeWinX86]
+      check "registry msedge.exe" notin f.asked
+    block:
+      let f = fake(files = [r"D:\Edge\msedge.exe"], env = env,
+                   registry = {"msedge.exe": r"D:\Edge\msedge.exe"})
+      let r = probeBrowser(Edge, f.discovery, hoWindows)
+      check r.path == r"D:\Edge\msedge.exe"
+      check r.candidates == @[EdgeWin, EdgeWinX86, r"D:\Edge\msedge.exe"]
+      check "registry chrome.exe" notin f.asked
+
+  test "Linux: Edge executables tried in order via findExe":
+    let f = fake(exes = {"microsoft-edge-stable": "/usr/bin/microsoft-edge-stable"})
+    let r = probeBrowser(Edge, f.discovery, hoLinux)
+    check r.path == "/usr/bin/microsoft-edge-stable"
+    check f.asked == @["findExe microsoft-edge", "findExe microsoft-edge-stable"]
+
   test "probing Default or a reserved member is a usage error":
     let f = fake()
     expect AssertionDefect:
       discard probeBrowser(Default, f.discovery, hoLinux)
     expect AssertionDefect:
-      discard probeBrowser(Edge, f.discovery, hoLinux)
+      discard probeBrowser(Brave, f.discovery, hoLinux)
 
   test "a Discovery with a missing probe is rejected":
     var d = emptyFake().discovery
@@ -290,24 +353,35 @@ suite "browser: findBrowser preference resolution":
       check s.probed[0].browser == Chrome
       check s.searchedNames == @["Google Chrome"]
 
+  test "Chrome and Chromium missing on Windows: Edge is found third":
+    let f = fake(files = [EdgeWinX86],
+                 env = {"ProgramFiles": r"C:\Program Files",
+                        "ProgramFiles(x86)": r"C:\Program Files (x86)"})
+    let s = findBrowser(@[Chrome, Chromium, Edge], discovery = f.discovery,
+                        hostOs = hoWindows)
+    check s.found.isSome
+    check s.found.get.browser == Edge
+    check s.found.get.path == EdgeWinX86
+    check s.searchedNames == @["Google Chrome", "Chromium", "Microsoft Edge"]
+
   test "reserved members are skipped and recorded":
     let f = fake(exes = {"chromium": "/usr/bin/chromium"})
-    let s = findBrowser(@[Edge, Brave, Chrome, Vivaldi, Chromium, Opera],
+    let s = findBrowser(@[Brave, Chrome, Vivaldi, Chromium, Opera],
                         discovery = f.discovery, hostOs = hoLinux)
     check s.found.isSome
     check s.found.get.browser == Chromium
-    check s.skipped == @[Edge, Brave, Vivaldi]
+    check s.skipped == @[Brave, Vivaldi]
     check s.probed.len == 2
     for q in f.asked:
-      check "edge" notin q.toLowerAscii
       check "brave" notin q.toLowerAscii
+      check "vivaldi" notin q.toLowerAscii
 
   test "only reserved members: nothing found, all skipped":
     let f = fake()
-    let s = findBrowser(@[Edge, Opera], discovery = f.discovery, hostOs = hoMacos)
+    let s = findBrowser(@[Brave, Opera], discovery = f.discovery, hostOs = hoMacos)
     check s.found.isNone
     check s.probed.len == 0
-    check s.skipped == @[Edge, Opera]
+    check s.skipped == @[Brave, Opera]
     check f.asked.len == 0
 
   test "browserPath override that exists wins without probing":
@@ -355,12 +429,12 @@ suite "browser: findBrowser preference resolution":
 suite "browser: search description and no-browser URL":
   test "describeSearch lists candidates per browser and the skipped members":
     let f = fake(env = {"HOME": "/Users/me"})
-    let s = findBrowser(@[Edge, Chrome], discovery = f.discovery, hostOs = hoMacos)
+    let s = findBrowser(@[Brave, Chrome], discovery = f.discovery, hostOs = hoMacos)
     let lines = s.describeSearch
     check lines.len == 2
     check lines[0] == "Google Chrome: " & ChromeMac & ", " & ChromeMacHome &
       ", mdfind kMDItemCFBundleIdentifier == 'com.google.Chrome'"
-    check lines[1] == "Microsoft Edge: reserved, not supported in this release"
+    check lines[1] == "Brave: reserved, not supported in this release"
 
   test "describeSearch is empty when nothing was probed or skipped":
     let f = fake()
@@ -387,7 +461,7 @@ suite "browser: search description and no-browser URL":
 
   test "noBrowserPageUrl without probes has no query":
     let f = fake()
-    let s = findBrowser(@[Edge], discovery = f.discovery, hostOs = hoLinux)
+    let s = findBrowser(@[Vivaldi], discovery = f.discovery, hostOs = hoLinux)
     check noBrowserPageUrl("http://127.0.0.1:8000", s) ==
       "http://127.0.0.1:8000/neel/no-browser"
 
@@ -440,6 +514,24 @@ suite "browser: launch arguments":
     check buildLaunchArgs(Url, Dir, opts) ==
       buildLaunchArgs(Url, Dir, some((640, 480)), some((5, 6)), ["--x"])
     check buildLaunchArgs(Url, Dir, LaunchOptions()) == buildLaunchArgs(Url, Dir)
+
+  test "Edge gets its sign-in, sync, background, and relaunch flags before the user's flags":
+    let args = buildLaunchArgs(Edge, Url, Dir, LaunchOptions(extraFlags: @["--x"]))
+    check args == @["--app=" & Url, "--user-data-dir=" & Dir] & Fixed &
+                  EdgeFlags & @["--x"]
+    check buildLaunchArgs(Edge, Url, Dir) ==
+      @["--app=" & Url, "--user-data-dir=" & Dir] & Fixed & EdgeFlags
+
+  test "Chrome and Chromium get no browser-specific flags":
+    let opts = LaunchOptions(size: some((640, 480)), extraFlags: @["--x"])
+    for b in [Chrome, Chromium]:
+      check buildLaunchArgs(b, Url, Dir, opts) == buildLaunchArgs(Url, Dir, opts)
+
+  test "per-browser argv for Default or a reserved member is a usage error":
+    expect AssertionDefect:
+      discard buildLaunchArgs(Default, Url, Dir)
+    expect AssertionDefect:
+      discard buildLaunchArgs(Brave, Url, Dir)
 
   test "a non-positive size is a ValueError":
     expect ValueError:

@@ -16,9 +16,9 @@
 ##       release build: `web/` is embedded into the binary at compile time,
 ##       so the binary can be moved anywhere; the grace period is 10 s.
 ##
-## Chrome or Chromium is opened in app mode; with neither installed the page
+## Chrome, Chromium, or Edge is opened in app mode; with none installed the page
 ## opens in a tab of the default browser instead. Expect Chromium's own
-## stderr noise in the terminal (the browser inherits stdio).
+## stderr noise in the terminal on MacOS (the browser inherits stdio).
 
 import std/[os, random]
 import neel

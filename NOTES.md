@@ -23,6 +23,7 @@ How to use this file:
 | `examples/filepicker` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | not run |
 | `examples/roundtrip` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | not run |
 | `examples/stresstest` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | not run |
+| examples with `browsers = @[Edge]` | will not be run (paths and flags checked against public sources only, 2026-10-12 finding) | passes (Nim 2.2.12, 2026-10-12; all three examples and their manual checks, no leftover `msedge` processes or profile dirs) | will not be run (as macOS) |
 
 ## Gotchas
 
@@ -79,7 +80,117 @@ while a plain `nim c -r examples/...` uses the choosenim toolchain on `PATH`
 (2.2.10 until 2026-10-09, now 2.2.12). Check the "Info: using ... for compilation" line and `nim -v`
 before comparing results across commands or machines.
 
+### A fresh Edge profile signs in on its own
+
+Every Neel window is a brand-new profile, and Edge signs a new profile in
+with the Windows Microsoft account and starts sync. Edge must keep
+`--disable-sync --disable-extensions --disable-features=msImplicitSignin
+--no-service-autorun --edge-skip-compat-layer-relaunch` in its
+`launchFlags`; test any Edge
+launch change on a Windows machine signed in with a Microsoft account.
+Anything a browser needs on every launch goes in its spec's `launchFlags`,
+not in the common flags of `buildLaunchArgs`.
+
 ## Findings
+
+### 2026-10-12 - Windows, Edge: `closeSecond` does not close the window
+
+Symptom (`examples/roundtrip`, release, `browsers = @[Edge]`): the second
+window opens, but "close second window" leaves it on screen. Profile dirs
+`neel-<pid>-2` and `neel-<pid>-3` stayed behind in `%TEMP%`.
+
+Cause (inferred from public reports, not traced on the machine): on
+Windows Edge can relaunch itself through the compatibility layer
+(`msRelaunchNoCompatLayer`) as a new process and exit the one Neel
+started. The `BrowserHandle` then tracks a dead PID: `terminate` returns at
+once, the real window stays, and `removeUserDataDir` fails silently
+because the relaunched Edge still holds the profile. Whether Edge relaunches
+depends on Windows' compatibility records for the launching executable, so
+it can differ between a debug and a fresh release binary. Affects
+`closeWindow`, `quitApp` teardown, and profile cleanup; closing with the
+window's own X still works (WebSocket). Playwright passes the same flag
+with the comment "Edge can potentially restart on Windows
+(msRelaunchNoCompatLayer) ... Disable until fixed upstream"; also
+MicrosoftEdge/EdgeWebDriver#189.
+
+Fix: `--edge-skip-compat-layer-relaunch` added to Edge's `launchFlags`
+(`src/neel/browser.nim`). Test: the exact Edge argv in `tests/t_browser.nim`.
+The six stale `neel-*` dirs on this machine (about 390 MB) were deleted by
+hand.
+
+### 2026-10-12 - Windows, Edge: fresh profile signs in and syncs
+
+Symptom (`examples/filepicker` with `browsers = @[Edge]`, Windows signed in
+with a Microsoft account): the app window opened with a modal "we are now
+syncing your browsing data ... has signed into this device" prompt (Got it /
+Customize) that could not be dismissed by closing the window; a separate
+normal Edge window opened with extension welcome tabs (Voice In, Loom) and a
+"Keyword Surfer has been turned off" notice. The process had to be killed in
+Task Manager.
+
+Cause: Edge implicitly signs a new profile in with the Windows Microsoft
+account and turns on sync, which pulls the account's extensions; their
+first-run pages open in a normal window of the same (Neel) profile. Neel
+gives every window a fresh profile, so this happens on every launch, and
+clicking "Got it" would not stop it next time.
+
+Fix: `launchFlags` in `BrowserSpec` (`src/neel/browser.nim`); Edge gets
+`--disable-sync --disable-extensions` after Neel's common flags and before
+`extraFlags`. Tried by hand first through `extraFlags`: with both flags no
+prompt and no extra window; without them both came back. `--inprivate` also
+works but puts "[InPrivate]" in the window title, so it was not used.
+
+Follow-up (same day, from research, not yet tried on a machine): Selenium's
+IEDriver launches Edge with a throwaway `--user-data-dir` the same way and
+adds `--disable-features=msImplicitSignin` ("disable profile sync and
+implicit MS account sign-in"; `--disable-sync` alone stops sync but likely
+leaves the profile signed in) and `--no-service-autorun` ("disable Edge
+prelaunch and other background processes on startup"). Both added to Edge's
+`launchFlags`. Chromium keeps only the last `--disable-features`, so a user
+`--disable-features=...` in `extraFlags` re-enables implicit sign-in
+(README says to include `msImplicitSignin`). Paths checked against public
+sources, since Edge is verified on Windows only: macOS
+`/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge` (Edge
+WebDriver docs, Playwright); bundle id `com.microsoft.edgemac` in most
+sources, one reports `com.microsoft.Edge` in Info.plist, so `mdfind` tries
+both; Windows `Microsoft\Edge\Application\msedge.exe` under `Program Files
+(x86)` (usual), `Program Files`, or `LocalAppData`, plus `App Paths\msedge.exe`;
+Linux `.deb`/`.rpm` install `/usr/bin/microsoft-edge` and
+`microsoft-edge-stable`, a wrapper that `exec`s `/opt/microsoft/msedge/msedge`
+(same PID, so the handle tracks the browser).
+
+Tests: `tests/t_browser.nim` - only Edge has `launchFlags`; exact Edge argv
+(flags after the common ones, before `extraFlags`); Chrome and Chromium argv
+unchanged; `buildLaunchArgs(Default | Brave, ...)` is a usage error. The
+static spec check rejects flags that override `--app` / `--user-data-dir`;
+macOS `mdfind` falls back to `com.microsoft.Edge`.
+
+### 2026-10-12 - All platforms: Edge supported, and in the default list
+
+Symptom (Windows, by review): a machine without Chrome or Chromium got a
+default-browser tab (usually Edge, no app mode) even though every Windows
+install ships Edge, which takes the same app-mode flags.
+
+Change: `Edge` is no longer reserved. `src/neel/browser.nim` gives it a full
+spec on all three OSes (macOS `Microsoft Edge.app` in `/Applications` and
+`~/Applications`, then `mdfind` by `com.microsoft.edgemac`; Windows
+`Microsoft\Edge\Application\msedge.exe` under the usual roots, then registry
+`App Paths\msedge.exe`; Linux `microsoft-edge`, `microsoft-edge-stable`).
+`startApp`'s default is now `browsers = @[Chrome, Chromium, Edge]` on every
+OS (`src/neel.nim`), so Chrome still wins when installed. Reserved members
+are `Brave`, `Opera`, `Vivaldi`. The no-browser page now suggests installing
+Edge as well. README, `PLAN.md` "Post-implementation changes", and the
+example texts updated.
+
+Tests: `tests/t_browser.nim` - Edge is supported with candidates on every
+OS; Edge probe on macOS (fixed path, `mdfind` fallback), Windows
+(`Program Files (x86)` hit, registry `msedge.exe` last and never
+`chrome.exe`), Linux (`findExe` order); `@[Chrome, Chromium, Edge]` on
+Windows resolves to Edge when the other two are missing. The reserved-member
+tests now use Brave, Opera, and Vivaldi. `nimble test` passes on Windows
+(Nim 2.2.12); `src/neel.nim` also compiled with `--os:linux` and
+`--os:macosx --compileOnly`. Real launches with `browsers = @[Edge]` are not
+verified yet (see the matrix).
 
 ### 2026-10-12 - All platforms: discarded background tabs (not a bug)
 
@@ -226,6 +337,13 @@ added.
   the window the restart opened, as documented).
 - Linux: not run yet. Run the full matrix, including the stale-tab recipe
   and both stresstest manual checks.
+- Edge: verified on Windows only (2026-10-12). macOS and Linux will not be
+  run; their paths and flags are checked against public sources only (see
+  the 2026-10-12 findings).
+- Abandoned profile dirs: a killed or crashed app or browser leaves its
+  `neel-<pid>-<id>` dir in the temp dir, and Windows never cleans `%TEMP%`
+  (16-120 MB each). Planned: an automatic sweep that never slows startup
+  (at shutdown, or on a background thread), in its own session.
 - A page that navigates away from its launch URL (dropping `?window=<id>`)
   still relies on the single-window fallback for `/neel.js`; with more than
   one window open it gets a 404. Settled behaviour (README "Windows"), noted

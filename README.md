@@ -2,15 +2,15 @@
 
 Neel is a Nim library for desktop applications whose user interface is HTML,
 CSS, and JavaScript. The Nim program runs a small HTTP/WebSocket server on
-`127.0.0.1`, opens Chrome or Chromium in app mode on it, and bridges the two
+`127.0.0.1`, opens Chrome, Chromium, or Edge in app mode on it, and bridges the two
 sides: a Nim proc marked `{.expose.}` becomes `neel.<name>(...)` in the page
 and returns a Promise; a JS function registered with `neel.expose` becomes
 `js.<name>(...)` in Nim, with `js.wait.<name>(...)` when a return value is
 needed. Neel 2.0 is inspired by Python's [Eel](https://github.com/python-eel/Eel).
 
 Requirements: Nim >= 2.2.12, no external packages. Supported browsers in this
-release: Google Chrome and Chromium (app mode), or a tab in the OS default
-browser.
+release: Google Chrome, Chromium, and Microsoft Edge (app mode), or a tab in
+the OS default browser.
 
 Contents
 
@@ -506,47 +506,66 @@ refresh or the shim's reconnect looks the same at first.
 ## Browsers and fallback
 
 ```nim
-startApp(browsers = @[Chrome, Chromium], fallback = true, browserPath = "",
+startApp(browsers = @[Chrome, Chromium, Edge], fallback = true, browserPath = "",
          size = some((1100, 800)), position = some((80, 80)),
          extraFlags = @["--force-dark-mode"])
 ```
 
 - `browsers: seq[Browser]` is the preference list, tried in order. The enum is
   `Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Default`. Default list:
-  `@[Chrome, Chromium]`.
+  `@[Chrome, Chromium, Edge]` on every OS, so a Windows machine without Chrome
+  still gets an app window from the preinstalled Edge.
 - `Default` means a tab in the OS default browser (`open` on macOS,
   `xdg-open` on Linux and other POSIX systems, `rundll32.exe
   url.dll,FileProtocolHandler` on Windows). It always "succeeds" and stops the
   search, so `@[Default]` forces a tab. No app mode, no size or position, no
   process handle: closing the tab is detected through the WebSocket only.
-- `Edge`, `Brave`, `Opera`, `Vivaldi` are reserved for a later release: they
-  are skipped, and the no-browser page lists them as "reserved, not supported
-  in this release".
+- `Brave`, `Opera`, `Vivaldi` are reserved for a later release: they are
+  skipped, and the no-browser page lists them as "reserved, not supported in
+  this release".
 - Where Neel looks: macOS `/Applications/Google Chrome.app` and
-  `~/Applications/Google Chrome.app` (likewise `Chromium.app`), then `mdfind`
-  by bundle id (`com.google.Chrome`, `org.chromium.Chromium`); Windows
+  `~/Applications/Google Chrome.app` (likewise `Chromium.app` and
+  `Microsoft Edge.app`), then `mdfind` by bundle id (`com.google.Chrome`,
+  `org.chromium.Chromium`, `com.microsoft.edgemac` then `com.microsoft.Edge`); Windows
   `%ProgramFiles%`, `%ProgramFiles(x86)%`, `%LocalAppData%` +
-  `Google\Chrome\Application\chrome.exe` / `Chromium\Application\chrome.exe`,
-  then the registry `App Paths\chrome.exe` key (Chrome only); Linux and BSD
-  `google-chrome`, `google-chrome-stable`, `chrome`, `chromium`,
-  `chromium-browser` on `PATH`.
+  `Google\Chrome\Application\chrome.exe` / `Chromium\Application\chrome.exe` /
+  `Microsoft\Edge\Application\msedge.exe`, then the registry `App Paths` key
+  (`chrome.exe` for Chrome, `msedge.exe` for Edge; none for Chromium); Linux
+  and BSD `google-chrome`, `google-chrome-stable`, `chrome`, `chromium`,
+  `chromium-browser`, `microsoft-edge`, `microsoft-edge-stable` on `PATH`.
 - `browserPath` overrides discovery with an explicit executable, launched with
   Chrome-style app-mode flags. The path must exist, otherwise `startApp`
   raises `NeelBrowserError` before anything is bound.
 - `fallback = true` (default): when nothing in the list is found, the app
   opens in a default-browser tab. `fallback = false`: a default-browser tab is
   opened at the built-in page `/neel/no-browser` listing every location that
-  was searched and how to fix it (install Chrome or Chromium, pass
+  was searched and how to fix it (install Chrome, Chromium, or Edge, pass
   `browserPath`, or set `fallback = true`); the server stays up for
   `gracePeriodMs` so the page can load, then `startApp` raises
   `NeelBrowserError` (its `searched` field lists the browsers probed).
 - `size`, `position`, and `extraFlags` apply only to app-mode launches. The
   argument vector is exactly `--app=<url> --user-data-dir=<dir>
   [--window-size=W,H] [--window-position=X,Y] --disable-http-cache
-  --no-first-run --no-default-browser-check <extraFlags...>`, one argv element
-  each; no shell is involved. A non-positive size is a `ValueError`; negative
-  positions are allowed. Passing your own `--user-data-dir` in `extraFlags`
-  breaks per-window process tracking (Chromium takes the last one).
+  --no-first-run --no-default-browser-check [browser flags] <extraFlags...>`,
+  one argv element each; no shell is involved. A non-positive size is a
+  `ValueError`; negative positions are allowed. Passing your own
+  `--user-data-dir` in `extraFlags` breaks per-window process tracking
+  (Chromium takes the last one).
+- Browser flags: Edge always gets `--disable-sync --disable-extensions
+  --disable-features=msImplicitSignin --no-service-autorun
+  --edge-skip-compat-layer-relaunch`. Without them a
+  fresh Edge profile signs itself in with the Microsoft account Windows is
+  signed into, shows a sync prompt over the app window, and installs that
+  account's extensions, whose welcome tabs open in a separate Edge window;
+  `--no-service-autorun` stops Edge's background processes; and on Windows
+  Edge may relaunch itself under a new process, so `closeWindow` and
+  `quitApp` could not close the window or delete its profile. As a
+  consequence, extensions (`--load-extension`) do not work in Edge app
+  windows. Chromium keeps only the last `--disable-features`, so passing your
+  own in `extraFlags` turns implicit sign-in back on: include
+  `msImplicitSignin` in your list
+  (`--disable-features=msImplicitSignin,YourFeature`). Chrome and Chromium get
+  no extra flags.
 - The browser inherits the application's stdout/stderr, so Chromium's own log
   lines appear in the terminal. Redirect stderr if that bothers you.
 
@@ -669,7 +688,7 @@ is that `webDir` may be given positionally (`startApp("web", port = 8000)`).
 | `maxMessageSize` | `DefaultMaxMessageSize` (16 777 216 = 16 MiB) | largest single WebSocket message the server will accept; the peer receives a 1009 close for anything larger |
 | `gracePeriodMs` | `DefaultGracePeriodMs` (3 000 debug / 10 000 release) | exit this long after the last connection closes; at least `MinGracePeriodMs` (250) |
 | `startupTimeoutMs` | `DefaultStartupTimeoutMs` (30 000) | how long a window may take to connect before it is given up |
-| `browsers` | `@[Chrome, Chromium]` | preference list |
+| `browsers` | `@[Chrome, Chromium, Edge]` | preference list |
 | `fallback` | `true` | open the app in a default-browser tab when nothing is found (`false`: show `/neel/no-browser` and raise) |
 | `browserPath` | `""` | explicit browser executable; must exist |
 | `size` | `none(WindowSize)` | `some((width, height))` for app-mode windows |
@@ -772,7 +791,7 @@ Neel 2.0 is a rewrite with a new API; nothing from 1.x compiles unchanged.
 | `position = [500, 150]`, `size = [600, 600]` | `position = some((500, 150))`, `size = some((600, 600))`; no default size or position (the browser decides) |
 | `chromeFlags = @[...]` | `extraFlags = @[...]` |
 | `appMode = false` | `browsers = @[Default]` |
-| Chrome only | `browsers = @[Chrome, Chromium]` with `fallback` to the default browser and a `browserPath` override |
+| Chrome only | `browsers = @[Chrome, Chromium, Edge]` with `fallback` to the default browser and a `browserPath` override |
 | one window | `openWindow`, `closeWindow`, `windows`, `window`, `requireWindow`, `currentWindow`, hooks |
 | default parameter values unsupported | supported (positional) |
 | exit roughly 3 s / 10 s after the socket closes | the same defaults, now `gracePeriodMs`, plus `quitApp()` and `startApp` returning an `ExitReason` |
