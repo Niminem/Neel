@@ -17,9 +17,16 @@
 ## This module also owns the names of the `/ws` query parameters the shim
 ## sends (`TokenQueryParam`, `WindowQueryParam`) and the `/ws` path, so that
 ## Task 13's upgrade handler and `neel.js` share one definition; the `static:`
-## block verifies that the shim really uses them.
+## block verifies that the shim really uses them. The route the shim itself
+## is served at (`NeelJsPath`) lives here too.
+##
+## `requestRefusal` is the other side of the same contract: every page Neel
+## opens lives at `http://127.0.0.1:<port>`, so a request that does not look
+## like it came from such a page (another `Host`, a cross-site fetch, a `/ws`
+## upgrade from another `Origin`) is refused before routing.
 
 import std/[json, strutils]
+import ./http
 
 const
   NeelJsSource* = staticRead("neel.js")
@@ -31,12 +38,17 @@ const
   ExposedPlaceholder* = "__NEEL_EXPOSED__"
     ## Replaced by a JSON array of string literals (the exposed proc names).
   PlaceholderPrefix = "__NEEL_"
+  NeelJsPath* = "/neel.js"
+    ## Route of the rendered shim. `index.html` must load it with
+    ## `<script src="/neel.js"></script>` before the app's own scripts.
   WsPath* = "/ws"
     ## Path the shim upgrades on. Task 13 routes it to `upgrade()`.
   TokenQueryParam* = "token"
     ## `/ws` query parameter carrying the launch token (`/ws?token=...`).
   WindowQueryParam* = "window"
     ## `/ws` query parameter carrying the window id (`&window=N`).
+  LoopbackHost* = "127.0.0.1"
+    ## The only host Neel serves and opens pages at.
 
 proc jsStringLiteral*(s: string): string {.gcsafe.} =
   ## `s` as a double-quoted JSON (hence JS) string literal. Quotes,
@@ -68,6 +80,37 @@ proc renderNeelJs*(token: string; windowId: int; exposed: seq[string]): string
     (TokenPlaceholder, jsStringLiteral(token)),
     (WindowIdPlaceholder, $windowId),
     (ExposedPlaceholder, jsStringArrayLiteral(exposed)))
+
+proc isOwnHost(host: string; port: int): bool =
+  ## `host` (a `Host` value, or an `Origin` without its scheme) names this
+  ## server: `127.0.0.1:<port>`, or bare `127.0.0.1` on port 80, where
+  ## browsers omit the default port.
+  host == LoopbackHost & ":" & $port or (port == 80 and host == LoopbackHost)
+
+proc requestRefusal*(req: HttpRequest; port: int): string {.gcsafe.} =
+  ## Why `req` must be refused before routing, or `""` to serve it. `port`
+  ## is the server's bound port. Refused, in this order:
+  ## - a `Host` other than `127.0.0.1:<port>`, including none (DNS
+  ##   rebinding: the browser sends the attacker's host name);
+  ## - `Sec-Fetch-Site: cross-site` (another site's page loading `/neel.js`,
+  ##   which carries the token, through a `<script>` tag); a request without
+  ##   the header (older browsers) passes;
+  ## - a `WsPath` request whose `Origin` is not `http://127.0.0.1:<port>`,
+  ##   including none: browsers always send `Origin` on a WebSocket
+  ##   handshake and a page cannot forge it, so a token captured by another
+  ##   site is useless to it.
+  ## Pure.
+  if not isOwnHost(req.getHeader("Host"), port):
+    return "neel: refused: the Host header must be " & LoopbackHost & ":" & $port
+  if cmpIgnoreCase(req.getHeader("Sec-Fetch-Site"), "cross-site") == 0:
+    return "neel: refused: cross-site request"
+  if req.path == WsPath:
+    const scheme = "http://"
+    let origin = req.getHeader("Origin")
+    if not (origin.startsWith(scheme) and isOwnHost(origin[scheme.len .. ^1], port)):
+      return "neel: refused: the Origin header must be " & scheme & LoopbackHost &
+        ":" & $port
+  ""
 
 static:
   doAssert NeelJsSource.count(TokenPlaceholder) == 1,

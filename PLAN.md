@@ -77,6 +77,8 @@ handled outside this plan.
   - `src/neel/browser.nim` - `Browser` enum, spec table, discovery, launch
   - `src/neel/window.nim` - `Window` type, connection mapping, lifecycle
   - `src/neel/assets.nim` - disk and embedded asset serving
+  - `src/neel/testhooks.nim` - test-only replacements for the browser launch
+    and the exit-time profile sweep (not re-exported; added after Task 15)
 - The frontend shim is kept as a real `.js` file and `staticRead` at compile
   time; the placeholders (token, exposed names, window id) are substituted
   when `/neel.js` is served, since the token is per launch and the window id
@@ -1853,7 +1855,8 @@ Notes for later tasks (Tasks 14 and 15):
   never exist. Keys in the embedded table and on disk are
   byte-for-byte interchangeable (tested per fixture file).
 - Re-export list of `src/neel.nim` (exact; `std/json`, `std/options`, and
-  `requireWindow` were added by Task 15): `std/json` and `std/options`
+  `requireWindow` were added by Task 15; narrowed afterwards, see
+  "Post-implementation changes", public surface): `std/json` and `std/options`
   whole (so `getStr` / `getInt` / `.to(T)` / `%*` / `parseJson` and
   `some` / `none` / `isSome` / `get` come with `import neel`); from
   `expose`: `expose`, `NeelArgumentError`, `NeelUnknownProcError`,
@@ -2396,6 +2399,32 @@ supersede the task notes they mention.
   crashed app leaves 16-120 MB per window and Windows never cleans `%TEMP%`
   (NOTES.md 2026-10-12, which also says why not a `<tmp>/neel/` subfolder
   and not a background thread).
+- Public surface narrowed (replaces the Task 13 re-export list and the
+  `launcher` / `profileSweep` parameters above): `startApp` no longer takes
+  `launcher` or `profileSweep`, and `runApp` is private (the macro reaches
+  it through `bindSym`). The two test hooks live in
+  `src/neel/testhooks.nim` (`setTestLauncher`, `setTestProfileSweep`,
+  `testLauncher`, `testProfileSweep`, and the `ProfileSweep` type), which
+  `neel` does not re-export; `runApp` reads them once at start, `nil` means
+  the real launch and sweep. No longer exported by `neel`: `runApp`,
+  `Launcher`, `ProfileSweep`, `LaunchOptions`, `AssetSource`,
+  `NeelProtocolError`, `NeelFrameError`, `initJsProxy`, `CurrentWindow`,
+  `UseDefaultTimeout`, `NeelJsPath` (moved to `frontend.nim`). The
+  `startApp` error for `assets` / `dispatch` / `exposed` is now
+  `startApp: '<name>' is set by startApp itself`. Reason: these exist for
+  tests and internal wiring; applications never use them (NOTES.md
+  2026-10-12).
+- Request guard (adds to the "Security" decision row and Task 13's route
+  table): `frontend.requestRefusal(req, port)` runs before routing in
+  `handleRequest`; any refusal is a 403 with a plain-text reason. `Host`
+  must be `127.0.0.1:<port>` (bare `127.0.0.1` on port 80; never
+  `localhost`), `Sec-Fetch-Site: cross-site` is refused (a missing header
+  passes), and a `/ws` request needs `Origin` `http://127.0.0.1:<port>`
+  (none is refused). `frontend.LoopbackHost` is the shared constant; the
+  launch URL is built from it. Reason: without it a web page in the user's
+  browser could capture the token by loading `/neel.js` with a `<script>`
+  tag and connect to `/ws` itself, or use DNS rebinding (NOTES.md
+  2026-10-12).
 
 ---
 

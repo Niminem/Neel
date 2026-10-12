@@ -19,7 +19,7 @@ How to use this file:
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the profile sweep) | passes (Nim 2.2.12, 2026-10-12, with the profile sweep) | not run |
+| `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the profile sweep; not rerun after the public-surface change) | passes (Nim 2.2.12, 2026-10-12, with the profile sweep and the public-surface change; after the request guard only `t_frontend` and `t_neel` were rerun, both pass) | not run |
 | profile sweep manual check (see "Open items") | passes (Nim 2.2.12, 2026-10-12; release roundtrip, normal exit and `kill -9` + Cmd+Q; no `neel-*` dir left in `$TMPDIR`) | passes (Nim 2.2.12, 2026-10-12; release roundtrip with Chrome and with `@[Edge]`, normal exit and Task Manager kill; no `neel-*` dir left in `%TEMP%`) | not run |
 | `examples/filepicker` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`) | not run |
 | `examples/roundtrip` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | not run |
@@ -73,6 +73,16 @@ window; a `window=` that is not open is a 404, however many windows are
 open. Keep this in mind for anything that resolves a page to a window
 (`neelJsWindowId`, `bindConnection`, future routes).
 
+### Every request must look like it came from a Neel page
+
+`requestRefusal` (`src/neel/frontend.nim`) runs before routing: `Host`
+`127.0.0.1:<port>`, no `Sec-Fetch-Site: cross-site`, and `Origin`
+`http://127.0.0.1:<port>` on `/ws`. Never add a route in front of it, never
+serve pages at another host (`localhost`, `[::1]`) without widening it on
+purpose, and keep the launch URL built from `LoopbackHost`. A raw client in a
+test must send the real `Host` (with the port) and, for `/ws`, the
+`Origin`.
+
 ### `nimble test` and `nim c` may use different compilers
 
 On the Windows machine `nimble test` compiles with the Nim that Nimble
@@ -105,6 +115,81 @@ of the temp dir. Anything that changes where profiles live must change
 `userDataDirFor`, `parseUserDataDirName`, and the sweep together.
 
 ## Findings
+
+### 2026-10-12 - All platforms: other websites could drive a Neel app
+
+Symptom (README audit, by reading the code; not reproduced): nothing
+checked `Host`, `Origin`, or `Sec-Fetch-Site`. Browsers trim a cross-origin
+`Referer` to the origin, so with one window open a `/neel.js` request from
+another site named no window and got that window's shim, token included. A
+page in the user's browser that found the port could replace
+`window.WebSocket`, load the shim with a `<script>` tag, read the token from
+the URL the shim opened, and connect to `/ws` itself (WebSockets ignore
+CORS); `bindConnection` then displaced the real page and the site could
+call every exposed proc. DNS rebinding was a second route.
+
+Fix: `requestRefusal(req, port)` in `src/neel/frontend.nim`, called first
+in `handleRequest` (`src/neel.nim`); a refusal is a 403 with a plain-text
+reason. `Host` must be `127.0.0.1:<port>` (bare `127.0.0.1` on port 80,
+where browsers omit the default port; `localhost` is refused),
+`Sec-Fetch-Site: cross-site` is refused (a missing header passes, for
+older browsers), and a `/ws` request needs `Origin`
+`http://127.0.0.1:<port>` (none is refused: browsers always send it on a
+WebSocket handshake). The launch URL is built from the new
+`frontend.LoopbackHost`. README "Security" section added.
+
+Tests: `tests/t_frontend.nim` suite "frontend: requestRefusal" (own
+requests pass, header names case-insensitive; wrong, missing, `localhost`,
+port-less, IPv6, and suffix-spoofed `Host`; port 80; cross-site on every
+route; missing, `null`, foreign, wrong-port, `https`, `localhost`, and
+trailing-slash `Origin` on `/ws`). `tests/t_neel.nim` sends the real
+`Host` and `Origin` from its client and checks, against the running app,
+403 for a foreign `Host` and for `Sec-Fetch-Site: cross-site` on `/`,
+`/neel.js`, and the no-browser page (no token in the body), 403 for `/ws`
+upgrades with a foreign `Host`, a foreign or wrong-port `Origin`, none,
+or a cross-site fetch, and that `same-origin` / `none` still pass. Both
+pass on Windows (Nim 2.2.12); the full suite was not rerun. Real browsers
+not yet run against it (see "Open items").
+
+### 2026-10-12 - All platforms: test seams and internals removed from the public surface
+
+Symptom (README audit): `startApp` took `launcher` and `profileSweep`, two
+parameters that exist only so `tests/t_neel.nim` can run without a
+browser, and `neel` exported symbols no application uses (`runApp`,
+`Launcher`, `ProfileSweep`, `LaunchOptions`, `AssetSource`,
+`NeelProtocolError`, `NeelFrameError`, `initJsProxy`, `CurrentWindow`,
+`UseDefaultTimeout`, `NeelJsPath`).
+
+Fix: the hooks moved to `src/neel/testhooks.nim` (`setTestLauncher`,
+`setTestProfileSweep`; not re-exported), which `runApp` reads once at
+start. `runApp` is private; `startApp` reaches it through `bindSym`.
+`NeelJsPath` moved to `src/neel/frontend.nim`. The other symbols are no
+longer exported from `src/neel.nim` (still public in their own modules).
+Runtime behaviour is unchanged, so the manual example runs do not need
+repeating; `nimble test` covers it.
+
+Tests: `tests/t_neel.nim` installs its fakes through `testhooks` and
+clears them afterwards; the public-surface test now checks that `runApp`,
+`Launcher`, `AssetSource`, `initJsProxy`, `CurrentWindow`, and
+`UseDefaultTimeout` are not declared through `import neel`. `nimble test`
+passes on Windows (Nim 2.2.12); all three examples compile, and one was run
+by hand.
+
+### 2026-10-12 - All platforms: README audit against the code
+
+README checked section by section against `src/`. Corrected: `neel.onclose`
+fires after every close, including each failed reconnect attempt (a lost
+connection that never returns gives `(1006, true)` five times, then
+`(1006, false)`), not once per connection, and the `null` code case cannot
+happen (also fixed in the `neel.js` header comment); `maxMessageSize` limits
+only messages from the page (`Server.send` has no size check); the example
+commands must run from the repo root; a `browserPath` override gets the
+`launchFlags` of the first app-mode entry in `browsers`, so an Edge
+executable needs `browsers = @[Edge]`. Added: platform status, exposed
+names keep their exact spelling in JS, `js.wait` collides with a JS function
+named `wait`. Removed the `runApp` mention (not for applications). "Windows"
+section renamed "Multiple windows". Docs only; no test. Follow-ups under
+"Open items".
 
 ### 2026-10-12 - All platforms: abandoned profile dirs are swept at exit
 
@@ -439,6 +524,16 @@ added.
   and the sweep rightly skips a profile a live browser holds), run and quit
   again, and confirm the killed run's dir is gone. The POSIX `kill` /
   `SingletonLock` path runs for the first time there.
+- Request guard (2026-10-12 finding): run all three examples once with a
+  real browser on macOS and Windows (app mode and `@[Default]`, plus
+  `@[Edge]` on Windows) to confirm real `Host` / `Origin` /
+  `Sec-Fetch-Site` values pass; a refusal shows as a 403 page or a shim
+  stuck reconnecting. Then rerun `nimble test` on both.
+- Debug builds with a missing web directory start without error and serve
+  404s; only embedding checks. Should fail early.
+- The README says `js.len()`, `js.add(...)`, `js.close()`, `js.open()`, and
+  `js.alert(...)` reach the page; this comes from spike (b) on 2.2.10, before
+  `neel` re-exported `std/json` and `std/options`, and no test pins it.
 - A page that navigates away from its launch URL (dropping `?window=<id>`)
   still relies on the single-window fallback for `/neel.js`; with more than
   one window open it gets a 404. Settled behaviour (README "Windows"), noted

@@ -4,7 +4,7 @@
 ## it is verified in a browser against the server, see PLAN.md Task 10.
 
 import std/[unittest, json, strutils]
-import neel/frontend
+import neel/[frontend, http]
 
 const
   Tricky = "a\"b\\c</script><script>alert(1)</script>\n\t\u00e9"
@@ -112,3 +112,52 @@ suite "frontend: shared constants":
     for line in js.splitLines:
       check not line.startsWith("import ")
       check not line.startsWith("export ")
+
+proc req(path: string; headers: varargs[(string, string)]): HttpRequest =
+  HttpRequest(httpMethod: hmGet, path: path, headers: @headers)
+
+const
+  Own = ("Host", "127.0.0.1:8000")
+  OwnOrigin = ("Origin", "http://127.0.0.1:8000")
+
+suite "frontend: requestRefusal":
+  test "requests from Neel's own pages pass":
+    check requestRefusal(req("/", Own), 8000) == ""
+    check requestRefusal(req("/", Own, ("Sec-Fetch-Site", "none")), 8000) == ""
+    check requestRefusal(req(NeelJsPath, Own, ("Sec-Fetch-Site", "same-origin")), 8000) == ""
+    check requestRefusal(req(WsPath, Own, OwnOrigin), 8000) == ""
+    check requestRefusal(req(WsPath, ("host", "127.0.0.1:8000"),
+                             ("origin", "http://127.0.0.1:8000")), 8000) == ""
+
+  test "Host must be 127.0.0.1:<port>":
+    check requestRefusal(req("/"), 8000) != ""
+    for host in ["", "localhost:8000", "127.0.0.1", "127.0.0.1:8001",
+                 "attacker.example:8000", "127.0.0.1:8000.attacker.example",
+                 "[::1]:8000"]:
+      check requestRefusal(req("/", ("Host", host)), 8000) ==
+        "neel: refused: the Host header must be 127.0.0.1:8000"
+    check requestRefusal(req(WsPath, ("Host", "attacker.example:8000"), OwnOrigin),
+                         8000) != ""
+
+  test "port 80: browsers omit the default port":
+    check requestRefusal(req("/", ("Host", "127.0.0.1")), 80) == ""
+    check requestRefusal(req("/", ("Host", "127.0.0.1:80")), 80) == ""
+    check requestRefusal(req(WsPath, ("Host", "127.0.0.1"),
+                             ("Origin", "http://127.0.0.1")), 80) == ""
+
+  test "cross-site requests are refused, whatever the route":
+    for path in ["/", NeelJsPath, WsPath]:
+      check requestRefusal(req(path, Own, OwnOrigin, ("Sec-Fetch-Site", "cross-site")),
+                           8000) == "neel: refused: cross-site request"
+    check requestRefusal(req(NeelJsPath, Own, ("Sec-Fetch-Site", "Cross-Site")), 8000) != ""
+    check requestRefusal(req(NeelJsPath, Own, ("Sec-Fetch-Site", "same-site")), 8000) == ""
+
+  test "/ws needs this server's Origin":
+    check requestRefusal(req(WsPath, Own), 8000) ==
+      "neel: refused: the Origin header must be http://127.0.0.1:8000"
+    for origin in ["", "null", "http://attacker.example", "http://127.0.0.1:8001",
+                   "https://127.0.0.1:8000", "http://localhost:8000",
+                   "http://127.0.0.1:8000/", "127.0.0.1:8000"]:
+      check requestRefusal(req(WsPath, Own, ("Origin", origin)), 8000) != ""
+    # Origin is a WebSocket requirement only.
+    check requestRefusal(req("/", Own), 8000) == ""

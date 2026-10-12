@@ -12,6 +12,9 @@ Requirements: Nim >= 2.2.12, no external packages. Supported browsers in this
 release: Google Chrome, Chromium, and Microsoft Edge (app mode), or a tab in
 the OS default browser.
 
+Platforms: Fully verified on macOS and Windows. Linux should work but has not been
+tested yet; fixes will follow in 2.1. Edge is verified on Windows only as it is an edge-case browser on non-Windows platforms.
+
 Contents
 
 - [Installation](#installation)
@@ -20,12 +23,13 @@ Contents
 - [Exposing Nim procs to the page](#exposing-nim-procs-to-the-page)
 - [Calling the page from Nim: `js`](#calling-the-page-from-nim-js)
 - [The `neel.js` API](#the-neeljs-api)
-- [Windows](#windows)
+- [Multiple windows](#multiple-windows)
 - [Browsers and fallback](#browsers-and-fallback)
 - [Lifecycle](#lifecycle)
 - [Assets and build modes](#assets-and-build-modes)
 - [Threading model](#threading-model)
 - [`startApp` parameters](#startapp-parameters)
+- [Security](#security)
 - [Caveats](#caveats)
 - [The examples](#the-examples)
 - [Migrating from Neel 1.x](#migrating-from-neel-1x)
@@ -45,6 +49,7 @@ no compiler flags are required.
 `std/options` (`some`, `none`, `isSome`, `get`), because the API hands out
 `JsonNode` and `Option` values. Other standard modules (`std/os`,
 `std/strutils`, ...) are not re-exported; import them yourself.
+`NeelVersion` holds the library version as a string.
 
 ## Running the examples
 
@@ -56,7 +61,7 @@ git clone https://github.com/Niminem/Neel.git
 cd Neel
 ```
 
-Then, from any working directory inside the repo:
+Then, from the repository root:
 
 ```
 nim c -r examples/filepicker/filepicker.nim
@@ -70,7 +75,8 @@ window closes. A release build embeds `web/` into the binary at compile time,
 so the binary can be moved anywhere (the grace period is 10 s there):
 
 ```
-nim c -d:release examples/filepicker/filepicker.nim && ./examples/filepicker/filepicker
+nim c -d:release examples/filepicker/filepicker.nim
+./examples/filepicker/filepicker      # Windows: .\examples\filepicker\filepicker.exe
 ```
 
 The browser inherits the application's stdio (a pipe nobody reads would
@@ -221,10 +227,13 @@ Rules:
   parameters are rejected at compile time with a message at the parameter.
 - Exposed names must be unique across all modules (they become `neel.<name>`);
   a duplicate is a compile error naming both locations.
+- The JS name is the proc name exactly as spelled in its definition. Nim
+  treats `filePicker` and `file_picker` as the same name; JS does not, so
+  `proc file_picker` is `neel.file_picker`, not `neel.filePicker`.
 - `startApp` must come after every `{.expose.}` proc in the module and after
   the imports of modules that contain exposed procs. It may sit inside
-  `proc main()`. A proc exposed after the `startApp` call is not dispatched
-  (the page gets `NeelUnknownProcError`).
+  `proc main()`. Do not expose procs after the `startApp` call: they are not
+  registered, and the page cannot call them.
 - The names `call`, `send`, `expose`, `ready`, `windowId`, `close`,
   `connected`, `onclose`, `onreconnect` are reserved by the `neel` object; an
   exposed proc with one of those names is reachable only as
@@ -346,7 +355,9 @@ Escape hatch: `js.foo(...)` is sugar for `jsSend(js, "foo", @[...])` and
 name as a `string` and the arguments as a `seq[JsonNode]`. Use them for
 dynamic names and for names that collide with Nim procs: Nim's method-call
 syntax wins over the dot operator, so `js.echo("x")` calls Nim's `echo`,
-`js.repr()` calls `repr`, and `js.console.log(...)` does not compile. (`js.len()`,
+`js.repr()` calls `repr`, `js.wait(...)` is the blocking form above (a JS
+function named `wait` needs `jsSend`), and `js.console.log(...)` does not
+compile. (`js.len()`,
 `js.add(...)`, `js.close()`, `js.open()`, `js.alert(...)` reach the page as
 intended.)
 
@@ -379,7 +390,7 @@ which exists once the classic script has run.
 | `neel.ready` | Promise resolved on the first successful connection; rejected with `NeelDisconnectedError` if the shim gives up or is closed before ever connecting (nobody has to await it) |
 | `neel.windowId` | the window's id (a positive number) |
 | `neel.connected` | `true` while the WebSocket is open |
-| `neel.onclose(fn)` | `fn(code, reconnecting)` is called exactly once per lost or closed connection: `code` is the WebSocket close code (1006 lost, 1000 `neel.close()` / `closeWindow`, 1001 shutdown; `null` only if the shim gave up without a socket event), `reconnecting` is `true` when a retry follows |
+| `neel.onclose(fn)` | `fn(code, reconnecting)` is called after every close, including each failed reconnect attempt: `code` is the WebSocket close code (1006 lost, 1000 `neel.close()` / `closeWindow`, 1001 shutdown), `reconnecting` is `true` when another attempt follows and `false` on the last call |
 | `neel.onreconnect(fn)` | `fn()` is called after every successful connection except the first (which resolves `neel.ready`) |
 | `neel.close()` | closes the connection with code 1000 and makes every later call reject; the shim does not reconnect |
 
@@ -431,10 +442,10 @@ a `call` without an `id` is fire-and-forget):
 {"t":"call", "name":"logThis", "args":["hi"]}
 ```
 
-Messages larger than `maxMessageSize` (default 16 MiB, configurable in
-`startApp`) are refused (the server closes with 1009 and the shim reconnects).
+Messages from the page larger than `maxMessageSize` (default 16 MiB,
+configurable in `startApp`) are refused (the server closes with 1009 and the shim reconnects).
 
-## Windows
+## Multiple windows
 
 Each browser window is a `Window` handle: a copyable object with an `id`
 (positive, unique for the life of the app, never reused) and a `js` field
@@ -443,7 +454,7 @@ Each browser window is a `Window` handle: a copyable object with an `id`
 | Proc | Description |
 |---|---|
 | `openWindow(path = "/", size = none(WindowSize), position = none(WindowPosition), extraFlags: seq[string] = @[]): Window` | opens a new browser window at `path` (relative to the web root; a query or fragment is kept) and returns its handle; `size` / `position` override the `startApp` defaults, `extraFlags` are appended. Raises `NeelBrowserError` if no browser can be launched, `ValueError` for a non-positive size. Blocks only for the process launch itself. |
-| `closeWindow(w)` | sends a 1000 close to the page (the shim does not reconnect), terminates the browser process, removes its profile directory, fires `onWindowClose`. Idempotent; a no-op for an unknown id. Blocks for the process to exit (about 100 ms, up to 3 s if the browser ignores SIGTERM). |
+| `closeWindow(w)` | sends a 1000 close to the page (the shim does not reconnect), terminates the browser process, removes its profile directory, fires `onWindowClose`. Idempotent; a no-op for an unknown id. Blocks for the process to exit (about 100 ms, up to 3 s if the browser does not exit when asked). |
 | `windows(): seq[Window]` | every window not yet closed, in id order, including windows still loading and windows whose connection dropped less than a grace period ago |
 | `window(id): Option[Window]` | the open window with this id, or `none` |
 | `requireWindow(id): Window` | the same, but raises `NeelNoWindowError` (`window 7 is not open`) for an unknown or closed id; use this in exposed procs so a stale id answers the page with a structured error instead of the `UnpackDefect` of `window(id).get` |
@@ -535,9 +546,11 @@ startApp(browsers = @[Chrome, Chromium, Edge], fallback = true, browserPath = ""
   (`chrome.exe` for Chrome, `msedge.exe` for Edge; none for Chromium); Linux
   and BSD `google-chrome`, `google-chrome-stable`, `chrome`, `chromium`,
   `chromium-browser`, `microsoft-edge`, `microsoft-edge-stable` on `PATH`.
-- `browserPath` overrides discovery with an explicit executable, launched with
-  Chrome-style app-mode flags. The path must exist, otherwise `startApp`
-  raises `NeelBrowserError` before anything is bound.
+- `browserPath` overrides discovery with an explicit executable, launched in
+  app mode with the browser flags (below) of the first app-mode browser in
+  `browsers`; with the default list that is Chrome, which has none. For an
+  Edge executable also pass `browsers = @[Edge]`. The path must exist,
+  otherwise `startApp` raises `NeelBrowserError` before anything is bound.
 - `fallback = true` (default): when nothing in the list is found, the app
   opens in a default-browser tab. `fallback = false`: a default-browser tab is
   opened at the built-in page `/neel/no-browser` listing every location that
@@ -668,7 +681,7 @@ window managers already hide the terminal of a backgrounded process.
   `currentWindow()` inside an exposed proc, `windows()`, or `openWindow`);
   `Window` is a plain object and can be passed to a `Thread`. A `js` call to
   a window that has gone away raises `NeelNoWindowError`.
-- Hooks run on the thread that observes the event (see [Windows](#windows)).
+- Hooks run on the thread that observes the event (see [Multiple windows](#multiple-windows)).
 - Sizing `workers`: every `js.wait` and every slow exposed proc occupies a
   worker for its duration; `workers` is the number of such calls that can be
   in flight at once. The default 64 handles the stress test's 500 concurrent
@@ -702,19 +715,36 @@ is that `webDir` may be given positionally (`startApp("web", port = 8000)`).
 | `extraFlags` | `@[]` | extra command-line flags for app-mode windows |
 | `onWindowOpen` | `nil` | `WindowHook` fired when a window's page first connects |
 | `onWindowClose` | `nil` | `WindowHook` fired when a window is closed or retired |
-| `launcher` | `nil` | test seam replacing the browser launch (`Launcher` type); tests inject a fake |
-| `profileSweep` | `nil` | test seam replacing the exit-time cleanup of abandoned profile directories (`ProfileSweep` type) |
 
 `startApp` raises `NeelBrowserError` (no browser and `fallback = false`, or a
 bad `browserPath`), `OSError` (the port is taken), or `ValueError` (a
 non-positive size); everything has been torn down when the exception leaves.
-`runApp` is the ordinary proc behind the macro, for programs that build the
-dispatcher and asset source themselves.
 
 Compile-time errors from the macro point at your `startApp(...)` line: a
-non-constant `embedAssets`, a positional argument other than `webDir`, a
-missing web directory when embedding, or passing `assets` / `dispatch` /
-`exposed` (which `startApp` sets itself).
+non-constant `embedAssets`, a positional argument other than `webDir`, or a
+missing web directory when embedding.
+
+## Security
+
+The server listens on `127.0.0.1` only, so other machines cannot reach it.
+Each start generates a random token that a page must present to open its
+WebSocket, and every request is checked before it is served:
+
+- the `Host` header must be `127.0.0.1:<port>`, which defeats DNS rebinding;
+- a request marked `Sec-Fetch-Site: cross-site` is refused, so another
+  website cannot load `/neel.js` (which carries the token);
+- the WebSocket upgrade must come from a page at `http://127.0.0.1:<port>`
+  (its `Origin`), so the token is useless to any other website.
+
+A refused request gets a 403. This keeps other websites open in the user's
+browser away from your app. It also means the app works only at the URL Neel
+opens: `http://localhost:<port>` typed by hand is refused.
+
+Neel trusts the local machine. Other programs and users on the same computer
+can send any headers, fetch `/neel.js`, and read the browser's command line,
+so they can reach your exposed procs. An exposed proc can do anything your
+app can: treat its arguments as untrusted input, and do not expose procs that
+run arbitrary commands or touch arbitrary paths without checking them.
 
 ## Caveats
 
@@ -747,11 +777,12 @@ missing web directory when embedding, or passing `assets` / `dispatch` /
   (retirement, teardown) it escapes `startApp`. Catch inside the hook.
 - Re-using a `Thread[T]` variable for a second run requires `joinThread` after
   the first finished; `examples/stresstest` shows the lock + flag pattern.
-- One WebSocket message (a call or a reply, as JSON text) may be at most
-  `maxMessageSize` (default 16 MiB, configurable in `startApp`); the request
-  header block at most 16 KiB.
+- A message from the page (a call, or a reply to `js.wait`, as JSON text)
+  may be at most `maxMessageSize` (default 16 MiB, configurable in
+  `startApp`); messages from Nim to the page are not limited. An HTTP
+  request's header block may be at most 16 KiB.
 - A page must not set a `no-referrer` referrer policy and should not use a
-  `window` query parameter of its own (see [Windows](#windows)).
+  `window` query parameter of its own (see [Multiple windows](#multiple-windows)).
 - With `browsers = @[Default]` or after a fallback, the app runs in an
   ordinary browser tab: `size`, `position`, and `extraFlags` do not apply and
   the browser process is not tracked, so `closeWindow` disconnects the tab

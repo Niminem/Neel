@@ -1,11 +1,12 @@
 ## t_neel.nim - end-to-end smoke test of `startApp` through the public surface.
 ##
-## `startApp` runs on a thread with a fake launcher injected (no browser ever
-## starts); the fake receives the launch URL exactly like a browser would and
+## `startApp` runs on a thread with a fake launcher installed through
+## `neel/testhooks` (no browser ever starts); the fake receives the launch URL exactly like a browser would and
 ## hands the ephemeral port to the test thread. The test thread then plays the
 ## browser with a scripted HTTP/WebSocket client: fetches `/neel.js` (with and
 ## without a `Referer`), the index page, a nested asset, a 404, a 405, the
-## no-browser page, is refused on `/ws` with a wrong token or window, upgrades
+## no-browser page, is refused on `/ws` with a wrong token or window and on
+## every route with a foreign `Host`, `Origin`, or cross-site fetch, upgrades
 ## with the right ones, calls exposed procs, answers a Nim -> JS call, opens
 ## and closes a second window (a stale page of a closed window gets a 404
 ## shim, never the surviving window's), and
@@ -19,7 +20,7 @@ import std/[unittest, locks, os, monotimes, times, typedthreads, net,
 # file uses `%`, `getInt`, `some`, `isNone`, ... through `import neel`'s
 # re-export, so the whole suite checks that applications get them for free.
 import neel
-import neel/[protocol, websocket, frontend, browser]
+import neel/[protocol, websocket, frontend, browser, testhooks]
 
 const
   IoTimeout = 3000
@@ -61,7 +62,7 @@ type
     workersSeen: int        # workers that ran `markWorker`
     workersExited: int      # ... and have since exited
     exitedAtWindowClose: int  # `workersExited` when `onWindowClose` ran
-    sweeps: int             # `profileSweep` calls
+    sweeps: int             # `recordSweep` calls
     sweepOpenWindows: int   # `windows().len` when it ran
     sweepDirsLeft: int      # launched profile dirs still on disk when it ran
     sweepExited: int        # `workersExited` when it ran
@@ -102,7 +103,7 @@ proc recordWindowClose(w: Window) {.gcsafe.} =
     release shared.lock
 
 proc recordSweep() {.gcsafe.} =
-  ## `profileSweep`: must run once, last, with every window, profile dir, and
+  ## The test profile sweep: must run once, last, with every window, profile dir, and
   ## worker of the run already gone, and before `startApp` returns.
   {.cast(gcsafe).}:
     let open = windows().len
@@ -143,6 +144,8 @@ proc appThread(run: int) {.thread.} =
   ## `{.cast(gcsafe).}` is only because `startApp` is not meant to run on a
   ## thread; the test thread never touches Neel's state directly.
   {.cast(gcsafe).}:
+    setTestLauncher(fakeLaunch)
+    setTestProfileSweep(recordSweep)
     try:
       case run
       of 1:
@@ -150,18 +153,19 @@ proc appThread(run: int) {.thread.} =
                               browsers = @[], gracePeriodMs = Grace,
                               startupTimeoutMs = 2000, callTimeoutMs = 2000,
                               workers = 4, queueCapacity = 32,
-                              launcher = fakeLaunch, profileSweep = recordSweep,
                               onWindowClose = recordWindowClose)
         finish(reason)
       else:
         let reason = startApp("fixtures/web", embedAssets = true,
                               browsers = @[], gracePeriodMs = Grace,
                               startupTimeoutMs = 2000, callTimeoutMs = 2000,
-                              workers = 4, queueCapacity = 32,
-                              launcher = fakeLaunch, profileSweep = recordSweep)
+                              workers = 4, queueCapacity = 32)
         finish(reason)
     except CatchableError as e:
       finish(erStartupTimeout, "startApp raised " & $e.name & ": " & e.msg)
+    finally:
+      setTestLauncher(nil)
+      setTestProfileSweep(nil)
 
 proc resetShared() =
   acquire shared.lock
@@ -228,13 +232,18 @@ proc header(r: HttpReply; name: string): string =
       return v
   ""
 
+proc ownHost(port: int): string =
+  "127.0.0.1:" & $port
+
 proc http(port: int; target: string; httpMethod = "GET";
-          headers: seq[(string, string)] = @[]): HttpReply =
+          headers: seq[(string, string)] = @[]; host = ""): HttpReply =
   ## One request on its own connection (`Connection: close`), read to EOF.
+  ## `host` replaces the `Host` a Neel page would send.
   let sock = newSocket(buffered = false)
   defer: sock.close()
   sock.connect("127.0.0.1", Port(port))
-  var text = httpMethod & " " & target & " HTTP/1.1\r\nHost: 127.0.0.1\r\n" &
+  var text = httpMethod & " " & target & " HTTP/1.1\r\nHost: " &
+             (if host.len > 0: host else: ownHost(port)) & "\r\n" &
              "Connection: close\r\n"
   for (k, v) in headers:
     text.add k & ": " & v & "\r\n"
@@ -256,17 +265,30 @@ proc http(port: int; target: string; httpMethod = "GET";
     result.headers.add((line[0 ..< colon], line[colon + 1 .. ^1].strip()))
   result.body = raw[headerEnd + 4 .. ^1]
 
-proc handshake(port: int; token: string; windowId: int):
+const OwnOrigin = "<own>"
+  ## `handshake`'s default: the `Origin` a Neel page sends.
+
+proc handshake(port: int; token: string; windowId: int; host = "";
+               origin = OwnOrigin; headers: seq[(string, string)] = @[]):
     tuple[client: WsClient; status: string] =
+  ## A WebSocket upgrade as a Neel page sends it. `host` replaces the `Host`,
+  ## `origin` the `Origin` (`""` sends none), `headers` are added.
   result.client.sock = newSocket(buffered = false)
   result.client.sock.connect("127.0.0.1", Port(port))
   result.client.decoder = initFrameDecoder(frClient)
-  result.client.sock.send(
-    "GET " & WsPath & "?" & TokenQueryParam & "=" & token & "&" &
-    WindowQueryParam & "=" & $windowId & " HTTP/1.1\r\nHost: 127.0.0.1\r\n" &
+  var text = "GET " & WsPath & "?" & TokenQueryParam & "=" & token & "&" &
+    WindowQueryParam & "=" & $windowId & " HTTP/1.1\r\nHost: " &
+    (if host.len > 0: host else: ownHost(port)) & "\r\n" &
     "Upgrade: websocket\r\nConnection: Upgrade\r\n" &
     "Sec-WebSocket-Key: " & RfcKey & "\r\n" &
-    "Sec-WebSocket-Version: 13\r\n\r\n")
+    "Sec-WebSocket-Version: 13\r\n"
+  let o = if origin == OwnOrigin: "http://" & ownHost(port) else: origin
+  if o.len > 0:
+    text.add "Origin: " & o & "\r\n"
+  for (k, v) in headers:
+    text.add k & ": " & v & "\r\n"
+  text.add "\r\n"
+  result.client.sock.send(text)
   result.status = result.client.sock.recvLine(IoTimeout)
   while true:
     let line = result.client.sock.recvLine(IoTimeout)
@@ -412,6 +434,34 @@ suite "neel: startApp end to end":
       check noToken.status.startsWith("HTTP/1.1 403")
       noToken.client.sock.close()
       check http(port, WsPath).status == 403
+
+      # Requests that did not come from a Neel page are refused before any
+      # route sees them (NOTES.md, 2026-10-12): another host name (DNS
+      # rebinding), another site's page, a WebSocket from another origin.
+      for target in ["/", NeelJsPath, NoBrowserPath]:
+        for host in ["attacker.example:" & $port, "localhost:" & $port, "127.0.0.1"]:
+          let rebound = http(port, target, host = host)
+          check rebound.status == 403
+          check rebound.body == "neel: refused: the Host header must be " & ownHost(port)
+        let crossSite = http(port, target, headers = @[("Sec-Fetch-Site", "cross-site")])
+        check crossSite.status == 403
+        check crossSite.body == "neel: refused: cross-site request"
+        check token notin crossSite.body
+      check http(port, NeelJsPath, headers = @[("Sec-Fetch-Site", "same-origin")]).body ==
+        shim.body
+      check http(port, "/", headers = @[("Sec-Fetch-Site", "none")]).status == 200
+      let noHeaders = newSeq[(string, string)]()
+      for (host, origin, extra) in [
+          ("attacker.example:" & $port, OwnOrigin, noHeaders),
+          ("", "http://attacker.example", noHeaders),
+          ("", "http://127.0.0.1:" & $(port + 1), noHeaders),
+          ("", "", noHeaders),
+          ("", OwnOrigin, @[("Sec-Fetch-Site", "cross-site")])]:
+        let refused = handshake(port, token, 1, host = host, origin = origin,
+                                headers = extra)
+        check refused.status.startsWith("HTTP/1.1 403")
+        refused.client.sock.close()
+
       var (c, status) = handshake(port, token, 1)
       check status.startsWith("HTTP/1.1 101")
 
@@ -562,10 +612,9 @@ suite "neel: startApp end to end":
 
   test "the public surface re-exports what applications need":
     check NeelVersion == "2.0.0"
-    check NeelJsPath == "/neel.js"
     check DefaultGracePeriodMs >= MinGracePeriodMs
     check DefaultMaxMessageSize == 16 * 1024 * 1024
-    check js.windowId == CurrentWindow
+    check currentWindowId() == NoWindow
     check compiles(openWindow("/x"))
     check compiles(closeWindow(Window(id: 1, js: js)))
     check compiles(windows())
@@ -576,7 +625,6 @@ suite "neel: startApp end to end":
     check compiles(js.wait(100).foo(1))
     check compiles(jsSend(js, "echo", @[%1]))
     check compiles(some((800, 600)) is Option[WindowSize])
-    check compiles(LaunchOptions(extraFlags: @["--x"]))
     check compiles(@[Chrome, Chromium, Default])
     # std/json and std/options come with `import neel` (see the import list).
     check (%*{"a": 1, "b": [1, 2]})["b"][1].getInt == 2
@@ -593,9 +641,15 @@ suite "neel: startApp end to end":
     check NeelDisconnectedError is CatchableError
     check NeelRemoteError is CatchableError
     check NeelBrowserError is CatchableError
-    check NeelProtocolError is CatchableError
-    check NeelFrameError is CatchableError
-    # Internal wiring stays internal.
+    # Internal wiring stays internal. (`NeelProtocolError`, `NeelFrameError`,
+    # `LaunchOptions`, `NeelJsPath`, and the test hooks are reachable here
+    # only through this file's `neel/*` imports.)
+    check not declared(runApp)
+    check not declared(Launcher)
+    check not declared(AssetSource)
+    check not declared(initJsProxy)
+    check not declared(CurrentWindow)
+    check not declared(UseDefaultTimeout)
     check not compiles(initWindows())
     check not compiles(bindConnection(1, 1))
     check not compiles(connectionOpened(1))

@@ -4,8 +4,8 @@
 ## and re-exports the user-facing pieces of the internal modules under
 ## `neel/`: the `expose` pragma, the `js` proxy, the window API (`openWindow`,
 ## `closeWindow`, `windows`, `window`, `requireWindow`, `currentWindow`), the
-## `Browser` enum and launch option types, `quitApp`, and the `Neel*Error`
-## exception types. It also re-exports `std/json` and `std/options`, because
+## `Browser` enum and window size / position types, `quitApp`, and the
+## `Neel*Error` exception types an application can see. It also re-exports `std/json` and `std/options`, because
 ## the API hands out `JsonNode` (`js.wait.foo(...)`) and `Option` (`window(id)`,
 ## `size = some((800, 600))`) values that an application needs to unpack.
 ##
@@ -13,7 +13,7 @@
 ## bound with `{.expose.}` (so it must be called after them and after the
 ## imports of modules that contain them; it may sit inside `main()`), picks
 ## the asset mode at compile time (`embedAssets`), and forwards every other
-## keyword argument verbatim to `runApp`, the ordinary proc that wires the
+## keyword argument verbatim to `runApp`, the private proc that wires the
 ## server, protocol, window, and browser modules together and blocks the
 ## calling thread until the last window closes (plus the grace period),
 ## `quitApp()` is called, or no window ever connects. All IO and all exposed
@@ -21,7 +21,10 @@
 ## workers runs the hooks and the exposed procs, and `js.wait.*` may be used
 ## from any thread that knows a window.
 ##
-## Routes served by `runApp`'s request handler (all on `127.0.0.1`):
+## Routes served by `runApp`'s request handler (all on `127.0.0.1`). Every
+## request first passes `frontend.requestRefusal` (`Host` must be
+## `127.0.0.1:<port>`, no `Sec-Fetch-Site: cross-site`, and for `/ws` an
+## `Origin` of `http://127.0.0.1:<port>`), otherwise 403:
 ## - `/ws`: the WebSocket upgrade; requires the launch token and a known
 ##   window id in the query, otherwise 403.
 ## - `/neel.js`: the browser shim rendered for one window (token, window id,
@@ -31,6 +34,9 @@
 ## - `/neel/no-browser`: the page shown when no browser was found and
 ##   `fallback = false`.
 ## - everything else: the web directory through `neel/assets`.
+##
+## Tests replace the browser launch and the exit-time profile sweep through
+## `neel/testhooks`, which is not re-exported.
 ##
 ## Everything else lives in `neel/*.nim`; see `PLAN.md` "Module layout" for
 ## the responsibility of each.
@@ -42,8 +48,8 @@ when (NimMajor, NimMinor, NimPatch) < (2, 2, 12):
 
 import std/[json, options, strutils, sysrand, uri, macros, os]
 import neel/[http, server, pool, protocol, expose, jsproxy, frontend, browser,
-             window, assets]
-from neel/websocket import NeelFrameError, DefaultMaxMessageSize
+             window, assets, testhooks]
+from neel/websocket import DefaultMaxMessageSize
 
 # --- re-exports ------------------------------------------------------------------
 
@@ -57,32 +63,24 @@ export expose.expose, NeelArgumentError, NeelUnknownProcError
 export fromJsonHook, toJsonHook
 export jsproxy except initJsBridge, resetJsBridge, SendProc, WindowResolver,
                       WindowRoute, setCurrentWindow, clearCurrentWindow,
-                      withCurrentWindow
-export window.Window, ExitReason, WindowHook, Launcher, openWindow, closeWindow,
+                      withCurrentWindow, initJsProxy, CurrentWindow,
+                      UseDefaultTimeout
+export window.Window, ExitReason, WindowHook, openWindow, closeWindow,
        windows, window.window, requireWindow, currentWindow, isOpen,
        isConnected, quitApp, connectionCount, DefaultGracePeriodMs,
        MinGracePeriodMs, DefaultStartupTimeoutMs
-export Browser, NeelBrowserError, LaunchOptions, WindowSize, WindowPosition
-export NeelProtocolError, NeelTimeoutError, NeelDisconnectedError, NeelRemoteError
-export NeelFrameError
+export Browser, NeelBrowserError, WindowSize, WindowPosition
+export NeelTimeoutError, NeelDisconnectedError, NeelRemoteError
 export DefaultWorkers, DefaultQueueCapacity, DefaultMaxMessageSize
-export AssetSource
 
 const
   NeelVersion* = "2.0.0"
     ## Library version string, kept in sync with `neel.nimble`.
-  NeelJsPath* = "/neel.js"
-    ## Route of the rendered browser shim. `index.html` must load it with
-    ## `<script src="/neel.js"></script>` before the app's own scripts.
   TokenBytes = 16
     ## Random bytes in the launch token (rendered as 32 lowercase hex chars,
     ## so the `/ws` query needs no percent-decoding).
 
 type
-  ProfileSweep* = proc() {.gcsafe.}
-    ## What `runApp` runs at exit to delete abandoned profile dirs; `nil`
-    ## means `sweepProfiles()`. A test seam like `Launcher`.
-
   AppState = object
     ## Everything the hooks need, written once by `runApp` before `listen`
     ## and cleared during `shutdown`, once no hook can be running. Hooks
@@ -239,8 +237,11 @@ proc neelJsWindowId(req: HttpRequest): tuple[id, named: int] =
     result.id = open[0].id
 
 proc handleRequest(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
-  ## The route table (see the module header).
+  ## The route table (see the module header), behind `requestRefusal`.
   let a = appPtr()
+  let refusal = requestRefusal(req, a.srv.port)
+  if refusal.len > 0:
+    return respond(initResponse(403, refusal, "text/plain"))
   if req.path == WsPath:
     return handleWs(a, conn, req)
   if req.httpMethod notin {hmGet, hmHead}:
@@ -312,7 +313,7 @@ proc sweepAbandonedProfiles(sweep: ProfileSweep) =
   except CatchableError:
     discard
 
-proc runApp*(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
+proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
              startPath = "/"; port = 0; workers = DefaultWorkers;
              queueCapacity = DefaultQueueCapacity;
              callTimeoutMs = DefaultCallTimeoutMs;
@@ -322,25 +323,25 @@ proc runApp*(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
              browsers = @[Chrome, Chromium, Edge]; fallback = true; browserPath = "";
              size = none(WindowSize); position = none(WindowPosition);
              extraFlags: seq[string] = @[];
-             onWindowOpen: WindowHook = nil; onWindowClose: WindowHook = nil;
-             launcher: Launcher = nil;
-             profileSweep: ProfileSweep = nil): ExitReason {.discardable.} =
-  ## The proc behind `startApp`; call `startApp` instead unless you build
-  ## the dispatcher and asset source yourself (tests do). Blocks the calling
-  ## thread and returns why the app ended. Sequence: `findBrowser` (fails
-  ## fast on a bad `browserPath`), token, `newPendingTable`, `newServer`,
-  ## `initJsBridge`, `listen`, `initWindows`, `openWindow(startPath)`,
-  ## `waitForAppExit`; then always `shutdown` with `releaseSharedState` as
-  ## its `beforeJoin` (`resetJsBridge`, `teardownWindows`, the table is
-  ## dropped), and last `profileSweep` (`nil` = `sweepProfiles()`: delete
-  ## profile dirs abandoned by killed or crashed apps, within
-  ## `SweepBudgetMs`). `launcher` replaces the
-  ## browser launch (tests inject a fake); `nil` launches for real. When no
-  ## browser is found and `fallback` is `false`, the error page has been
-  ## opened in the default browser: it is served for `gracePeriodMs`, then
-  ## the `NeelBrowserError` propagates after teardown.
+             onWindowOpen: WindowHook = nil;
+             onWindowClose: WindowHook = nil): ExitReason {.discardable.} =
+  ## The proc behind `startApp`, which reaches it through `bindSym`. Blocks
+  ## the calling thread and returns why the app ended. Sequence:
+  ## `findBrowser` (fails fast on a bad `browserPath`), token,
+  ## `newPendingTable`, `newServer`, `initJsBridge`, `listen`, `initWindows`,
+  ## `openWindow(startPath)`, `waitForAppExit`; then always `shutdown` with
+  ## `releaseSharedState` as its `beforeJoin` (`resetJsBridge`,
+  ## `teardownWindows`, the table is dropped), and last the profile sweep
+  ## (`sweepProfiles()`: delete profile dirs abandoned by killed or crashed
+  ## apps, within `SweepBudgetMs`). `testhooks` may replace the browser
+  ## launch and the sweep (tests inject fakes); both are read once here.
+  ## When no browser is found and `fallback` is `false`, the error page has
+  ## been opened in the default browser: it is served for `gracePeriodMs`,
+  ## then the `NeelBrowserError` propagates after teardown.
   doAssert not dispatch.isNil, "runApp: dispatch is nil"
   doAssert not app.running, "startApp is already running in this process"
+  let launcher = testLauncher()
+  let profileSweep = testProfileSweep()
   let search = findBrowser(browsers, browserPath)
   app = AppState(running: true, token: newToken(), search: search,
                  fallback: fallback, assets: assets, dispatch: dispatch,
@@ -353,7 +354,7 @@ proc runApp*(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   try:
     initJsBridge(appSend, resolveWindow, app.tbl, callTimeoutMs)
     app.srv.listen(port)
-    let base = "http://127.0.0.1:" & $app.srv.port
+    let base = "http://" & LoopbackHost & ":" & $app.srv.port
     initWindows(appClose, app.tbl, base, search, fallback,
                 LaunchOptions(size: size, position: position, extraFlags: extraFlags),
                 gracePeriodMs, startupTimeoutMs, launcher, onWindowOpen,
@@ -411,13 +412,11 @@ macro startApp*(args: varargs[untyped]): untyped =
   ##   `size = none(WindowSize)`, `position = none(WindowPosition)`,
   ##   `extraFlags: seq[string] = @[]`.
   ## - `onWindowOpen`, `onWindowClose: WindowHook = nil`.
-  ## - `launcher: Launcher = nil`: test seam replacing the browser launch.
-  ## - `profileSweep: ProfileSweep = nil`: test seam replacing the exit-time
-  ##   sweep of abandoned profile dirs.
   ##
   ## Everything except `webDir` and `embedAssets` is forwarded verbatim to
-  ## `runApp`. Must come after every `{.expose.}` proc and after the imports
-  ## of modules that contain them (a proc exposed later is not dispatched).
+  ## the private `runApp`. Must come after every `{.expose.}` proc and after
+  ## the imports of modules that contain them (a proc exposed later is not
+  ## dispatched).
   let callerDir = parentDir(args.lineInfoObj.filename)
   var webDir = newLit("web")
   var embed = newCall(ident"defined", ident"release")
@@ -434,8 +433,7 @@ macro startApp*(args: varargs[untyped]): untyped =
         embed = a[1]
       elif name.eqIdent("assets") or name.eqIdent("dispatch") or
           name.eqIdent("exposed"):
-        error("startApp: '" & name.strVal & "' is set by startApp itself; " &
-              "call runApp directly to override it", a)
+        error("startApp: '" & name.strVal & "' is set by startApp itself", a)
       else:
         forwarded.add a
     else:

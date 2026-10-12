@@ -25,11 +25,10 @@
 //   neel.onreconnect(fn)       -> fn() after every successful open but the first
 //
 // Connection state for a page that wants to show it: `neel.ready` covers the
-// first open; `neel.onclose` fires once per lost or closed connection with the
-// WebSocket close code (1006 for a lost connection, 1000/1001 for a deliberate
-// close, null when the shim gave up without a socket event) and whether a
-// reconnect attempt follows; `neel.onreconnect` fires when such an attempt
-// succeeds. A listener that throws is reported with console.warn and ignored.
+// first open; `neel.onclose` fires after every close, including each failed
+// reconnect attempt, with the WebSocket close code (1006 for a lost
+// connection, 1000/1001 for a deliberate close) and whether another reconnect
+// attempt follows; `neel.onreconnect` fires when such an attempt succeeds. A listener that throws is reported with console.warn and ignored.
 //
 // Errors: a rejected call carries an Error whose `name` (and `kind`) is the
 // Nim exception type ("ValueError", "NeelArgumentError", ...) and whose
