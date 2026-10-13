@@ -33,7 +33,7 @@ handled outside this plan.
 | Area | Decision |
 |---|---|
 | Compatibility | Clean break. No `exposeProcs`, `callJs`, or `callNim`. README rewritten. |
-| Repository | Rewrite on the `neel2-devel` branch (forked from `master` after the `init neel 2.0` reset); merged into `master` once every task is implemented and verified on macOS and Windows _(Linux verification moved to 2.1; see "Post-implementation changes")_. 1.x is preserved by tag `v1.1.0`. |
+| Repository | Rewrite on the `neel2-devel` branch (forked from `master` after the `init neel 2.0` reset); merged into `master` once every task is implemented and verified on macOS and Windows _(Linux verification was moved to 2.1, then done before the merge on Ubuntu; see "Post-implementation changes")_. 1.x is preserved by tag `v1.1.0`. |
 | Nim / dependencies | Nim >= 2.2.12 _(raised from 2.2.0 during verification: older allocators crash when a block is freed after its thread exited; see "Post-implementation changes")_. Zero external dependencies (hand-rolled SHA-1). |
 | Server | Own HTTP/1.1 + WebSocket server. Single IO thread on `std/selectors`, configurable worker pool. Binds `127.0.0.1` only. |
 | Exposure | `{.expose.}` pragma on top-level procs. Emits an exported `<name>NeelSym` wrapper plus a `neelRegister` call. Compile-time registry of bound symbols; `startApp` generates the dispatch. |
@@ -2287,9 +2287,9 @@ Post-task additions (after manual browser verification on macOS):
   context notes.
 
 What remains outside this plan: the merge of `neel2-devel` into `master`
-and the 2.0.0 release (tag, nimble publish). macOS and Windows are verified
-(see the verification matrix in `NOTES.md`); the Linux verification pass
-moved to 2.1 (see "Post-implementation changes").
+and the 2.0.0 release (tag, nimble publish). macOS, Windows, and Linux
+(Ubuntu) are verified (see the verification matrix in `NOTES.md` and
+"Post-implementation changes").
 Candidates for a later version (not planned): `Brave` / `Opera` /
 `Vivaldi` specs, `wss:`, a JS-side unit test
 runner for `neel.js` once a JS runtime is acceptable as a dev dependency,
@@ -2447,6 +2447,13 @@ supersede the task notes they mention.
   compile checks) but is not run by hand until 2.1, which carries the full
   Linux pass from `NOTES.md` "Open items" and any fixes it produces. The
   README already states this. Decided 2026-10-12.
+- Linux verified (supersedes the Linux part of "Release scope" above):
+  `nimble test` and all three examples with their manual checks pass on
+  Ubuntu (Nim 2.2.12, 2026-10-12, at `5c0bab4`), so 2.0 is verified on
+  macOS, Windows, and Linux and 2.1 no longer carries a Linux pass. The
+  profile sweep manual check was not run on Linux and is assumed to work
+  (`NOTES.md` "Open items"). Edge stays verified on Windows only. README,
+  guide, and the project rule updated.
 
 ---
 
