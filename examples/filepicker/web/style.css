@@ -1,0 +1,33 @@
+body {
+  font: 16px/1.5 system-ui, sans-serif;
+  max-width: 40em;
+  margin: 3em auto;
+  padding: 0 1em;
+  color: #222;
+}
+
+form {
+  display: flex;
+  gap: 0.5em;
+}
+
+input {
+  flex: 1;
+  font: inherit;
+  padding: 0.4em 0.6em;
+}
+
+button {
+  font: inherit;
+  padding: 0.4em 1em;
+}
+
+.result {
+  font-family: ui-monospace, monospace;
+  font-size: 1.2em;
+}
+
+.error {
+  color: #b00020;
+  font-family: ui-monospace, monospace;
+}

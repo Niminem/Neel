@@ -1,3 +1,33 @@
+# OS
 .DS_Store
+
+# Nim build artifacts
+nimcache/
 *.exe
+*.dll
+*.so
+*.dylib
+*.o
+*.obj
+*.pdb
+*.ilk
+*.ndb
+testresults/
+# Test binaries left beside their sources by `nim c -r tests/t_x.nim`
+# (nimble test deletes its own).
+tests/t_*
+!tests/t_*.nim
+/bin/
+
+# Compiled example binaries: examples/<name>/<name> (debug and release share
+# the name) and *.exe. Only each example's .nim file and web/ folder are
+# tracked.
+examples/*/*
+!examples/*/*.nim
+!examples/*/web/
+
+# Misc
 *.txt
+nimble.develop
+nimble.paths
+nimbledeps

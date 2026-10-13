@@ -1,0 +1,39 @@
+body {
+  font: 16px/1.5 system-ui, sans-serif;
+  max-width: 44em;
+  margin: 2em auto;
+  padding: 0 1em;
+  color: #222;
+}
+
+h1 small {
+  font-size: 0.5em;
+  color: #666;
+  font-weight: normal;
+}
+
+section {
+  border-top: 1px solid #ddd;
+  padding-top: 0.5em;
+}
+
+button,
+input {
+  font: inherit;
+  padding: 0.3em 0.7em;
+}
+
+output {
+  margin-left: 0.5em;
+  font-family: ui-monospace, monospace;
+}
+
+.hint {
+  color: #555;
+  font-size: 0.9em;
+}
+
+.error {
+  color: #b00020;
+  font-family: ui-monospace, monospace;
+}
