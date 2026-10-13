@@ -21,7 +21,7 @@ Features:
 - Zero dependencies: the Nim standard library only
 - Hardened against other websites open in the same browser
 
-Neel was originally inspired by [Eel](https://github.com/python-eel/Eel), its Python cousin, and how now since grown far beyond it with our v2.0 release.
+Neel was originally inspired by [Eel](https://github.com/python-eel/Eel), its Python cousin, and has now grown far beyond it with our v2.0 release.
 
 ---
 
