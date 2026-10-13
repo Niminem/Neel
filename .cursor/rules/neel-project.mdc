@@ -10,9 +10,8 @@ a local HTTP/WebSocket server, launches a Chromium-family browser in app mode, a
 bridges Nim procs and JS functions with return values in both directions.
 
 Version 2.0 is a from-scratch rewrite on the `neel2-devel` branch; it merges into
-`master` once every task is done and verified on macOS and Windows. Linux is expected
-to work but is fully verified only in 2.1 (see `PLAN.md` "Post-implementation
-changes"). Work and commit on `neel2-devel`, never on `master`; the merge and the
+`master` once every task is done and verified; macOS, Windows, and Linux (Ubuntu)
+are verified (see `PLAN.md` "Post-implementation changes"). Work and commit on `neel2-devel`, never on `master`; the merge and the
 release happen only when the user asks for them. The 1.x code is gone from the tree
 (preserved at tag `v1.1.0`); do not reintroduce `exposeProcs`, `callJs`, `callNim`,
 Mummy, or `std/threadpool`.
@@ -22,7 +21,7 @@ Mummy, or `std/threadpool`.
 - `PLAN.md` at the repo root holds all settled decisions, assumptions, the wire
   protocol, the module layout, and the ordered task list. Read it before any work.
 - `NOTES.md` at the repo root is the log of the current phase (tasks 1-15 are done;
-  macOS and Windows are verified, Linux follows in 2.1): findings,
+  macOS, Windows, and Linux are verified): findings,
   gotchas every change must respect, and the per-platform verification matrix.
   Read it before any work.
 - If something in the plan conflicts with the code or is unclear, stop and ask; do

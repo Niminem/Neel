@@ -15,8 +15,7 @@ Requirements: Nim >= 2.2.12, no external packages. Supported browsers in this
 release: Google Chrome, Chromium, and Microsoft Edge (app mode), or a tab in
 the OS default browser.
 
-Platforms: Fully verified on macOS and Windows. Linux should work but has not been
-tested yet; fixes will follow in 2.1. Edge is verified on Windows only as it is an edge-case browser on non-Windows platforms.
+Platforms: Fully verified on macOS, Windows, and Linux (Ubuntu). Edge is verified on Windows only as it is an edge-case browser on non-Windows platforms.
 
 Contents
 

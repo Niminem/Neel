@@ -39,7 +39,7 @@ The best visualization libraries that exist are in JavaScript, and the most powe
 - No Nimble dependencies, only the standard library.
 - Google Chrome, Chromium, or Microsoft Edge for app-mode windows; without one of them, any default browser, in a tab.
 
-Neel 2.0 is verified on macOS and Windows. Linux is expected to work and will be fully tested in 2.1. Edge is verified on Windows only (as Edge is just edge-case on other OSs).
+Neel 2.0 is verified on macOS, Windows, and Linux (Ubuntu). Edge is verified on Windows only (as Edge is just edge-case browser on other OSs).
 
 ## Installation
 
@@ -371,7 +371,6 @@ Neel no longer re-exports `std/os`, `std/strutils`, and the rest; of the standar
 
 The vision for this library is to eventually have it be as full-fledged as Electron for Nim. Next on the list:
 
-- [ ] **Linux verification (2.1).** Linux is expected to work today; 2.1 runs the full verification pass on it and fixes whatever that turns up.
 - [ ] **Brave, Opera, and Vivaldi.** They are already members of the `Browser` enum, reserved and skipped during discovery for now.
 - [ ] **Webview capabilities.** [Webview](https://github.com/webview/webview) is an MIT licensed cross-platform webview library for C/C++. Uses WebKit (GTK/Cocoa) and Edge WebView2 (Windows). Having a webview target will get us closer to a solid framework for shipping commercial builds.
 - [ ] **Custom routes.** Let an app answer HTTP requests with its own Nim handlers next to the web folder, so pages can be rendered with template engines and the like.

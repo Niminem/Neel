@@ -2,10 +2,9 @@
 
 Tasks 1-15 in `PLAN.md` are implemented. This file is the working log of the
 phase after that: running `nimble test` and every example on macOS, Windows,
-and Linux, trying to break things, and fixing what breaks. `neel2-devel`
-merges into `master` once macOS and Windows pass everything below; the
-Linux column is filled in 2.1 (`PLAN.md` "Post-implementation changes",
-release scope).
+and Linux, trying to break things, and fixing what breaks. macOS, Windows,
+and Linux (Ubuntu) pass everything below, so `neel2-devel` is ready to
+merge into `master` (`PLAN.md` "Post-implementation changes").
 
 How to use this file:
 
@@ -21,11 +20,11 @@ How to use this file:
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the profile sweep, the public-surface change, and the request guard) | passes (Nim 2.2.12, 2026-10-12, with the profile sweep, the public-surface change, and the request guard) | not run |
-| profile sweep manual check (see "Open items") | passes (Nim 2.2.12, 2026-10-12; release roundtrip, normal exit and `kill -9` + Cmd+Q; no `neel-*` dir left in `$TMPDIR`) | passes (Nim 2.2.12, 2026-10-12; release roundtrip with Chrome and with `@[Edge]`, normal exit and Task Manager kill; no `neel-*` dir left in `%TEMP%`) | not run |
-| `examples/filepicker` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`; rerun with the request guard, app and `@[Default]` with Safari as the default browser) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`; rerun with the request guard) | not run |
-| `examples/roundtrip` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | not run |
-| `examples/stresstest` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | not run |
+| `nimble test` | passes (Nim 2.2.12, 2026-10-12, with the profile sweep, the public-surface change, and the request guard; rerun at `5c0bab4`, which adds the missing-web-directory check and the collision tests, Nim 2.2.12) | passes (Nim 2.2.12, 2026-10-12, with the profile sweep, the public-surface change, and the request guard; rerun with the missing-web-directory check and the collision tests, Nim 2.2.12) | passes (Ubuntu, Nim 2.2.12, 2026-10-12, at `5c0bab4`) |
+| profile sweep manual check (see "Open items") | passes (Nim 2.2.12, 2026-10-12; release roundtrip, normal exit and `kill -9` + Cmd+Q; no `neel-*` dir left in `$TMPDIR`) | passes (Nim 2.2.12, 2026-10-12; release roundtrip with Chrome and with `@[Edge]`, normal exit and Task Manager kill; no `neel-*` dir left in `%TEMP%`) | not tested, assumed (no errors thrown during testing / example runs) |
+| `examples/filepicker` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`; rerun with the request guard, app and `@[Default]` with Safari as the default browser; rerun at `5c0bab4`, debug, app and `@[Default]`) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`; rerun with the request guard) | passes (Ubuntu, Nim 2.2.12, 2026-10-12, at `5c0bab4`; every check in this row) |
+| `examples/roundtrip` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, stale-tab recipe from the 2026-10-12 finding) | passes (Ubuntu, Nim 2.2.12, 2026-10-12, at `5c0bab4`; every check in this row, including the stale-tab recipe) |
+| `examples/stresstest` | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | passes (Nim 2.2.12, 2026-10-12; debug and release, app and `@[Default]`, kill/reconnect and refresh-after-restart checks) | passes (Ubuntu, Nim 2.2.12, 2026-10-12, at `5c0bab4`; every check in this row, including both manual checks) |
 | examples with `browsers = @[Edge]` | will not be run (paths and flags checked against public sources only, 2026-10-12 finding) | passes (Nim 2.2.12, 2026-10-12; all three examples and their manual checks, no leftover `msedge` processes or profile dirs) | will not be run (as macOS) |
 
 ## Gotchas
@@ -127,6 +126,22 @@ check them after any heading change. Code shown in the README must compile
 against the current API.
 
 ## Findings
+
+### 2026-10-12 - Linux (Ubuntu): full verification pass, nothing found
+
+Run on Ubuntu by a second tester and confirmed by the maintainer, at
+`5c0bab4`: `nimble test`, all three examples with every check in their
+matrix rows (including the stale-tab recipe and both stresstest manual
+checks). Everything passed; no fix was needed. The profile sweep manual
+check was not run on Linux; no errors showed during the tests and example
+runs, so it is assumed to work (see "Open items"). Nim 2.2.12, as on macOS
+and Windows. macOS reran `nimble test` and `filepicker` (debug,
+app and `@[Default]`) at the same commit, also passing. Consequence: 2.0 is
+verified on macOS, Windows, and Linux, and 2.1 no longer carries a Linux
+pass; README, guide, `PLAN.md` "Post-implementation changes", and the
+project rule updated, the Linux item removed from the README's "Future
+Work", and the Linux and request guard open items closed.
+Edge stays verified on Windows only.
 
 ### 2026-10-12 - All platforms: README review feedback (docs only)
 
@@ -621,25 +636,15 @@ added (now `docs/GUIDE.md` "Caveats").
 
 ## Open items
 
-- Linux: not run yet; scheduled for 2.1 (not a 2.0 merge blocker). Run the
-  full matrix, including the stale-tab recipe and both stresstest manual
-  checks.
 - Edge: verified on Windows only (2026-10-12). macOS and Linux will not be
   run; their paths and flags are checked against public sources only (see
   the 2026-10-12 findings).
-- Abandoned profile dirs: swept at exit since 2026-10-12 (see the finding).
-  Passed by hand on Windows (Chrome and Edge) and macOS, 2026-10-12. Still
-  to check on Linux: run roundtrip in release, open and
-  close the second window, close window 1 with its X, wait out the grace
-  period, and confirm no `neel-*` dir is left in the temp dir
-  (`ls -d "$TMPDIR"neel-*`); then `kill -9` the app, quit its orphaned
-  browser with Cmd+Q (on macOS closing the window leaves Chrome running,
-  and the sweep rightly skips a profile a live browser holds), run and quit
-  again, and confirm the killed run's dir is gone. The POSIX `kill` /
-  `SingletonLock` path runs for the first time there.
-- Request guard (2026-10-12 finding): verified on Windows and macOS. On
-  Linux, `filepicker` in app mode and `@[Default]` covers it; a refusal
-  shows as a `neel: refused: ...` page or a shim stuck reconnecting.
+- Abandoned profile dirs on Linux: passed by hand on Windows and macOS
+  (2026-10-12); on Ubuntu assumed, not checked by hand (no errors in the
+  tests or example runs). To check: run roundtrip in release, close every
+  window, wait out the grace period, and confirm no `neel-*` dir is left in
+  the temp dir; then `kill -9` the app, close its orphaned browser, run and
+  quit again, and confirm the killed run's dir is gone.
 - `quitApp()` from an exposed proc can lose that call's reply: shutdown's
   `teardownAll` (`src/neel/server.nim`) writes the 1001 frame straight to
   the socket and drops output still queued, so a reply queued after the IO
