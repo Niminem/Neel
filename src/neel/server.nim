@@ -31,9 +31,11 @@
 ## touched from two threads.
 
 when defined(windows):
-  # The Windows `select` backend is capped at FD_SETSIZE handles and the
-  # header defaults it to 64 (about 8 browser windows). `-d:FD_SETSIZE` has
-  # no effect; the C macro must be set (PLAN.md spike (c)).
+  # The Windows `select` backend is capped at FD_SETSIZE handles and
+  # winsock2.h defaults it to 64 (about 8 browser windows at ~7 fds each).
+  # `std/selectors` imports the macro from C, so `-d:FD_SETSIZE` has no
+  # effect; it must be set as a C define, and `passC` is global, so the
+  # selectors C unit sees it.
   {.passC: "-DFD_SETSIZE=1024".}
 
 import std/[selectors, nativesockets, locks, tables, hashes, monotimes, times,
@@ -260,8 +262,9 @@ proc rawSend(fd: SocketHandle; buf: pointer; len: int): int =
 
 proc raiseFdLimit() =
   ## Raises the soft `RLIMIT_NOFILE` to `min(hard, 4096)` when it is lower
-  ## (the macOS GUI default is 256). Failure is ignored. Must run before
-  ## `newSelector`, which sizes itself from the limit (PLAN.md spike (c)).
+  ## (the macOS GUI default is 256, about 30 windows at ~7 fds each). Failure
+  ## is ignored. Must run before `newSelector`: the epoll and kqueue backends
+  ## read the soft limit then to size their descriptor tables.
   when defined(posix) and not UseWinSockets:
     const Target = 4096
     var lim: RLimit

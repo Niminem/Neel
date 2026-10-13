@@ -436,8 +436,9 @@ suite "neel: startApp end to end":
       check http(port, WsPath).status == 403
 
       # Requests that did not come from a Neel page are refused before any
-      # route sees them (NOTES.md, 2026-10-12): another host name (DNS
-      # rebinding), another site's page, a WebSocket from another origin.
+      # route sees them (`requestRefusal`; docs/GUIDE.md "Security"): another
+      # host name (DNS rebinding), another site's page, a WebSocket from
+      # another origin.
       for target in ["/", NeelJsPath, NoBrowserPath]:
         for host in ["attacker.example:" & $port, "localhost:" & $port, "127.0.0.1"]:
           let rebound = http(port, target, host = host)
@@ -498,9 +499,10 @@ suite "neel: startApp end to end":
       check c.readMsg() == retMsg(7, %42)
 
       # A second window, then the stale-tab scenario from the roundtrip
-      # example in a default-browser tab (NOTES.md, 2026-10-12): after
-      # closeWindow the tab survives; refreshing it must not hand it window
-      # 1's shim, or it would bind as window 1 and displace this connection.
+      # example in a default-browser tab (docs/GUIDE.md "Multiple windows"):
+      # after closeWindow the tab survives; refreshing it must not hand it
+      # window 1's shim, or it would bind as window 1 and displace this
+      # connection.
       c.sendMsg(callMsg("openSecond", @[], id = 8))
       check c.readMsg() == retMsg(8, %2)
       acquire shared.lock

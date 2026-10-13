@@ -1,7 +1,8 @@
 ## t_frontend.nim - placeholder substitution for the served `neel.js`.
 ##
 ## The shim itself cannot be executed here (no JS runtime is a dependency);
-## it is verified in a browser against the server, see PLAN.md Task 10.
+## it is verified by hand in a browser against the server by running the
+## examples (`docs/GUIDE.md` "Running the examples").
 
 import std/[unittest, json, strutils]
 import neel/[frontend, http]

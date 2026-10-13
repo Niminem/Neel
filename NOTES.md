@@ -127,6 +127,28 @@ against the current API.
 
 ## Findings
 
+### 2026-10-12 - All platforms: shipped files no longer cite PLAN.md / NOTES.md (comments only)
+
+`master` will carry neither `PLAN.md`, `NOTES.md`, nor `.cursor/` (they
+stay on `neel2-devel`), so comments in files that ship must stand on their
+own. Found with `git grep -n -e PLAN.md -e NOTES.md -e .cursor -- .
+':!PLAN.md' ':!NOTES.md' ':!.cursor'` (twelve hits) and rewritten:
+`src/neel.nim` (module layout: each module's header states its
+responsibility; the `< 2.2.12` check: the dangling shared-free-list cause
+stated inline; `neelJsWindowId`: `docs/GUIDE.md` "Multiple windows"),
+`src/neel/neel.js` and `src/neel/protocol.nim` (wire format:
+`docs/GUIDE.md` "The `neel.js` API"), `src/neel/server.nim` (`FD_SETSIZE`:
+winsock2.h defaults to 64, `std/selectors` imports the macro from C so
+`-d:` does nothing and `passC` is global; `raiseFdLimit`: epoll and kqueue
+read the soft limit at `newSelector`), `tests/t_frontend.nim` (the shim is
+verified by running the examples), `tests/t_protocol.nim` (guide wire
+format), `tests/t_neel.nim` (`requestRefusal` and the guide's "Security";
+the stale-tab scenario and "Multiple windows"), `tests/t_server.nim`
+(pre-2.2.12 allocator, ordering kept for deterministic teardown). No code
+change, no test; the grep now returns nothing. `nimble test` passes on
+Windows (Nim 2.2.12, both Nimble's compiler and `nim -v`), and
+`src/neel.nim` compiles with `nim c --compileOnly`.
+
 ### 2026-10-12 - Linux (Ubuntu): full verification pass, nothing found
 
 Run on Ubuntu by a second tester and confirmed by the maintainer, at

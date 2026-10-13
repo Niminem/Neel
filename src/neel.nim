@@ -38,12 +38,14 @@
 ## Tests replace the browser launch and the exit-time profile sweep through
 ## `neel/testhooks`, which is not re-exported.
 ##
-## Everything else lives in `neel/*.nim`; see `PLAN.md` "Module layout" for
-## the responsibility of each.
+## Everything else lives in `neel/*.nim`; each module's header comment states
+## its single responsibility.
 
 when (NimMajor, NimMinor, NimPatch) < (2, 2, 12):
-  # Older allocators crash (intermittently, mostly on Windows) when memory is
-  # freed after the thread that allocated it has exited; see NOTES.md.
+  # Allocators before 2.2.12 crash (intermittently, mostly on Windows) when
+  # memory is freed after the thread that allocated it has exited: the block
+  # is pushed onto its owner's shared free list through thread-local state
+  # that died with that thread. 2.2.12 parks that state instead of freeing it.
   {.error: "Neel requires Nim >= 2.2.12; this is Nim " & NimVersion.}
 
 import std/[json, options, strutils, sysrand, uri, macros, os]
@@ -221,7 +223,7 @@ proc neelJsWindowId(req: HttpRequest): tuple[id, named: int] =
   ## it belongs to a window Neel has closed or retired (typically a stale
   ## default-browser tab being refreshed), and handing it the shim of a
   ## window that is still open would let it bind as that window and displace
-  ## the real page (see NOTES.md, 2026-10-12).
+  ## the real page (see `docs/GUIDE.md` "Multiple windows").
   let referer = req.getHeader("Referer")
   if referer.len > 0:
     try:

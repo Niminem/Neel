@@ -602,9 +602,10 @@ suite "server: WebSocket":
     b.sock.close()
     http.close()
 
-# Nim's allocator cannot free a block once the thread that allocated it has
-# exited (on Windows that is an intermittent SIGSEGV in `addToSharedFreeList`).
-# These tests pin down the ordering that prevents it; see NOTES.md.
+# Before Nim 2.2.12 the allocator could not free a block once the thread that
+# allocated it had exited (on Windows an intermittent SIGSEGV in
+# `addToSharedFreeList`). Neel still frees shared state before any thread
+# exits, for deterministic teardown; these tests pin down that ordering.
 suite "server: shutdown ordering":
   test "beforeJoin runs after every onClose, with the IO thread and the workers alive":
     var bag: Bag

@@ -1,9 +1,10 @@
 ## protocol.nim - `call` / `ret` / `err` messages and the pending-call table.
 ##
-## Implements the symmetric JSON wire format from `PLAN.md` "Protocol
-## reference". Messages are identical in both directions; a `call` carrying an
-## `id` expects exactly one `ret` or `err` with that id, a `call` without an
-## `id` is fire-and-forget. Ids are allocated per side and per connection.
+## Implements the symmetric JSON wire format shown in `docs/GUIDE.md` "The
+## `neel.js` API". Messages are identical in both directions; a `call`
+## carrying an `id` expects exactly one `ret` or `err` with that id, a `call`
+## without an `id` is fire-and-forget. Ids are allocated per side and per
+## connection.
 ##
 ## Surface:
 ## - `Msg` (`msgCall` / `msgRet` / `msgErr`), `encode(msg): string` (compact

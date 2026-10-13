@@ -14,7 +14,7 @@ template rejects(text: string) =
 
 suite "protocol messages":
   test "protocol reference examples decode to the expected messages":
-    # Exact strings from PLAN.md "Protocol reference".
+    # Exact strings from the wire format in docs/GUIDE.md "The neel.js API".
     check decode("""{"t":"call", "id":17, "name":"add", "args":[1, 2]}""") ==
       callMsg("add", @[%1, %2], id = 17)
     check decode("""{"t":"ret",  "id":17, "value":3}""") == retMsg(17, %3)

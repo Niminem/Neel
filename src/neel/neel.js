@@ -48,7 +48,7 @@
 // the same window id again. A close with 1000 or 1001 (server shutdown or
 // closeWindow) is final: no reconnect, and every later call rejects at once.
 //
-// Wire format: PLAN.md "Protocol reference".
+// Wire format: docs/GUIDE.md, "The neel.js API" (Nim side: src/neel/protocol.nim).
 
 (function () {
   "use strict";
