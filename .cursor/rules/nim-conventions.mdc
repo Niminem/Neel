@@ -1,0 +1,72 @@
+---
+description: Nim coding conventions for Neel source modules
+globs: **/*.nim
+alwaysApply: false
+---
+
+# Nim conventions
+
+## Style
+- 2-space indentation, NEP-1 naming (`camelCase` procs/vars, `PascalCase` types).
+- Prefer `std/[a, b]` grouped imports. Import only what the module uses; do not
+  re-export stdlib modules except deliberately from `src/neel.nim`.
+- Every public symbol gets a `##` doc comment. Every module starts with a `##`
+  header stating its single responsibility; update the header when the module's
+  surface or contract changes.
+- Exceptions are `object of CatchableError` named `Neel<Thing>Error`
+  (`NeelTimeoutError`, `NeelNoWindowError`, `NeelServeModeError`).
+- Match the surrounding code's comment density. Comments state constraints the
+  code cannot show; they never cite `SPEC.md`, step numbers, or the log.
+
+## Deprecated / forbidden stdlib
+- `std/threadpool` and `spawn`: use `std/typedthreads` + `std/locks` and the pool
+  in `src/neel/pool.nim`.
+- `std/sha1`: use `src/neel/sha1.nim`.
+- `std/asyncdispatch`: Neel is threaded, not async.
+
+## Threading
+- Code that runs on worker or IO threads must be `{.gcsafe.}`. Shared state is
+  either immutable after init, protected by a `Lock`, or passed through a
+  bounded queue. Use `{.cast(gcsafe).}` only on write-once-at-init data and say
+  why in a comment.
+- Never block the IO thread (`server.nim` selectors loop). Anything that can
+  wait, parse large input, or call user code goes to the pool.
+- Every blocking wait has a deadline. No unbounded `sleep` loops for lifecycle
+  logic.
+- Free memory while the thread that grew it is alive: Nim's allocator cannot
+  take a block back after its owning thread exits. Follow the existing pattern
+  (the IO thread clears its own tables before parking; shared state is freed in
+  `shutdown`'s `beforeJoin`).
+- Hooks (`onWindowOpen`, `onWindowClose`) never run while the window lock is
+  held: collect under the lock, release, then call.
+- Signal handlers (POSIX `sigaction`, Windows `SetConsoleCtrlHandler`) only set
+  an atomic flag or call `_exit`. No locks, allocation, condition variables, or
+  I/O in a handler; `quitApp()` is not safe there.
+
+## Platform code
+- Platform branches use `when defined(windows)` / `when defined(posix)` (see
+  `server.nim` and `browser.nim` for the existing patterns). Code that only one
+  OS can exercise needs a manual check listed in the step's notes.
+
+## Macros
+- `expose` and `startApp` are macros; keep generated code small and delegate
+  real work to ordinary procs so it is testable and error messages point at
+  user code.
+- `startApp` forwards unknown keyword arguments verbatim to `runApp`; new
+  `startApp` parameters are added to `runApp`'s signature, not the macro.
+- Use `error(msg, node)` with the user's node for compile-time diagnostics.
+- When a macro must reference a symbol from another module, splice the bound
+  `nnkSym` (`bindSym`), never a bare ident.
+
+## Example
+
+```nim
+## websocket.nim - RFC 6455 frame encoding and decoding. No socket IO here.
+
+type
+  NeelFrameError* = object of CatchableError
+    ## Raised on a malformed or oversized frame.
+
+proc decodeFrame*(buf: openArray[byte]; maxLen: int): Frame {.gcsafe.} =
+  ## Decodes one frame from `buf`; raises `NeelFrameError` if invalid.
+```

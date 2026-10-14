@@ -1,0 +1,43 @@
+---
+description: Test layout and conventions for Neel
+globs: tests/**
+alwaysApply: false
+---
+
+# Tests
+
+- One file per module under test: `tests/t_<module>.nim` (`t_frontend.nim`,
+  `t_window.nim`, ...). Nimble's built-in `nimble test` runs every
+  `tests/t*.nim`, so never put a non-test helper module in `tests/` with a name
+  starting with `t` (helpers go in `tests/fixtures/`). Compiler flags for tests
+  go in `tests/config.nims`, not in a custom nimble task.
+- Use `std/unittest`. Group with `suite` per module and `test` per behavior.
+- Tests must not depend on a browser being installed or on network access
+  beyond `127.0.0.1`. Browser launch is replaced through `neel/testhooks`
+  (`setTestLauncher`, `setTestProfileSweep`); never launch anything.
+- Local-mode integration tests use `port = 0` and read the bound port (from
+  the server, or from the URL the fake launcher receives).
+- Serve mode refuses `port = 0` and never calls the launcher, so serve-mode
+  integration tests obtain a free port up front (bind an ephemeral socket on
+  `127.0.0.1`, read the port, close it) and pass it.
+- Always stop the server (or `quitApp()` and join) in a `finally`/teardown, so
+  a failing test cannot leave threads running.
+- Every new behavior gets a local-mode counterpart where one exists: a serve-mode
+  change is not done until the test shows local mode is unchanged.
+- Protocol, framing, and request-filtering tests include at least one
+  malformed-input case each.
+- OS-specific behavior (signals) is tested under `when defined(posix)`; what
+  cannot be automated on an OS (Windows console events, phones, real proxies)
+  is listed as a manual check in the step's notes in `SPEC.md`.
+- Timing-based tests use short, explicit intervals (for example a 300 ms ping
+  interval) and generous bounded waits; never sleep without a deadline.
+- Macro tests check both that valid input expands and compiles, and that
+  invalid input fails with the intended message (use `compiles(...)` or a
+  `nim check` subprocess for negative cases).
+- Keep fixtures tiny and inline.
+
+```nim
+suite "frontend":
+  test "serve mode: cross-site iframe navigation is refused":
+    check requestRefusal(req, filter).len > 0
+```

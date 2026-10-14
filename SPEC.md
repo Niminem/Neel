@@ -1,7 +1,8 @@
 # Serve mode: specification
 
-Status: draft, not yet implemented. Supersedes `DISCUSSION.md` and
-`THOUGHTS.md`.
+Status: decisions settled (reviewed 2026-10-14); implementation in progress.
+Progress is tracked per step in section 13; findings, deviations, and gotchas
+are logged in section 16.
 
 Serve mode runs a Neel app as a persistent server for **one user**, reached
 from any of their devices through a tunnel or reverse proxy (Cloudflare
@@ -42,7 +43,7 @@ startApp(serve = true, port = 8080,
 ## 2. Findings that shaped this spec
 
 These were checked against primary sources; none of them has been observed on
-a live setup yet. Section 13 includes them in the manual test plan.
+a live setup yet. The manual checklist (13.8) includes them.
 
 **2.1 Auth-proxy logins arrive as cross-site navigations.** The Fetch Metadata
 spec (W3C, "Sec-Fetch-Site", section 2.3 and "Redirects", section 4.1) walks
@@ -397,26 +398,71 @@ Additional notes for the guide:
 
 ---
 
-## 13. Build order and tests
+## 13. Build steps
 
-Each step is reviewable on its own and leaves local mode working. Every step
-runs `nimble test` on the developer's OS; the manual OS checklist below runs
-at the end (and after step 4 for signals).
+### 13.0 How to work a step
 
-**Step 1: request filtering (`frontend.nim`).**
-Tests in `t_frontend`:
-- allowed origin accepted on `/ws`; port mismatch, scheme mismatch, trailing
-  slash, and different-case input (normalized at validation) behave as
-  specified;
+One step per session, in order (each step lists what it depends on).
+
+1. Read this spec fully, including section 16 (findings, deviations,
+   gotchas), then the modules the step touches.
+2. Implement only that step. Do not start the next one or refactor unrelated
+   code. If the spec conflicts with the code or is unclear, stop and ask; do
+   not silently pick one.
+3. Run `nimble test` and `nim c src/neel.nim`, and note the Nim version
+   (`nim -v`).
+4. Update the step below: set **Status** to `done` (or `partial` with what is
+   missing), fill in **Notes** (deviations from the spec, in one or two lines
+   each), and list the manual checks the user still has to run for this step.
+5. Log anything a later step needs in section 16: a dated finding, a
+   deviation that changes the spec (also edit the spec section it changes, so
+   the spec stays the truth), or a new gotcha.
+6. Do not commit unless the user asks.
+
+Every step leaves local mode working and `nimble test` green. The user runs
+the manual checks on macOS, Windows, and Linux and records the results in the
+matrix in 13.8.
+
+### 13.1 Step 1: request filtering
+
+- **Status:** not started
+- **Depends on:** nothing
+- **Touches:** `frontend.nim`; the `handleRequest` call site in `neel.nim`
+- **Spec:** sections 3.2 (origin validation and normalization), 4
+
+Scope:
+- `RequestFilter`, the origin validation/normalization proc, and the new
+  `requestRefusal` rules, all pure.
+- `neel.nim` builds a local-mode filter (`serve = false`, no origins) so
+  behavior is unchanged. The `serve` / `allowedOrigins` parameters are wired
+  in step 2.
+
+Tests (`t_frontend`):
+- allowed origin accepted on `/ws`; port mismatch, scheme mismatch, and
+  trailing slash refused or rejected at validation as specified; mixed-case
+  input normalized;
 - `Host` rewritten to `127.0.0.1:<port>` with a public `Origin` accepted;
 - serve mode: cross-site `navigate` + `document` passes; cross-site
   `navigate` + `iframe` refused; cross-site `script` for `/neel.js` refused;
 - local mode: every existing case unchanged, including cross-site
   navigations refused;
-- origin validation and normalization (section 3.2).
+- validation errors for each malformed origin form in 3.2.
 
-**Step 2: serve core (`window.nim`, `neel.nim`).**
-Tests in `t_window` / `t_neel`:
+**Notes:**
+
+### 13.2 Step 2: serve core
+
+- **Status:** not started
+- **Depends on:** step 1
+- **Touches:** `window.nim`, `neel.nim`
+- **Spec:** sections 3, 5, 6 (except signals, pings, and the shim)
+
+Scope: `serve` and `allowedOrigins` parameters and their validation; skip
+`findBrowser`; the no-op launcher and window 1; `waitForAppExit` serve
+branch; `NeelServeModeError`; `GET /` redirect; `/neel/no-browser` 404;
+startup line; no profile sweep.
+
+Tests (`t_window`, `t_neel`):
 - window 1 exists after start, with no launch;
 - window 1 survives past `startupTimeoutMs` without a connection, and past
   `gracePeriodMs` after a disconnect;
@@ -425,50 +471,100 @@ Tests in `t_window` / `t_neel`:
 - `onWindowOpen` fires once across two connections; `onWindowClose` fires
   once at teardown;
 - `GET /` redirects when `startPath != "/"`; `/neel/no-browser` is a 404;
-- `port = 0` and `allowedOrigins` without `serve` raise `ValueError`.
+- `port = 0`, and `allowedOrigins` without `serve`, raise `ValueError`.
 
-**Step 3: displaced close code (`window.nim`, `frontend.nim`, `neel.js`).**
-Tests: displacement sends 4000 (`t_window` fake close records the code);
-the shim treats it as final (manual, two browser tabs).
+**Notes:**
 
-**Step 4: stop signals (`signals.nim`).**
-Tests on Linux/macOS: send `SIGTERM` to the process during a serve-mode run
-and expect `erQuit`. Windows: manual (Ctrl-C, Ctrl-Break, closing the console
-window).
+### 13.3 Step 3: displaced close code
 
-**Step 5: pings (`server.nim`).**
-Tests in `t_server` with a short interval (e.g. 300 ms): an idle upgraded
-connection receives a ping frame; an active one does not; `pingIntervalMs =
-0` sends none.
+- **Status:** not started
+- **Depends on:** step 2
+- **Touches:** `frontend.nim`, `window.nim`, `neel.js`
+- **Spec:** section 9, 10.1, 11
 
-**Step 6: shim serve behavior (`neel.js`, `frontend.nim`).**
-Tests: render with the serve flag (`t_frontend` static checks). Dormant/wake
-behavior: manual (desktop browser with DevTools offline toggle, then a phone).
+Tests: displacement sends 4000 (the `t_window` fake close records the
+code); the `frontend.nim` static check ties `CloseDisplaced` to `neel.js`.
+Manual: two tabs, the first reports 4000 and does not reconnect.
 
-**Step 7: docs and example.** README section, guide section, an
-`examples/serve` app with run instructions for an SSH forward and
-`cloudflared`.
+**Notes:**
 
-### Manual checklist, per OS (macOS, Windows, Linux)
+### 13.4 Step 4: stop signals
 
-Local mode regression:
-- the three examples run as before (open, call, second window, close, exit
-  after the grace period).
+- **Status:** not started
+- **Depends on:** step 2
+- **Touches:** new `signals.nim`, `window.nim` (stop flag), `neel.nim`
+- **Spec:** section 7
 
-Serve mode:
-- starts without a browser and prints the startup line;
-- page loads at `http://127.0.0.1:<port>`; a second tab displaces the first,
-  which reports 4000 and does not reconnect;
-- Ctrl-C exits cleanly; on Linux/macOS `kill -TERM` exits cleanly; on Windows
-  closing the console window exits cleanly;
-- left idle behind a proxy for 5 minutes with no reconnect (pings working).
+Tests: on Linux/macOS, send `SIGTERM` to the process during a serve-mode run
+and expect `erQuit`; handlers are restored after `startApp` returns. Windows:
+manual (Ctrl-C, Ctrl-Break, closing the console window).
+
+**Notes:**
+
+### 13.5 Step 5: keep-alive pings
+
+- **Status:** not started
+- **Depends on:** step 2 (for the `runApp` wiring only)
+- **Touches:** `server.nim`, `neel.nim`
+- **Spec:** section 8
+
+Tests (`t_server`, with a short interval such as 300 ms): an idle upgraded
+connection receives a ping; an active one does not; `pingIntervalMs = 0`
+sends none.
+
+**Notes:**
+
+### 13.6 Step 6: shim serve behavior
+
+- **Status:** not started
+- **Depends on:** steps 2 and 3
+- **Touches:** `neel.js`, `frontend.nim`
+- **Spec:** sections 10.2–10.4
+
+Tests: rendering with the serve flag and the updated `static:` checks
+(`t_frontend`). Manual: dormant and wake behavior with the DevTools offline
+toggle, then on a phone.
+
+**Notes:**
+
+### 13.7 Step 7: documentation and example
+
+- **Status:** not started
+- **Depends on:** steps 1–6
+- **Touches:** `README.md`, `docs/GUIDE.md`, module headers, new `examples/serve`
+- **Spec:** sections 12, 14
+
+Scope: everything in section 14, plus an `examples/serve` app with run
+instructions for an SSH forward and `cloudflared`. Proxy configs are
+published only once verified on a real setup.
+
+**Notes:**
+
+### 13.8 Manual verification
+
+Run by the user on each OS once the relevant steps are done. Record results
+here (`pass`, `fail` with a section 16 entry, or `n/a`).
+
+| Check | macOS | Windows | Linux |
+|---|---|---|---|
+| `nimble test` passes | | | |
+| Local mode: the three examples behave as before (open, call, second window, close, exit after the grace period) | | | |
+| Serve: starts without a browser, prints the startup line | | | |
+| Serve: page loads at `http://127.0.0.1:<port>` | | | |
+| Serve: a second tab displaces the first (4000, no reconnect) | | | |
+| Serve: Ctrl-C exits cleanly | | | |
+| Serve: `kill -TERM` exits cleanly | | n/a | |
+| Serve: closing the console window exits cleanly | n/a | | n/a |
+| Serve: idle behind a proxy for 5 minutes without a reconnect | | | |
+| Serve: dormant shim wakes (DevTools offline toggle) | | | |
 
 Once, on Linux (the realistic deployment target):
-- behind Cloudflare Tunnel with Access: the first load after login works
-  (confirms 2.1 in practice);
-- from a phone: open, lock the phone for 5 minutes, unlock: the page
-  reconnects on its own;
-- restart the server: the documented reload recipe recovers the page.
+
+| Check | Result |
+|---|---|
+| Behind Cloudflare Tunnel with Access: first load after login works (confirms 2.1) | |
+| Phone: open, lock for 5 minutes, unlock: the page reconnects by itself | |
+| Server restart: the documented reload recipe recovers the page | |
 
 ---
 
@@ -505,3 +601,59 @@ Once, on Linux (the realistic deployment target):
   a second layer behind the `Sec-Fetch-Dest` check, for browsers without
   Fetch Metadata.
 - **Windows service integration** (service control handler).
+
+---
+
+## 16. Findings, deviations, and gotchas
+
+The running log for the implementation. Newest entries last within each
+list. A deviation that changes behavior is also applied to the spec section
+it affects, so sections 1–12 always describe what is built.
+
+### 16.1 Findings
+
+Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
+
+- 2026-10-14, pre-implementation, all: `Sec-Fetch-Site` is `cross-site` for
+  any request whose redirect chain crossed sites (Fetch Metadata spec), so
+  auth-proxy logins and links from other sites arrive cross-site. Basis for
+  section 4 rule 2. Not yet observed live (checklist 13.8).
+- 2026-10-14, pre-implementation, all: nginx closes idle proxied WebSockets
+  after 60 s and recommends upstream pings; Cloudflare closes idle WebSockets
+  (reported 100 s) and restarts edge servers. Basis for section 8 and 10.3.
+
+### 16.2 Deviations from the spec
+
+Format: `YYYY-MM-DD, step N: what changed and why; spec sections updated`.
+
+- None yet.
+
+### 16.3 Gotchas
+
+Rules every step must respect. The first entries come from the existing code.
+
+- **Free memory on a live thread.** Nim's allocator cannot take a block back
+  once the thread that allocated it has exited (the reason for Nim >= 2.2.12).
+  State grown on the IO thread or a worker is freed while that thread is
+  alive: the IO thread clears its own tables before parking (`server.nim`
+  `ioLoop`), and shared state is freed in `shutdown`'s `beforeJoin`
+  (`releaseSharedState` in `neel.nim`). New shared state follows the same
+  pattern.
+- **Never block the IO thread.** Pings go through the existing outbound queue
+  and flush paths; no new waits on the IO thread.
+- **Hooks never run under the window lock.** Collect under the lock, release,
+  then call (see `connectionOpened`, `closeWindow`, `waitForAppExit`).
+- **Every wait is bounded.** `waitForAppExit` waits at most `IdleTickMs`; the
+  stop flag relies on that.
+- **The shim and `frontend.nim` move together.** The `static:` block in
+  `frontend.nim` checks the placeholders (count and names) and the shared
+  constants against `neel.js`; update both in the same step.
+- **`ExitReason` gains no members.** Stop signals return `erQuit` (section
+  3.4).
+- **Serve-mode integration tests need a known port.** Serve mode refuses
+  `port = 0`, and `t_neel` currently learns the port from the fake launcher's
+  URL, which serve mode never calls. Obtain a free port up front (bind an
+  ephemeral socket, read the port, close it) and pass it.
+- **Shipped comments are self-contained.** Code comments and doc comments
+  never cite `SPEC.md`, step numbers, or this log; they state the constraint
+  itself. (The 2.0 merge needed a cleanup commit for exactly this.)

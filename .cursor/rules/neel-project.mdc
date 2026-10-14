@@ -1,0 +1,75 @@
+---
+description: Neel project context, constraints, and the one-step-per-session workflow for serve mode
+alwaysApply: true
+---
+
+# Neel
+
+Neel is a Nim library for HTML/JS GUI apps (inspired by Python's Eel). It runs
+its own threaded HTTP/WebSocket server on `127.0.0.1`, launches a
+Chromium-family browser in app mode, and bridges Nim procs and JS functions with
+return values in both directions. Neel 2.0 is released and lives on `master`.
+
+The current work is **serve mode** (`startApp(serve = true, ...)`): no browser,
+a persistent server for one user, reached through a tunnel or reverse proxy. It
+is built on the `feature-headless` branch and merges into `master` only when the
+user asks.
+
+## Source of truth
+
+- `SPEC.md` at the repo root holds every settled decision, the behavior, the
+  build steps (section 13), and the running log of findings, deviations, and
+  gotchas (section 16). Read all of it before any work.
+- The decisions in `SPEC.md` are settled. Do not reopen them in passing; if one
+  turns out to be wrong or unimplementable, stop and ask.
+- If the spec conflicts with the code or is unclear, stop and ask; do not
+  silently pick one.
+- `README.md` and `docs/GUIDE.md` describe the shipped 2.0 behavior and the
+  wire protocol ("The `neel.js` API").
+
+## Session workflow
+
+Each session implements exactly one build step from `SPEC.md` section 13.
+
+1. Read `SPEC.md` fully, then the modules the step touches.
+2. Implement only that step. Do not start the next step or refactor unrelated
+   modules.
+3. Run `nimble test` and `nim c src/neel.nim` before finishing. Note which Nim
+   compiled it (`nim -v`, and Nimble's "using ... for compilation" line; they
+   can differ).
+4. In the step's entry: set `**Status:** done` (or `partial` plus what is
+   missing), add deviations to **Notes** in one or two lines each, and list the
+   manual checks the user still has to run.
+5. Record anything later steps need in `SPEC.md` section 16: dated findings,
+   deviations (and edit the spec section they change, so the spec stays true),
+   and new gotchas. Chat is not a record.
+6. Do not commit unless the user asks. There is no CI; the user verifies on
+   macOS, Windows, and Linux by hand and records results in section 13.8.
+
+## Hard constraints
+
+- Nim >= 2.2.12 (enforced by `neel.nimble` and a compile-time check in
+  `src/neel.nim`; older allocators crash on cross-thread frees). ORC and
+  threads are on by default; do not add flags that assume otherwise.
+- Zero external Nimble dependencies. Standard library only.
+- The server binds `127.0.0.1` only, in every mode.
+- Local mode (the default) must keep behaving as it does today. The only
+  accepted difference is the displaced close code (`SPEC.md` section 11).
+- Never build shell command strings for launching processes; use
+  `startProcess` with an args array.
+- Shipped code and doc comments never cite `SPEC.md`, step numbers, or the log;
+  they state the constraint itself.
+- Keep anything written purely for ad-hoc verification out of the repo (use
+  `/tmp`).
+
+## Layout
+
+```
+src/neel.nim          public surface (startApp, runApp, routes, re-exports)
+src/neel/*.nim        internal modules; each header states its responsibility
+src/neel/neel.js      browser-side shim, staticRead and rendered by frontend.nim
+tests/                unit and integration tests, run by `nimble test`
+examples/             runnable example apps
+docs/GUIDE.md         the full user guide
+SPEC.md               serve mode spec, build steps, and log
+```

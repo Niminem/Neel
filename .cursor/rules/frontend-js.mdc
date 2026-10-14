@@ -1,0 +1,49 @@
+---
+description: Conventions for the neel.js shim and example frontends
+globs: src/neel/neel.js, examples/**/*.js, examples/**/*.html
+alwaysApply: false
+---
+
+# Frontend
+
+## neel.js (the shim)
+- Plain ES2020, no build step, no dependencies. It is a classic `<script>` only
+  (the placeholders make the unrendered file invalid JS, and one file cannot be
+  both a classic script and an ES module); module code reads `window.neel`.
+- `src/neel/frontend.nim` renders it per request, replacing placeholders with
+  JS literals: today `__NEEL_TOKEN__`, `__NEEL_WINDOW_ID__`, `__NEEL_EXPOSED__`;
+  serve mode adds `__NEEL_SERVE__`. Each placeholder occurs exactly once, and
+  the `static:` block in `frontend.nim` checks the placeholders and the shared
+  constants (query parameter names, `/ws` path, the displaced close code)
+  against this file. Change both files in the same step.
+- The wire format and the public `neel` surface are documented in
+  `docs/GUIDE.md` ("The `neel.js` API"): `call` / `ret` / `err` with an optional
+  `id`. Keep the shim symmetric with `src/neel/protocol.nim`. `Object.keys(neel)`
+  is part of the documented surface; do not add members without updating the
+  guide.
+- Close codes 1000, 1001, and 4000 (displaced) are final: no reconnect. Any
+  other close reconnects with backoff. Treating an unknown code as final or not
+  is a protocol decision, never an incidental one: a displaced page that
+  reconnects makes two devices displace each other forever.
+- Serve-mode-only behavior (the dormant state and wake-up reconnects) is gated
+  on the rendered serve flag; local mode behavior stays exactly as documented.
+- Reject with an `Error` whose `name` is the Nim exception kind and `message` is
+  the Nim message, so `catch (e) { e.name === "ValueError" }` works.
+
+## Examples
+- Use absolute asset paths (`/main.js`, `/style.css`); the server serves the
+  web folder at `/`.
+- Never assign untrusted strings to `innerHTML`; use `textContent`.
+- Prefer self-contained assets over CDN links so release builds embed
+  everything.
+- Serve-mode examples request their initial state with a `neel.<name>()` call
+  on load and never act on URL parameters without user confirmation.
+
+```js
+// good
+const name = await neel.filePicker(dir);
+out.textContent = name;
+
+// fire-and-forget
+neel.log.send("clicked");
+```
