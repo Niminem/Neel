@@ -435,15 +435,40 @@ One step per session, in order (each step lists what it depends on).
    (`nim -v`).
 4. Update the step below: set **Status** to `done` (or `partial` with what is
    missing), fill in **Notes** (deviations from the spec, in one or two lines
-   each), and list the manual checks the user still has to run for this step.
+   each), list the manual checks the user still has to run for this step, and
+   confirm or correct its **Cross-OS** line (see "Cross-OS testing" below).
 5. Log anything a later step needs in section 16: a dated finding, a
    deviation that changes the spec (also edit the spec section it changes, so
    the spec stays the truth), or a new gotcha.
 6. Do not commit unless the user asks.
 
-Every step leaves local mode working and `nimble test` green. The user runs
-the manual checks on macOS, Windows, and Linux and records the results in the
-matrix in 13.8.
+Every step leaves local mode working and `nimble test` green.
+
+**Cross-OS testing.** There is no CI. Testing on other machines is batched,
+with one early checkpoint where the code is platform-specific:
+
+- **Every session (macOS):** `nimble test` and `nim c src/neel.nim` run in
+  the session itself, on the user's Mac.
+- **Checkpoint after step 5 (Windows and Linux):** the user runs
+  `nimble test` on both, plus the Windows signal checks (Ctrl-C, Ctrl-Break,
+  closing the console window) with any serve-mode app. Steps 4 and 5 are the
+  only steps with platform branches (`sigaction` / `SetConsoleCtrlHandler`;
+  Windows `select`, kqueue, epoll), and Windows is where cross-thread memory
+  bugs have shown up before. Checking here keeps a failure attributable to
+  two steps instead of six.
+- **Final pass after step 7 (all three OSes):** the full 13.8 matrix,
+  including the examples, the browser checks, proxies, and the phone. The
+  manual checks listed in each step are the input to this pass, not a to-do
+  after every step.
+- **Commit after each step** (when the user asks), so a failure found late
+  can be bisected to a step.
+
+Each step entry has a **Cross-OS** line: `safe to defer` (covered by the
+final pass) or `checkpoint` (needs a Windows/Linux run before the final
+pass), with the reason. A session that adds platform branches
+(`when defined(windows)` / `when defined(posix)`), OS APIs, or new state
+shared between threads in a step marked `safe to defer` changes the line to
+`checkpoint`, says why, and tells the user in its summary.
 
 ### 13.1 Step 1: request filtering
 
@@ -453,6 +478,8 @@ matrix in 13.8.
 - **Depends on:** nothing
 - **Touches:** `frontend.nim`; the `handleRequest` call site in `neel.nim`
 - **Spec:** sections 3.2 (origin validation and normalization), 4
+- **Cross-OS:** safe to defer. Pure string logic, no platform code, no new
+  threads; the filter is written once on the main thread and freed there.
 
 Scope:
 - `RequestFilter`, the origin validation/normalization proc, and the new
@@ -488,12 +515,13 @@ Tests (`t_frontend`):
   mutation that drops the `serve` guard fails it. `t_neel` adds an end-to-end
   check that a cross-site top-level navigation is still refused locally.
 
-Manual checks (each OS):
-- `nimble test` passes (macOS done in this session; Windows, Linux open).
+Manual checks (deferred to the final pass, 13.0):
+- `nimble test`: passed on macOS in this session; Windows and Linux are
+  covered by the checkpoint after step 5.
 - Local mode: the three examples behave as before (open, call, second
-  window, close, exit after the grace period). This is the only manual check
-  for this step: serve-mode filtering is not reachable from `startApp` until
-  step 2.
+  window, close, exit after the grace period). No serve-mode manual check
+  exists for this step: serve-mode filtering is not reachable from
+  `startApp` until step 2.
 
 ### 13.2 Step 2: serve core
 
@@ -501,6 +529,9 @@ Manual checks (each OS):
 - **Depends on:** step 1
 - **Touches:** `window.nim`, `neel.nim`
 - **Spec:** sections 3, 5, 6 (except signals, pings, and the shim)
+- **Cross-OS:** safe to defer. No platform branches. It changes the window
+  lifecycle (state shared between threads), so the step-5 checkpoint's
+  `nimble test` on Windows doubles as its check.
 
 Scope: `serve` and `allowedOrigins` parameters and their validation; skip
 `findBrowser`; the no-op launcher and window 1; `waitForAppExit` serve
@@ -526,6 +557,8 @@ Tests (`t_window`, `t_neel`):
 - **Depends on:** step 2
 - **Touches:** `frontend.nim`, `window.nim`, `neel.js`
 - **Spec:** section 9, 10.1, 11
+- **Cross-OS:** safe to defer. A constant and a shim branch; browsers behave
+  the same on every OS. The two-tab check runs in the final pass.
 
 Tests: displacement sends 4000 (the `t_window` fake close records the
 code); the `frontend.nim` static check ties `CloseDisplaced` to `neel.js`.
@@ -539,6 +572,11 @@ Manual: two tabs, the first reports 4000 and does not reconnect.
 - **Depends on:** step 2
 - **Touches:** new `signals.nim`, `window.nim` (stop flag), `neel.nim`
 - **Spec:** section 7
+- **Cross-OS:** checkpoint (run after step 5). Entirely platform-specific:
+  `sigaction` on Linux/macOS; on Windows `SetConsoleCtrlHandler`, whose
+  handler runs on its own thread and waits up to ~4 s for shutdown. The
+  Windows paths have no automated test, so Ctrl-C, Ctrl-Break, and closing
+  the console window are checked by hand at the checkpoint.
 
 Tests: on Linux/macOS, send `SIGTERM` to the process during a serve-mode run
 and expect `erQuit`; handlers are restored after `startApp` returns. Windows:
@@ -552,6 +590,9 @@ manual (Ctrl-C, Ctrl-Break, closing the console window).
 - **Depends on:** step 2 (for the `runApp` wiring only)
 - **Touches:** `server.nim`, `neel.nim`
 - **Spec:** section 8
+- **Cross-OS:** checkpoint (run right after this step). `server.nim` has a
+  separate IO path per OS (Windows sockets and `select`, kqueue, epoll), and
+  the ping tests are timing-based.
 
 Tests (`t_server`, with a short interval such as 300 ms): an idle upgraded
 connection receives a ping; an active one does not; `pingIntervalMs = 0`
@@ -565,6 +606,8 @@ sends none.
 - **Depends on:** steps 2 and 3
 - **Touches:** `neel.js`, `frontend.nim`
 - **Spec:** sections 10.2–10.4
+- **Cross-OS:** safe to defer. Browser-side JS; the DevTools offline toggle
+  and the phone run in the final pass.
 
 Tests: rendering with the serve flag and the updated `static:` checks
 (`t_frontend`). Manual: dormant and wake behavior with the DevTools offline
@@ -578,6 +621,8 @@ toggle, then on a phone.
 - **Depends on:** steps 1–6
 - **Touches:** `README.md`, `docs/GUIDE.md`, module headers, new `examples/serve`
 - **Spec:** sections 12, 14
+- **Cross-OS:** triggers the final pass: the full 13.8 matrix on all three
+  OSes, using `examples/serve`.
 
 Scope: everything in section 14, plus an `examples/serve` app with run
 instructions for an SSH forward and `cloudflared`. Proxy configs are
@@ -587,8 +632,10 @@ published only once verified on a real setup.
 
 ### 13.8 Manual verification
 
-Run by the user on each OS once the relevant steps are done. Record results
-here (`pass`, `fail` with a section 16 entry, or `n/a`).
+Run by the user on each OS in the final pass after step 7 (13.0). The
+checkpoint after step 5 fills in the `nimble test` row and the Windows
+Ctrl-C / console rows early. Record results here (`pass`, `fail` with a
+section 16 entry, or `n/a`).
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|

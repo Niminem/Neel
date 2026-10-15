@@ -38,13 +38,20 @@ Each session implements exactly one build step from `SPEC.md` section 13.
    compiled it (`nim -v`, and Nimble's "using ... for compilation" line; they
    can differ).
 4. In the step's entry: set `**Status:** done` (or `partial` plus what is
-   missing), add deviations to **Notes** in one or two lines each, and list the
-   manual checks the user still has to run.
+   missing), add deviations to **Notes** in one or two lines each, list the
+   manual checks the user still has to run, and confirm or correct the
+   step's **Cross-OS** line (`safe to defer` or `checkpoint`, with the
+   reason). If the step added platform branches, OS APIs, or state shared
+   between threads, it is a `checkpoint`.
 5. Record anything later steps need in `SPEC.md` section 16: dated findings,
    deviations (and edit the spec section they change, so the spec stays true),
    and new gotchas. Chat is not a record.
-6. Do not commit unless the user asks. There is no CI; the user verifies on
-   macOS, Windows, and Linux by hand and records results in section 13.8.
+6. Do not commit unless the user asks. There is no CI. The session runs the
+   tests on the user's Mac; Windows and Linux are tested by the user only at
+   the checkpoint after step 5 and in the final pass after step 7
+   (`SPEC.md` 13.0, "Cross-OS testing"), with results in section 13.8. End
+   every session's summary by saying whether the step is safe to defer or
+   needs a Windows/Linux run, and why.
 
 ## Hard constraints
 
