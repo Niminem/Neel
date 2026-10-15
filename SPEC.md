@@ -507,11 +507,21 @@ with one early checkpoint where the code is platform-specific:
   after every step.
 - **Commit after each step** (when the user asks), so a failure found late
   can be bisected to a step.
-- **From step 4 on (user's plan, 2026-10-15):** the user runs `nimble test`
-  on macOS, Windows, and Linux (Ubuntu in VirtualBox) after every step, not
-  only at the checkpoints. The session still runs it on its own machine; the
-  step's entry records which OSes the user has confirmed. The checkpoint and
-  final-pass manual checks are unchanged.
+- **From step 4 on (user's plan, 2026-10-15, revised the same day):** the
+  user runs `nimble test`, plus the step's manual checks where it is a
+  checkpoint, on **macOS and Windows** after every step. **Linux moves to the
+  final pass after step 7**: Ubuntu runs in VirtualBox on the same Windows
+  machine, which the user can only set up at the end. The session still runs
+  `nimble test` on its own machine; the step's entry records which OSes the
+  user has confirmed.
+- **Consequence for the step-5 checkpoint:** it becomes macOS and Windows
+  only. The epoll IO path in `server.nim` (and with it the Linux side of the
+  pings) is first exercised in the final pass, so a Linux failure found
+  there may come from step 5 or any later step; commit per step so it can be
+  bisected. The POSIX signal code of step 4 is shared with macOS, where it
+  passed, so its Linux risk is low. If VirtualBox stays impractical, WSL2 on
+  the Windows machine is a real Linux kernel (epoll, signals) and a cheaper
+  way to run `nimble test` on Linux earlier.
 
 Each step entry has a **Cross-OS** line: `safe to defer` (covered by the
 final pass) or `checkpoint` (needs a Windows/Linux run before the final
@@ -731,9 +741,11 @@ Manual checks (deferred to the final pass, 13.0):
   `~/.nimble/bin/nim.exe` (choosenim toolchain 2.2.12); Nimble compiled with
   `~/.nimble/pkgs2/nim-2.2.12-1ce02ec.../bin/nim.exe`, also 2.2.12. The POSIX
   branch was **type-checked only** (`nim check --os:linux` and
-  `--os:macosx`), never compiled to C or run: the POSIX signal tests run for
-  the first time on the user's Mac and Linux machines. User-confirmed OSes:
-  none yet.)
+  `--os:macosx`), never compiled to C or run in the session. **User-confirmed
+  (2026-10-15): macOS** (`nimble test`, the first real run of the POSIX
+  signal tests, plus the macOS manual checks below) **and Windows**
+  (`nimble test` plus the Windows manual checks below), all passed.
+  **Linux: deferred to the final pass** (13.0).)
 - **Depends on:** step 2
 - **Touches:** new `signals.nim`, `window.nim` (stop flag), `neel.nim`; new
   `tests/t_signals.nim`
@@ -747,7 +759,8 @@ Manual checks (deferred to the final pass, 13.0):
   by the handler thread). macOS and Linux: `nimble test` (first run of the
   POSIX signal tests) plus the `kill -TERM`, Ctrl-C, and second-signal checks
   below. Windows: `nimble test` plus the Ctrl-C, Ctrl-Break, and console-close
-  checks below.
+  checks below. Done on macOS and Windows (2026-10-15, all passed); the Linux
+  run is deferred to the final pass.
 
 Tests: on Linux/macOS, send `SIGTERM` to the process during a serve-mode run
 and expect `erQuit`; handlers are restored after `startApp` returns. Windows:
@@ -832,6 +845,16 @@ echo "returned ", startApp(webDir = "web", serve = true, port = 8080,
 - Local mode, any OS: Ctrl-C on a local-mode example still ends it the old
   way (Nim prints `SIGINT: Interrupted by Ctrl-C.`; no Neel shutdown).
 
+Results (2026-10-15, user-run):
+- macOS: `nimble test` and the macOS manual checks above (Ctrl-C, `kill -TERM`,
+  second signal with `NEEL_HANG`): passed.
+- Windows 11: `nimble test`, Ctrl-C, Ctrl-Break, closing the console window,
+  and local-mode Ctrl-C (`examples/roundtrip`): passed. The machine has no
+  Break key, so Ctrl-Break was sent with `GenerateConsoleCtrlEvent` to the
+  app started in its own process group (the ad hoc script of 16.1): `returned
+  erQuit`, `closed.txt` written, exit code 0, after 516 ms.
+- Linux: deferred to the final pass (13.0).
+
 ### 13.5 Step 5: keep-alive pings
 
 - **Status:** not started
@@ -840,7 +863,9 @@ echo "returned ", startApp(webDir = "web", serve = true, port = 8080,
 - **Spec:** section 8
 - **Cross-OS:** checkpoint (run right after this step). `server.nim` has a
   separate IO path per OS (Windows sockets and `select`, kqueue, epoll), and
-  the ping tests are timing-based.
+  the ping tests are timing-based. Since 2026-10-15 the checkpoint covers
+  macOS and Windows only; the epoll path is first run on Linux in the final
+  pass (13.0).
 
 Tests (`t_server`, with a short interval such as 300 ms): an idle upgraded
 connection receives a ping; an active one does not; `pingIntervalMs = 0`
@@ -880,22 +905,22 @@ published only once verified on a real setup.
 
 ### 13.8 Manual verification
 
-Run by the user on each OS in the final pass after step 7 (13.0). The
-checkpoint after step 5 fills in the `nimble test` row and the Windows
-Ctrl-C / console rows early. Record results here (`pass`, `fail` with a
-section 16 entry, or `n/a`).
+Run by the user on each OS in the final pass after step 7 (13.0). Earlier
+checkpoints fill some rows in early, marked with the step they were run
+after; the final pass re-runs them. Record results here (`pass`, `fail` with
+a section 16 entry, or `n/a`).
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` passes | | | |
+| `nimble test` passes | pass (after step 4) | pass (after step 4) | |
 | Local mode: the three examples behave as before (open, call, second window, close, exit after the grace period) | | | |
 | Local mode, fixed port: a browser tab at the app's URL displaces the app window (4000, no reconnect) | | | |
 | Serve: starts without a browser, prints the startup line | | | |
 | Serve: page loads at `http://127.0.0.1:<port>` | | | |
 | Serve: a second tab displaces the first (4000, no reconnect) | | | |
-| Serve: Ctrl-C exits cleanly | | | |
-| Serve: `kill -TERM` exits cleanly | | n/a | |
-| Serve: closing the console window exits cleanly | n/a | | n/a |
+| Serve: Ctrl-C exits cleanly | pass (after step 4) | pass (after step 4) | |
+| Serve: `kill -TERM` exits cleanly | pass (after step 4) | n/a | |
+| Serve: closing the console window exits cleanly | n/a | pass (after step 4) | n/a |
 | Serve: idle behind a proxy for 5 minutes without a reconnect | | | |
 | Serve: dormant shim wakes (DevTools offline toggle) | | | |
 
@@ -1049,6 +1074,14 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   `kernel32`, and `Ws2_32` at runtime (checked with `objdump -p` and the
   generated C), so it does receive them. Section 7 updated; for the step 7
   guide.
+- 2026-10-15, step 4, macOS and Windows: the user ran `nimble test` and the
+  step 4 manual checks on both; everything passed (13.4 "Results", 13.8).
+  This was the first real compile and run of the POSIX signal code. Windows
+  Ctrl-Break was sent with `GenerateConsoleCtrlEvent` (no Break key). Linux
+  is deferred to the final pass because Ubuntu runs in VirtualBox on the
+  Windows machine; 13.0 updated (the step-5 checkpoint is macOS and Windows
+  only, so epoll is first exercised at the end). Steps 1–3 have not run on
+  Linux either.
 
 ### 16.2 Deviations from the spec
 
