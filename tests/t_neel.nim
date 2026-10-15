@@ -448,6 +448,11 @@ suite "neel: startApp end to end":
         check crossSite.status == 403
         check crossSite.body == "neel: refused: cross-site request"
         check token notin crossSite.body
+        # Even a top-level navigation (a link on another site) is refused.
+        let crossNav = http(port, target, headers = @[("Sec-Fetch-Site", "cross-site"),
+            ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Dest", "document")])
+        check crossNav.status == 403
+        check crossNav.body == "neel: refused: cross-site request"
       check http(port, NeelJsPath, headers = @[("Sec-Fetch-Site", "same-origin")]).body ==
         shim.body
       check http(port, "/", headers = @[("Sec-Fetch-Site", "none")]).status == 200

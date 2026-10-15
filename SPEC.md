@@ -97,8 +97,16 @@ Each of these raises `ValueError` with a message naming the parameter:
   `https://host[:port]`: anything with a path (including a trailing `/`), a
   query, a fragment, user info, a wildcard, or another scheme.
 
-Entries are normalized once: scheme and host lowercased, and a default port
-(`:80` for `http`, `:443` for `https`) removed, since browsers omit it.
+A valid `host` is ASCII letters, digits, `-`, `.`, and `_`, or a bracketed
+IPv6 literal (`[::1]`); a valid `port` is digits naming 1–65535. Also
+rejected: surrounding whitespace (entries are not trimmed), an empty host or
+port, and non-ASCII (browsers send an internationalized host in punycode, so
+such an entry could never match).
+
+Entries are normalized once: scheme and host lowercased, the port rewritten
+as a plain integer (`:0443` is `:443`), and a default port (`:80` for
+`http`, `:443` for `https`) removed, since browsers omit it. Entries that are
+equal after normalization are kept once.
 
 ### 3.3 Ignored in serve mode
 
@@ -142,16 +150,23 @@ keeps the change additive, since adding an enum member breaks exhaustive
 
 ## 4. Request filtering (`frontend.nim`)
 
-`requestRefusal` takes a small immutable filter value built once by `runApp`,
-for example:
+`requestRefusal(req, port, filter)` takes the server's bound port (read per
+request, as before: with `port = 0` it is only known once `listen` has
+started the IO thread) and a small immutable filter value built once by
+`runApp`, before `listen`, with `initRequestFilter(serve, allowedOrigins)`:
 
 ```nim
 type RequestFilter* = object
-  port*: int
   serve*: bool
   origins*: seq[string]   # normalized allowed origins
   hosts*: seq[string]     # host[:port] of each origin, derived once
 ```
+
+`initRequestFilter` normalizes each entry with `normalizeOrigin` (section
+3.2), which raises `ValueError`. It does not check the `serve` / `port`
+combinations of section 3.2; `runApp` does. The zero value (and
+`initRequestFilter(serve = false)`) is local mode; a non-serve filter
+ignores its `origins` and `hosts`.
 
 Rules, in order (the first failure is the 403 reason):
 
@@ -168,6 +183,11 @@ Rules, in order (the first failure is the 403 reason):
    - A request without the header (older browsers) passes, as today.
 3. **Origin on `/ws`.** Accept `http://127.0.0.1:<port>`. In serve mode, also
    accept an exact match in `origins`. A missing `Origin` is refused.
+
+The 403 texts are today's in local mode, and in serve mode without allowed
+origins. In serve mode with allowed origins, the `Host` and `Origin` texts
+end in `or the host of an allowed origin` / `or an allowed origin`; they
+never list the origins.
 
 The guarantee this preserves: no other website can obtain the token or open
 the WebSocket. Cross-site script loads of `/neel.js` are still refused (their
@@ -233,7 +253,9 @@ In serve mode, `runApp`:
 2. skips `findBrowser` (no `NeelBrowserError` from a stale `browserPath`, no
    probing on a machine without a browser);
 3. builds the `RequestFilter` and stores it in `AppState` (written once
-   before `listen`, read by workers, like the other fields);
+   before `listen`, read by workers, like the other fields); the bound port
+   is not part of it and is passed to `requestRefusal` per request
+   (section 4);
 4. creates the server with the ping interval (section 8);
 5. calls `initWindows(..., serve = true, launcher = noLaunch)` and creates
    window 1 at `startPath` (section 5.1);
@@ -425,7 +447,9 @@ matrix in 13.8.
 
 ### 13.1 Step 1: request filtering
 
-- **Status:** not started
+- **Status:** done (2026-10-14; `nimble test` and `nim c src/neel.nim` green
+  on macOS 13 with Nim 2.2.12, which Nimble also used:
+  `~/.nimble/bin/nim`)
 - **Depends on:** nothing
 - **Touches:** `frontend.nim`; the `handleRequest` call site in `neel.nim`
 - **Spec:** sections 3.2 (origin validation and normalization), 4
@@ -449,6 +473,27 @@ Tests (`t_frontend`):
 - validation errors for each malformed origin form in 3.2.
 
 **Notes:**
+- The bound port is not in `RequestFilter`; the signature is
+  `requestRefusal(req, port, filter)` (deviation, 16.2). Sections 4 and 6
+  updated.
+- Origin validation follows the strict reading confirmed with the user
+  (allowed host characters, port range, no trimming, no non-ASCII); section
+  3.2 updated.
+- Built: `RequestFilter`, `normalizeOrigin`, `initRequestFilter` in
+  `frontend.nim`; `neel.nim` stores `initRequestFilter(serve = false)` in
+  `AppState` and passes it at the `handleRequest` call site.
+- Tests: `t_frontend` gains suites for normalization, filter construction,
+  and serve-mode rules. Local mode is proven by an equivalence test against
+  a verbatim copy of the old rules over ~19,000 header combinations; a
+  mutation that drops the `serve` guard fails it. `t_neel` adds an end-to-end
+  check that a cross-site top-level navigation is still refused locally.
+
+Manual checks (each OS):
+- `nimble test` passes (macOS done in this session; Windows, Linux open).
+- Local mode: the three examples behave as before (open, call, second
+  window, close, exit after the grace period). This is the only manual check
+  for this step: serve-mode filtering is not reachable from `startApp` until
+  step 2.
 
 ### 13.2 Step 2: serve core
 
@@ -621,12 +666,28 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
 - 2026-10-14, pre-implementation, all: nginx closes idle proxied WebSockets
   after 60 s and recommends upstream pings; Cloudflare closes idle WebSockets
   (reported 100 s) and restarts edge servers. Basis for section 8 and 10.3.
+- 2026-10-14, step 1, macOS: `server.listen` binds the socket, records the
+  port, and starts the IO thread in one call, so with `port = 0` the bound
+  port does not exist before requests can arrive. Anything that must be
+  written before `listen` cannot hold it (see 16.2).
+- 2026-10-14, step 1, macOS: in a sandboxed agent shell, `t_neel` fails with
+  `OSError: Operation not permitted` from `startApp` and Nim cannot write
+  `~/.cache/nim`; both are the sandbox, not Neel. Run `nimble test` without
+  the sandbox (or with `--nimcache` under `/tmp` for single files).
 
 ### 16.2 Deviations from the spec
 
 Format: `YYYY-MM-DD, step N: what changed and why; spec sections updated`.
 
-- None yet.
+- 2026-10-14, step 1: `RequestFilter` has no `port` field and
+  `requestRefusal` takes `(req, port, filter)`, with the port read from the
+  server per request as before. The spec put the port in a filter written
+  before `listen`, which is impossible for the default `port = 0` (16.1).
+  Agreed with the user. Sections 4 and 6 (step 3) updated; the example in
+  `.cursor/rules/tests.mdc` updated to the new signature.
+- 2026-10-14, step 1: section 3.2 made precise (agreed with the user): host
+  characters, port range 1–65535 and integer re-serialization, no trimming,
+  non-ASCII rejected, duplicates kept once. Section 3.2 updated.
 
 ### 16.3 Gotchas
 
@@ -657,3 +718,14 @@ Rules every step must respect. The first entries come from the existing code.
 - **Shipped comments are self-contained.** Code comments and doc comments
   never cite `SPEC.md`, step numbers, or this log; they state the constraint
   itself. (The 2.0 merge needed a cleanup commit for exactly this.)
+- **`initRequestFilter` does not reject origins without `serve`.** A
+  non-serve filter silently ignores its origins, so the section 3.2 checks
+  (`allowedOrigins` without `serve`, `serve` with `port = 0`) must be done in
+  `runApp` before the filter is built, or a misconfiguration goes unnoticed.
+- **Host and Origin matching is exact and case-sensitive.** Browsers send
+  both lowercased and without a default port, which is why entries are
+  normalized; never compare against raw, unnormalized `allowedOrigins`.
+- **Local-mode filtering has an oracle.** `t_frontend` keeps a verbatim copy
+  of the pre-serve rules (`legacyRefusal`) and compares every local filter
+  against it over a header grid. If a later step changes local filtering on
+  purpose, change the oracle in the same step and say so in 16.2.

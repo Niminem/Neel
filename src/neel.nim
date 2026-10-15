@@ -97,6 +97,7 @@ type
     assets: AssetSource
     dispatch: DispatchProc
     exposed: seq[string]
+    filter: RequestFilter
 
 var app: AppState
   ## Module global behind `startApp`; see `AppState`.
@@ -241,7 +242,7 @@ proc neelJsWindowId(req: HttpRequest): tuple[id, named: int] =
 proc handleRequest(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
   ## The route table (see the module header), behind `requestRefusal`.
   let a = appPtr()
-  let refusal = requestRefusal(req, a.srv.port)
+  let refusal = requestRefusal(req, a.srv.port, a.filter)
   if refusal.len > 0:
     return respond(initResponse(403, refusal, "text/plain"))
   if req.path == WsPath:
@@ -351,7 +352,7 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   let search = findBrowser(browsers, browserPath)
   app = AppState(running: true, token: newToken(), search: search,
                  fallback: fallback, assets: assets, dispatch: dispatch,
-                 exposed: exposed)
+                 exposed: exposed, filter: initRequestFilter(serve = false))
   app.tbl = newPendingTable()
   app.srv = newServer(onRequest = handleRequest, onMessage = handleMessage,
                       onOpen = connectionOpened, onClose = connectionClosed,

@@ -23,7 +23,11 @@
 ## `requestRefusal` is the other side of the same contract: every page Neel
 ## opens lives at `http://127.0.0.1:<port>`, so a request that does not look
 ## like it came from such a page (another `Host`, a cross-site fetch, a `/ws`
-## upgrade from another `Origin`) is refused before routing.
+## upgrade from another `Origin`) is refused before routing. Its
+## `RequestFilter` (built once by `initRequestFilter`, immutable afterwards)
+## widens this in serve mode only: the hosts of the allowed origins
+## (`normalizeOrigin`) are accepted as `Host`, the origins themselves on
+## `/ws`, and cross-site top-level document navigations pass.
 
 import std/[json, strutils]
 import ./http
@@ -49,6 +53,22 @@ const
     ## `/ws` query parameter carrying the window id (`&window=N`).
   LoopbackHost* = "127.0.0.1"
     ## The only host Neel serves and opens pages at.
+
+type
+  RequestFilter* = object
+    ## What `requestRefusal` accepts beyond Neel's own `127.0.0.1:<port>`.
+    ## Built once by `initRequestFilter` before the server listens and only
+    ## read afterwards, so workers share it without a lock. The zero value is
+    ## local mode.
+    serve*: bool
+      ## Serve mode: `origins` and `hosts` are accepted, and cross-site
+      ## top-level document navigations pass. Both seqs are ignored when
+      ## `false`.
+    origins*: seq[string]
+      ## Normalized allowed origins (`normalizeOrigin`), without duplicates.
+    hosts*: seq[string]
+      ## The `host[:port]` part of each entry of `origins`, without
+      ## duplicates: the `Host` a proxy forwarding the public host sends.
 
 proc jsStringLiteral*(s: string): string {.gcsafe.} =
   ## `s` as a double-quoted JSON (hence JS) string literal. Quotes,
@@ -81,35 +101,138 @@ proc renderNeelJs*(token: string; windowId: int; exposed: seq[string]): string
     (WindowIdPlaceholder, $windowId),
     (ExposedPlaceholder, jsStringArrayLiteral(exposed)))
 
+proc normalizeOrigin*(origin: string): string =
+  ## `origin` as browsers serialize it in an `Origin` header: scheme and host
+  ## lowercased, the port written as a plain integer and dropped when it is
+  ## the scheme's default (`:80` for `http`, `:443` for `https`). Accepts
+  ## only `http://host[:port]` and `https://host[:port]`, where `host` is
+  ## ASCII letters, digits, `-`, `.`, `_`, or a bracketed IPv6 literal, and
+  ## `port` is 1-65535. Raises `ValueError` naming `allowedOrigins` for
+  ## anything else: a path (a trailing `/` included), a query, a fragment,
+  ## user info, a wildcard, another scheme, an empty host or port,
+  ## surrounding whitespace, or non-ASCII (browsers send the punycode form).
+  ## Pure.
+  proc invalid(why: string) {.noreturn.} =
+    raise newException(ValueError, "neel: allowedOrigins entry " & escape(origin) &
+      " " & why & "; expected http://host[:port] or https://host[:port]")
+  if origin.len == 0:
+    invalid("is empty")
+  for c in origin:
+    if c <= ' ' or c >= '\x7F':
+      invalid("contains whitespace, a control character, or non-ASCII " &
+              "(write an internationalized host in its punycode form)")
+  let sep = origin.find("://")
+  if sep < 0:
+    invalid("has no scheme")
+  let scheme = origin[0 ..< sep].toLowerAscii
+  if scheme notin ["http", "https"]:
+    invalid("has an unsupported scheme")
+  let rest = origin[sep + 3 .. ^1]
+  if '/' in rest:
+    invalid("has a path (a trailing / counts as one)")
+  if '?' in rest:
+    invalid("has a query")
+  if '#' in rest:
+    invalid("has a fragment")
+  if '@' in rest:
+    invalid("has user info")
+  if '*' in rest:
+    invalid("has a wildcard")
+  var host, portText: string
+  var hasPort = false
+  if rest.startsWith('['):
+    let close = rest.find(']')
+    if close < 2 or not rest[1 ..< close].allCharsInSet(HexDigits + {':', '.'}):
+      invalid("has an invalid IPv6 host")
+    host = rest[0 .. close]
+    let after = rest[close + 1 .. ^1]
+    if after.len > 0:
+      if after[0] != ':':
+        invalid("has an invalid IPv6 host")
+      hasPort = true
+      portText = after[1 .. ^1]
+  else:
+    let colon = rest.find(':')
+    if colon < 0:
+      host = rest
+    else:
+      host = rest[0 ..< colon]
+      hasPort = true
+      portText = rest[colon + 1 .. ^1]
+    if host.len == 0:
+      invalid("has no host")
+    if not host.allCharsInSet(Letters + Digits + {'-', '.', '_'}):
+      invalid("has an invalid host")
+  result = scheme & "://" & host.toLowerAscii
+  if hasPort:
+    if portText.len notin 1 .. 5 or not portText.allCharsInSet(Digits):
+      invalid("has an invalid port")
+    let port = parseInt(portText)
+    if port notin 1 .. 65535:
+      invalid("has a port outside 1-65535")
+    if not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+      result.add ":" & $port
+
+proc initRequestFilter*(serve: bool; allowedOrigins: seq[string] = @[]): RequestFilter =
+  ## The filter for one run. Every entry of `allowedOrigins` goes through
+  ## `normalizeOrigin` (which raises `ValueError` on a malformed one) and
+  ## contributes its `host[:port]` to `hosts`; duplicates after
+  ## normalization are kept once. `initRequestFilter(serve = false)` is
+  ## local mode.
+  result.serve = serve
+  for entry in allowedOrigins:
+    let origin = normalizeOrigin(entry)
+    if origin notin result.origins:
+      result.origins.add origin
+    let host = origin[origin.find("://") + 3 .. ^1]
+    if host notin result.hosts:
+      result.hosts.add host
+
 proc isOwnHost(host: string; port: int): bool =
   ## `host` (a `Host` value, or an `Origin` without its scheme) names this
   ## server: `127.0.0.1:<port>`, or bare `127.0.0.1` on port 80, where
   ## browsers omit the default port.
   host == LoopbackHost & ":" & $port or (port == 80 and host == LoopbackHost)
 
-proc requestRefusal*(req: HttpRequest; port: int): string {.gcsafe.} =
+proc isTopLevelNavigation(req: HttpRequest): bool =
+  ## `Sec-Fetch-Mode: navigate` with `Sec-Fetch-Dest: document`: the browser
+  ## is loading a page into a tab, not a frame, script, or fetch.
+  cmpIgnoreCase(req.getHeader("Sec-Fetch-Mode"), "navigate") == 0 and
+    cmpIgnoreCase(req.getHeader("Sec-Fetch-Dest"), "document") == 0
+
+proc requestRefusal*(req: HttpRequest; port: int; filter: RequestFilter): string
+    {.gcsafe.} =
   ## Why `req` must be refused before routing, or `""` to serve it. `port`
   ## is the server's bound port. Refused, in this order:
   ## - a `Host` other than `127.0.0.1:<port>`, including none (DNS
-  ##   rebinding: the browser sends the attacker's host name);
+  ##   rebinding: the browser sends the attacker's host name). In serve mode
+  ##   an exact match in `filter.hosts` is accepted too;
   ## - `Sec-Fetch-Site: cross-site` (another site's page loading `/neel.js`,
   ##   which carries the token, through a `<script>` tag); a request without
-  ##   the header (older browsers) passes;
+  ##   the header (older browsers) passes. In serve mode a top-level document
+  ##   navigation passes (links and auth-proxy login redirects arrive
+  ##   cross-site); frames do not, so another site cannot frame the app;
   ## - a `WsPath` request whose `Origin` is not `http://127.0.0.1:<port>`,
   ##   including none: browsers always send `Origin` on a WebSocket
   ##   handshake and a page cannot forge it, so a token captured by another
-  ##   site is useless to it.
+  ##   site is useless to it. In serve mode an exact match in
+  ##   `filter.origins` is accepted too.
   ## Pure.
-  if not isOwnHost(req.getHeader("Host"), port):
-    return "neel: refused: the Host header must be " & LoopbackHost & ":" & $port
-  if cmpIgnoreCase(req.getHeader("Sec-Fetch-Site"), "cross-site") == 0:
+  let widened = filter.serve and filter.origins.len > 0
+  let host = req.getHeader("Host")
+  if not (isOwnHost(host, port) or (filter.serve and host in filter.hosts)):
+    return "neel: refused: the Host header must be " & LoopbackHost & ":" & $port &
+      (if widened: " or the host of an allowed origin" else: "")
+  if cmpIgnoreCase(req.getHeader("Sec-Fetch-Site"), "cross-site") == 0 and
+      not (filter.serve and isTopLevelNavigation(req)):
     return "neel: refused: cross-site request"
   if req.path == WsPath:
     const scheme = "http://"
     let origin = req.getHeader("Origin")
-    if not (origin.startsWith(scheme) and isOwnHost(origin[scheme.len .. ^1], port)):
+    let own = origin.startsWith(scheme) and isOwnHost(origin[scheme.len .. ^1], port)
+    if not (own or (filter.serve and origin in filter.origins)):
       return "neel: refused: the Origin header must be " & scheme & LoopbackHost &
-        ":" & $port
+        ":" & $port & (if widened: " or an allowed origin" else: "")
   ""
 
 static:

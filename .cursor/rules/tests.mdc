@@ -39,5 +39,5 @@ alwaysApply: false
 ```nim
 suite "frontend":
   test "serve mode: cross-site iframe navigation is refused":
-    check requestRefusal(req, filter).len > 0
+    check requestRefusal(req, port, filter).len > 0
 ```
