@@ -4,8 +4,10 @@
 ## and re-exports the user-facing pieces of the internal modules under
 ## `neel/`: the `expose` pragma, the `js` proxy, the window API (`openWindow`,
 ## `closeWindow`, `windows`, `window`, `requireWindow`, `currentWindow`), the
-## `Browser` enum and window size / position types, `quitApp`, and the
-## `Neel*Error` exception types an application can see. It also re-exports `std/json` and `std/options`, because
+## `Browser` enum and window size / position types, `quitApp`, the
+## `CloseDisplaced` close code (what `neel.onclose` reports when another tab
+## or device takes a window over), and the `Neel*Error` exception types an
+## application can see. It also re-exports `std/json` and `std/options`, because
 ## the API hands out `JsonNode` (`js.wait.foo(...)`) and `Option` (`window(id)`,
 ## `size = some((800, 600))`) values that an application needs to unpack.
 ##
@@ -74,6 +76,7 @@ export window.Window, ExitReason, WindowHook, openWindow, closeWindow,
        isConnected, quitApp, connectionCount, DefaultGracePeriodMs,
        MinGracePeriodMs, DefaultStartupTimeoutMs, NeelServeModeError
 export Browser, NeelBrowserError, WindowSize, WindowPosition
+export CloseDisplaced
 export NeelTimeoutError, NeelDisconnectedError, NeelRemoteError
 export DefaultWorkers, DefaultQueueCapacity, DefaultMaxMessageSize
 
@@ -231,9 +234,9 @@ proc appSend(conn: ConnId; text: string): bool {.gcsafe.} =
   ## `SendProc` for the js bridge.
   appPtr().srv.send(conn, text)
 
-proc appClose(conn: ConnId; code: int): bool {.gcsafe.} =
+proc appClose(conn: ConnId; code: int; reason: string): bool {.gcsafe.} =
   ## `CloseProc` for the window manager.
-  appPtr().srv.close(conn, code)
+  appPtr().srv.close(conn, code, reason)
 
 proc handleWs(a: ptr AppState; conn: ConnId; req: HttpRequest): RequestAction =
   ## `/ws`: a valid upgrade with the launch token and a known window id is

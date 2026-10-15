@@ -36,12 +36,13 @@ let fakeSearch = BrowserSearch(
 
 type
   Launch = tuple[url, userDataDir: string; opts: LaunchOptions]
+  Closed = tuple[conn: ConnId; code: int; reason: string]
 
   Fake = object
     ## Shared between the test thread, the injected procs, and script
     ## threads; `lock` guards everything below it.
     lock: Lock
-    closes: seq[tuple[conn: ConnId; code: int]]
+    closes: seq[Closed]
     launches: seq[Launch]
     sent: seq[tuple[conn: ConnId; text: string]]
     opened: seq[int]   # window ids passed to onWindowOpen
@@ -53,10 +54,10 @@ type
 var fake: Fake
 initLock fake.lock
 
-proc fakeClose(conn: ConnId; code: int): bool {.gcsafe.} =
+proc fakeClose(conn: ConnId; code: int; reason: string): bool {.gcsafe.} =
   {.cast(gcsafe).}: # test global, guarded by its lock
     acquire fake.lock
-    fake.closes.add((conn, code))
+    fake.closes.add((conn, code, reason))
     release fake.lock
   true
 
@@ -111,7 +112,7 @@ proc launches(): seq[Launch] =
   result = fake.launches
   release fake.lock
 
-proc closes(): seq[tuple[conn: ConnId; code: int]] =
+proc closes(): seq[Closed] =
   acquire fake.lock
   result = fake.closes
   release fake.lock
@@ -350,8 +351,10 @@ suite "window: connection mapping":
     check windowIdOf(ConnB) == 1
     check connectionCount() == 2
     # The displaced connection is told to go (a no-op when it already has),
-    # so it cannot linger counted but unmapped.
-    check closes() == @[(ConnA, CloseNormal)]
+    # so it cannot linger counted but unmapped, with the code the shim
+    # treats as final.
+    check closes() == @[(ConnA, CloseDisplaced, "displaced by another connection")]
+    check CloseDisplaced == 4000
     # Re-binding the same connection displaces nothing.
     check bindConnection(1, ConnB)
     check closes().len == 1
@@ -437,7 +440,7 @@ suite "window: closing":
     let dir = launches()[0].userDataDir
     check dirExists(dir)
     closeWindow(w)
-    check closes() == @[(ConnA, CloseNormal)]
+    check closes() == @[(ConnA, CloseNormal, "")]
     check not dirExists(dir)
     check not w.isOpen
     check not w.isConnected
@@ -453,6 +456,17 @@ suite "window: closing":
     connectionClosed(ConnA)
     check connectionCount() == 0
     check windowIdOf(ConnA) == NoWindow
+
+  winTest "a displaced connection gets 4000; closeWindow still sends 1000 to the new one":
+    let w = openWindow()
+    connect(1, ConnA)
+    connect(1, ConnB)
+    connectionClosed(ConnA)
+    closeWindow(w)
+    check closes() == @[(ConnA, CloseDisplaced, "displaced by another connection"),
+                        (ConnB, CloseNormal, "")]
+    connectionClosed(ConnB)
+    check connectionCount() == 0
 
   winTest "closeWindow of a window that never connected sends nothing":
     let w = openWindow()
@@ -711,7 +725,7 @@ suite "window: serve mode":
     check openedIds() == @[1]
     # A second device displaces the first.
     connect(1, ConnB)
-    check closes() == @[(ConnA, CloseNormal)]
+    check closes() == @[(ConnA, CloseDisplaced, "displaced by another connection")]
     connectionClosed(ConnA)
     check windowIdOf(ConnB) == 1
     # It drops, then reconnects.
@@ -759,9 +773,9 @@ proc integSend(conn: ConnId; text: string): bool {.gcsafe.} =
   {.cast(gcsafe).}: # the Server ref is written once before listen
     integ.srv.send(conn, text)
 
-proc integClose(conn: ConnId; code: int): bool {.gcsafe.} =
+proc integClose(conn: ConnId; code: int; reason: string): bool {.gcsafe.} =
   {.cast(gcsafe).}:
-    integ.srv.close(conn, code)
+    integ.srv.close(conn, code, reason)
 
 proc integDispatch(name: string; args: seq[JsonNode]): JsonNode {.gcsafe.} =
   ## Stands in for the generated dispatcher.
@@ -908,7 +922,7 @@ suite "window: integration with the server":
       check c2a.readMsg() == retMsg(3, %1)
       check waitUntil(IoTimeout, proc(): bool = connectionCount() == 1)
       # A second live connection for window 1 (a duplicated tab): the newest
-      # binding wins and the displaced one is closed with 1000 rather than
+      # binding wins and the displaced one is closed with 4000 rather than
       # lingering counted but mapped to no window.
       var (c2, st2) = handshake(integ.srv.port, 1)
       check st2.startsWith("HTTP/1.1 101")
@@ -916,7 +930,9 @@ suite "window: integration with the server":
       for _ in 0 .. 1:
         let f = c2a.readFrame()
         if f.opcode == opClose:
-          check decodeClose(f).code == CloseNormal
+          let info = decodeClose(f)
+          check info.code == CloseDisplaced
+          check info.reason == "displaced by another connection"
           dupClosed = true
           break
       check dupClosed
@@ -942,7 +958,9 @@ suite "window: integration with the server":
       for _ in 0 .. 1:
         let f = c2.readFrame()
         if f.opcode == opClose:
-          check decodeClose(f).code == CloseNormal
+          let info = decodeClose(f)
+          check info.code == CloseNormal
+          check info.reason == ""
           sawClose = true
           break
       check sawClose

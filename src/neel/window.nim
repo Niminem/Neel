@@ -16,9 +16,10 @@
 ## (they drive the connection count); `windowIdOf(conn)` is what `onMessage`
 ## wraps `handleCall` with (`withCurrentWindow`). A page refresh or a shim
 ## reconnect presents the same window id on a new `ConnId`: `bindConnection`
-## re-associates (and closes the displaced connection, should it still be
-## alive), and `connectionClosed` clears a window's connection only if it
-## still points at the closing `ConnId`.
+## re-associates (and closes the displaced connection with
+## `frontend.CloseDisplaced`, should it still be alive), and
+## `connectionClosed` clears a window's connection only if it still points at
+## the closing `ConnId`.
 ##
 ## API: `openWindow(path, size, position, extraFlags)` allocates an id (1, 2,
 ## 3, ...), builds `<base><path>?window=<id>` (`frontend.WindowQueryParam`),
@@ -64,7 +65,7 @@ import ./jsproxy
 import ./browser
 from ./server import ConnId, `==`, hash, `$`
 from ./websocket import CloseNormal
-from ./frontend import WindowQueryParam
+from ./frontend import WindowQueryParam, CloseDisplaced
 
 const
   DefaultGracePeriodMs* = when defined(release): 10_000 else: 3_000
@@ -83,6 +84,8 @@ const
     ## browser that never connects does not hang the app.
   IdleTickMs = 1000
     ## Upper bound on one wait inside `waitForAppExit` when nothing is due.
+  DisplacedReason = "displaced by another connection"
+    ## Close reason sent with `CloseDisplaced`.
 
 type
   Window* = object
@@ -108,9 +111,9 @@ type
     ## has exactly one window for its whole run. Raised in an exposed proc,
     ## it reaches the page as a structured error.
 
-  CloseProc* = proc(conn: ConnId; code: int): bool {.gcsafe.}
-    ## Starts closing a WebSocket connection with a close code
-    ## (`Server.close` in production).
+  CloseProc* = proc(conn: ConnId; code: int; reason: string): bool {.gcsafe.}
+    ## Starts closing a WebSocket connection with a close code and reason
+    ## (`""` for none; `Server.close` in production).
 
   Launcher* = proc(url, userDataDir: string; opts: LaunchOptions): BrowserHandle
     {.gcsafe.}
@@ -317,11 +320,13 @@ proc bindConnection*(windowId: int; conn: ConnId): bool {.gcsafe.} =
   ## to another connection is re-associated (page refresh or shim reconnect):
   ## the new `ConnId` replaces the old one, and the old connection's
   ## `connectionClosed` will not disturb the new binding. The displaced
-  ## connection is also closed with 1000: normally it is already gone (the
-  ## browser dropped it when the page unloaded, which is why the shim is
-  ## reconnecting), but if it is still alive (a duplicated tab) it would
-  ## otherwise linger counted but mapped to no window, so its calls would
-  ## run without a current window and it would keep the app from exiting.
+  ## connection is also closed with `CloseDisplaced` (4000, reason
+  ## `"displaced by another connection"`), which `neel.js` treats as final:
+  ## normally it is already gone (the browser dropped it when the page
+  ## unloaded, which is why the shim is reconnecting), but if it is still
+  ## alive (a duplicated tab, another device) it would otherwise linger
+  ## counted but mapped to no window, so its calls would run without a
+  ## current window and it would keep the app from exiting.
   let m = mgr
   if m == nil:
     return false
@@ -342,7 +347,7 @@ proc bindConnection*(windowId: int; conn: ConnId): bool {.gcsafe.} =
   m.connToWindow[conn] = windowId
   release m.lock
   if hasDisplaced:
-    discard m.closeConn(displaced, CloseNormal)
+    discard m.closeConn(displaced, CloseDisplaced, DisplacedReason)
   true
 
 proc connectionOpened*(conn: ConnId) {.gcsafe.} =
@@ -550,7 +555,7 @@ proc closeWindow*(w: Window) {.gcsafe.} =
     toFree = rec
   release m.lock
   if hasConn:
-    discard m.closeConn(conn, CloseNormal)
+    discard m.closeConn(conn, CloseNormal, "")
   finishHandle(handle)
   if toFree != nil:
     freeRecord(toFree)

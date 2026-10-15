@@ -485,14 +485,18 @@ proc nothingStarted(): bool =
            shared.windowOpens == 0 and shared.windowCloses == 0
   release shared.lock
 
-proc readUntilClose(c: var WsClient; maxFrames = 3): int =
-  ## The close code of the first close frame among the next `maxFrames`
-  ## frames, or -1.
+proc readClose(c: var WsClient; maxFrames = 3): CloseInfo =
+  ## The first close frame among the next `maxFrames` frames, or code -1.
   for _ in 1 .. maxFrames:
     let f = c.readFrame()
     if f.opcode == opClose:
-      return decodeClose(f).code
-  -1
+      return decodeClose(f)
+  CloseInfo(code: -1)
+
+proc readUntilClose(c: var WsClient; maxFrames = 3): int =
+  ## The close code of the first close frame among the next `maxFrames`
+  ## frames, or -1.
+  c.readClose(maxFrames).code
 
 proc opens(): int =
   acquire shared.lock
@@ -773,7 +777,7 @@ suite "neel: startApp end to end":
     check dirs.len == 1
     check not dirExists(dirs[0])
 
-  test "local mode: a non-root startPath leaves / alone; windows open, close, and quit as before":
+  test "local mode: a non-root startPath leaves / alone; displaced 4000, closeWindow 1000, quit 1001":
     appRun(3):
       let base = "http://127.0.0.1:" & $port
       acquire shared.lock
@@ -792,14 +796,35 @@ suite "neel: startApp end to end":
       var (c, status) = handshake(port, token, 1)
       check status.startsWith("HTTP/1.1 101")
       check waitUntil(IoTimeout, proc(): bool = opens() == 1)
-      c.sendMsg(callMsg("openSecond", @[], id = 1))
-      check c.readMsg() == retMsg(1, %2)
-      c.sendMsg(callMsg("closeSecond", @[%2], id = 2))
-      check c.readMsg() == retMsg(2, newJNull())
-      check closes() == 1
-      c.sendMsg(callMsg("stop", @[], id = 3))
-      check c.readUntilClose() == CloseGoingAway
+      # A duplicated tab of window 1: the first connection is displaced with
+      # 4000, the one close code that differs from earlier releases.
+      var (d, stD) = handshake(port, token, 1)
+      check stD.startsWith("HTTP/1.1 101")
+      let displaced = c.readClose()
+      check displaced.code == CloseDisplaced
+      check displaced.reason == "displaced by another connection"
       c.sock.close()
+      check waitUntil(IoTimeout, proc(): bool = connectionCount() == 1)
+      d.sendMsg(callMsg("whichWindow", @[], id = 1))
+      check d.readMsg() == retMsg(1, %1)
+      check opens() == 1
+      # A second window connects; closeWindow sends it 1000 as before.
+      d.sendMsg(callMsg("openSecond", @[], id = 2))
+      check d.readMsg() == retMsg(2, %2)
+      var (e, stE) = handshake(port, token, 2)
+      check stE.startsWith("HTTP/1.1 101")
+      check waitUntil(IoTimeout, proc(): bool = opens() == 2)
+      d.sendMsg(callMsg("closeSecond", @[%2], id = 3))
+      check d.readMsg() == retMsg(3, newJNull())
+      let closedByApp = e.readClose()
+      check closedByApp.code == CloseNormal
+      check closedByApp.reason == ""
+      e.sock.close()
+      check closes() == 1
+      # quitApp: shutdown sends 1001 as before.
+      d.sendMsg(callMsg("stop", @[], id = 4))
+      check d.readUntilClose() == CloseGoingAway
+      d.sock.close()
       check waitUntil(IoTimeout, isDone)
     check shared.reason == erQuit
     acquire shared.lock
@@ -864,6 +889,8 @@ suite "neel: startApp end to end":
     check NeelRemoteError is CatchableError
     check NeelBrowserError is CatchableError
     check NeelServeModeError is CatchableError
+    # Qualified, so the `neel/frontend` import above cannot satisfy it.
+    check neel.CloseDisplaced == 4000
     # Internal wiring stays internal. (`NeelProtocolError`, `NeelFrameError`,
     # `LaunchOptions`, `NeelJsPath`, and the test hooks are reachable here
     # only through this file's `neel/*` imports.)
@@ -999,7 +1026,9 @@ suite "neel: serve mode":
       # Device B, on the machine itself, displaces A.
       var (b, stB) = handshake(port, token, 1)
       check stB.startsWith("HTTP/1.1 101")
-      check a.readUntilClose() == CloseNormal
+      let displaced = a.readClose()
+      check displaced.code == CloseDisplaced
+      check displaced.reason == "displaced by another connection"
       a.sock.close()
       b.sendMsg(callMsg("whichWindow", @[], id = 1))
       check b.readMsg() == retMsg(1, %1)

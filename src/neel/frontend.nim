@@ -18,7 +18,9 @@
 ## sends (`TokenQueryParam`, `WindowQueryParam`) and the `/ws` path, so that
 ## Task 13's upgrade handler and `neel.js` share one definition; the `static:`
 ## block verifies that the shim really uses them. The route the shim itself
-## is served at (`NeelJsPath`) lives here too.
+## is served at (`NeelJsPath`) lives here too, and so does `CloseDisplaced`,
+## the close code the shim must treat as final; the `static:` block checks
+## that `neel.js` defines the same number.
 ##
 ## `requestRefusal` is the other side of the same contract: every page Neel
 ## opens lives at `http://127.0.0.1:<port>`, so a request that does not look
@@ -53,6 +55,13 @@ const
     ## `/ws` query parameter carrying the window id (`&window=N`).
   LoopbackHost* = "127.0.0.1"
     ## The only host Neel serves and opens pages at.
+  CloseDisplaced* = 4000
+    ## Close code a connection receives when another connection binds to its
+    ## window (a second tab or device). `neel.js` treats it as final, like
+    ## 1000 and 1001: a displaced page that reconnected would displace the
+    ## new one in turn, forever. `neel.onclose` reports it, so a page can
+    ## say it was opened elsewhere.
+  ShimCloseDisplaced = "const CLOSE_DISPLACED = " & $CloseDisplaced & ";"
 
 type
   RequestFilter* = object
@@ -248,5 +257,7 @@ static:
     "neel.js must build its URL from " & WsPath & "?" & TokenQueryParam & "="
   doAssert ("&" & WindowQueryParam & "=") in NeelJsSource,
     "neel.js must append &" & WindowQueryParam & "= to its URL"
+  doAssert NeelJsSource.count(ShimCloseDisplaced) == 1,
+    "neel.js must define " & ShimCloseDisplaced & " exactly once"
   doAssert PlaceholderPrefix notin renderNeelJs("token", 1, @["a", "b"]),
     "renderNeelJs left a placeholder behind"

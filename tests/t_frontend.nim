@@ -7,6 +7,7 @@
 
 import std/[unittest, json, strutils]
 import neel/[frontend, http]
+from neel/websocket import isValidCloseCode
 
 const
   Tricky = "a\"b\\c</script><script>alert(1)</script>\n\t\u00e9"
@@ -107,6 +108,22 @@ suite "frontend: shared constants":
     let js = renderNeelJs("tok", 1, @[])
     check (WsPath & "?" & TokenQueryParam & "=") in js
     check ("&" & WindowQueryParam & "=") in js
+
+  test "the shim defines CloseDisplaced and treats it as final, like 1000 and 1001":
+    check CloseDisplaced == 4000
+    check isValidCloseCode(CloseDisplaced)
+    let js = renderNeelJs("tok", 1, @[])
+    let def = "const CLOSE_DISPLACED = " & $CloseDisplaced & ";"
+    check js.count(def) == 1
+    check NeelJsSource.count(def) == 1
+    # The one branch that terminates instead of reconnecting.
+    let finalBranch = "if (event.code === 1000 || event.code === 1001 || " &
+                      "event.code === CLOSE_DISPLACED) {"
+    check js.count(finalBranch) == 1
+    let branch = js.find(finalBranch)
+    check js.find("terminate(", branch) < js.find("scheduleReconnect(", branch)
+    # Nothing else in the shim compares close codes.
+    check js.count("event.code ===") == 3
 
   test "the rendered shim is a classic script that sets globalThis.neel":
     let js = renderNeelJs("tok", 1, @[])

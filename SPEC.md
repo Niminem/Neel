@@ -364,7 +364,11 @@ No version skew is possible: the shim is compiled into the same binary
 
 ## 10. Shim changes (`neel.js`)
 
-**10.1 Close codes.** `ws.onclose` terminates on 1000, 1001, and 4000.
+**10.1 Close codes.** `ws.onclose` terminates on 1000, 1001, and 4000, in
+one branch: a 4000 close rejects pending and later calls with
+`neel: server closed the connection (close code 4000)`, like 1000 and 1001,
+and `onclose` receives `(4000, false)`. The shim names the code
+`CLOSE_DISPLACED`.
 
 **10.2 Serve flag.** A fourth placeholder, `__NEEL_SERVE__`, rendered as
 `true` / `false` by `renderNeelJs`. The `static:` checks in `frontend.nim`
@@ -625,18 +629,70 @@ Manual checks (deferred to the final pass, 13.0):
 
 ### 13.3 Step 3: displaced close code
 
-- **Status:** not started
+- **Status:** done (2026-10-15; `nimble test` and `nim c src/neel.nim` green
+  on **Windows 11** (win32 10.0.26200) with Nim 2.2.12. `nim` on PATH is
+  `~/.nimble/bin/nim.exe`; Nimble compiled with
+  `~/.nimble/pkgs2/nim-2.2.12-1ce02ec.../bin/nim.exe`, also 2.2.12. macOS
+  and Linux not run for this step.)
 - **Depends on:** step 2
-- **Touches:** `frontend.nim`, `window.nim`, `neel.js`
+- **Touches:** `frontend.nim`, `window.nim`, `neel.js`; `neel.nim` (the
+  re-export and `appClose`)
 - **Spec:** section 9, 10.1, 11
-- **Cross-OS:** safe to defer. A constant and a shim branch; browsers behave
-  the same on every OS. The two-tab check runs in the final pass.
+- **Cross-OS:** safe to defer (confirmed). A constant, a close reason, and a
+  shim branch: no platform branches, no OS APIs, no new state shared between
+  threads (`CloseProc` gained a parameter; the reason is a constant passed
+  through the existing `Server.close`). Browsers handle close code 4000 the
+  same on every OS. The two-tab checks run in the final pass.
 
 Tests: displacement sends 4000 (the `t_window` fake close records the
 code); the `frontend.nim` static check ties `CloseDisplaced` to `neel.js`.
 Manual: two tabs, the first reports 4000 and does not reconnect.
 
 **Notes:**
+- `CloseProc` gained a `reason: string` parameter, so `bindConnection` can
+  send `"displaced by another connection"`; `closeWindow` passes `""` (its
+  frame is byte-identical to before). `neel.nim`'s `appClose` forwards it.
+  Agreed with the user (16.2).
+- The shim treats 4000 in the existing 1000/1001 branch, so calls reject with
+  `neel: server closed the connection (close code 4000)` and `onclose` gets
+  `(4000, false)`. Agreed with the user; section 10.1 updated.
+- Built: `CloseDisplaced* = 4000` in `frontend.nim` (re-exported by `neel`),
+  with a `static:` check that `neel.js` defines `const CLOSE_DISPLACED =
+  4000;` exactly once (a mutation to 4001 fails the build, checked in this
+  session); `CLOSE_DISPLACED` in the shim's final-close branch and its header
+  comments; `bindConnection` closes with `CloseDisplaced` and the reason, in
+  both modes.
+- Tests: the three displacement assertions (16.3) now expect 4000 and the
+  reason: `t_window` "a reconnect re-associates..." (local) and the serve
+  hooks test, the `t_window` integration test (on the wire, code and reason;
+  its `closeWindow` frame is checked as 1000 with no reason), and `t_neel`'s
+  serve run. New: `t_window` "a displaced connection gets 4000; closeWindow
+  still sends 1000 to the new one"; `t_frontend` checks the constant, that
+  4000 is a valid wire code, the definition, and that the only close-code
+  comparison in the shim is the terminating branch with all three codes;
+  `t_neel`'s local run 3 now covers, end to end through `startApp`, a
+  duplicated tab displaced with 4000 and the reason, a connected second
+  window closed by `closeWindow` with 1000, and `quitApp` with 1001; the
+  public-surface test checks `neel.CloseDisplaced == 4000` (qualified, so the
+  test's own `neel/frontend` import cannot satisfy it).
+- The rendered shim passes `node --check` (syntax only; no JS test runner is
+  a dependency).
+- Not changed here, for step 7: `docs/GUIDE.md` (the `neel.onclose` row and
+  the fixed-port caveat still say 1000) and the `examples/stresstest` page,
+  which says the displaced window reports "close code 1000" (16.1;
+  section 14 updated).
+
+Manual checks (deferred to the final pass, 13.0):
+- `nimble test` on macOS and Linux (Windows passed in this session).
+- Serve mode: open the app in two tabs. The first tab's `neel.onclose`
+  reports `(4000, false)`, its calls reject with `NeelDisconnectedError`, and
+  DevTools shows no further `/ws` attempts from it. Reloading it takes the
+  session back and displaces the second tab the same way (once, not in a
+  loop).
+- Local mode, fixed port (`examples/stresstest` with `./stresstest 8765`):
+  open `http://127.0.0.1:8765/?window=1` in a normal browser tab. The app
+  window is displaced with 4000 and does not reconnect; everything else
+  (`closeWindow`, quit, the grace-period exit) behaves as before.
 
 ### 13.4 Step 4: stop signals
 
@@ -713,6 +769,7 @@ section 16 entry, or `n/a`).
 |---|---|---|---|
 | `nimble test` passes | | | |
 | Local mode: the three examples behave as before (open, call, second window, close, exit after the grace period) | | | |
+| Local mode, fixed port: a browser tab at the app's URL displaces the app window (4000, no reconnect) | | | |
 | Serve: starts without a browser, prints the startup line | | | |
 | Serve: page loads at `http://127.0.0.1:<port>` | | | |
 | Serve: a second tab displaces the first (4000, no reconnect) | | | |
@@ -746,6 +803,9 @@ Once, on Linux (the realistic deployment target):
   `neel.onclose` row (code 4000); the Caveats entry "Neither side closes an
   idle connection on its own" (true locally, not behind proxies); the fixed-
   port caveat (1000 becomes 4000).
+- **Examples:** the "Refresh after a restart" item in
+  `examples/stresstest/web/index.html` says the displaced window reports
+  "close code 1000"; it is 4000 since step 3.
 - **Module headers:** `neel.nim` route list, `frontend.nim` contract,
   `window.nim` lifecycle, `server.nim` surface.
 
@@ -803,6 +863,16 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   about 2 s to fail on Windows (SYN retries), not instantly as on POSIX.
   Test probes for "nothing is listening" (`t_neel` `canConnect`) need a
   short connect timeout, or they stall the suite.
+- 2026-10-15, step 3, Windows: the session ran on Windows 11 again;
+  `nimble test` passed there. macOS and Linux have not run step 3.
+- 2026-10-15, step 3, all: besides the guide (section 14), the
+  `examples/stresstest` page tells the user the displaced window reports
+  "close code 1000"; since step 3 it is 4000. Left for step 7 with the other
+  documentation; section 14 now lists it.
+- 2026-10-15, step 3, Windows: `node` is available on the session machine.
+  `node --check` on a rendered shim (placeholders replaced by literals,
+  written under `$env:TEMP`) is a quick syntax check after shim edits; there
+  is still no JS test runner in the repo.
 
 ### 16.2 Deviations from the spec
 
@@ -827,6 +897,17 @@ Format: `YYYY-MM-DD, step N: what changed and why; spec sections updated`.
   grace-period and startup-timeout assertions, because "accepted and
   ignored" (3.3) must not fail on values local mode rejects. The profile
   part was agreed with the user. Section 5.1 updated.
+- 2026-10-15, step 3: `window.CloseProc` is now
+  `proc(conn: ConnId; code: int; reason: string): bool`, because section 9's
+  close reason could not pass through the old `(conn, code)` signature.
+  `closeWindow` passes `""` (its close frame is unchanged), and `neel.nim`'s
+  `appClose` forwards the reason to `Server.close`, so step 3 also touches
+  `neel.nim` beyond the re-export. Agreed with the user. The 13.3 Touches
+  line updated.
+- 2026-10-15, step 3: the shim's rejection message for a 4000 close is the
+  existing `neel: server closed the connection (close code 4000)` (same
+  branch as 1000/1001), not a displacement-specific one. Agreed with the
+  user. Section 10.1 updated.
 
 ### 16.3 Gotchas
 
@@ -876,11 +957,20 @@ Rules every step must respect. The first entries come from the existing code.
   `quitRequested` with `waitTimeout(..., IdleTickMs)`. A stop flag set by a
   signal handler (it cannot signal the condition variable) must be checked
   in that loop condition. It still returns `erQuit`.
-- **Displacement close-code assertions live in three places.** `t_window`
-  ("a reconnect re-associates..." and the "window: serve mode" hooks test),
-  the `t_window` integration test, and `t_neel`'s serve run (device B
-  displacing A) all expect `CloseNormal` today. Changing the code to
-  `CloseDisplaced` means updating all of them in the same change.
+- **Displacement close-code assertions live in several places.** Since step
+  3 they expect `CloseDisplaced` and the reason `"displaced by another
+  connection"`: `t_window` ("a reconnect re-associates...", "a displaced
+  connection gets 4000; closeWindow still sends 1000...", and the "window:
+  serve mode" hooks test), the `t_window` integration test, and `t_neel`'s
+  local run 3 and serve run. A change to displacement updates all of them.
+- **`CloseProc` carries a reason.** `t_window`'s `fakeClose` records
+  `(conn, code, reason)` and `closes()` returns those triples; a new close
+  call in `window.nim` passes an explicit reason (`""` for none).
+- **`CloseDisplaced` is tied to the shim by text.** The `static:` block in
+  `frontend.nim` looks for `const CLOSE_DISPLACED = 4000;` in `neel.js`, and
+  `t_frontend` expects exactly one close-code comparison line in `ws.onclose`.
+  Step 6's dormant logic must keep 4000 in that terminating branch, and keep
+  it ahead of any dormant or reconnect path.
 - **Serve mode ignores the `testhooks` launcher.** `runApp` always passes
   `noLaunch`, so a test that installs `setTestLauncher` and sees no launch is
   checking that nothing is launched, which is intended.

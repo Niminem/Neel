@@ -27,7 +27,8 @@
 // Connection state for a page that wants to show it: `neel.ready` covers the
 // first open; `neel.onclose` fires after every close, including each failed
 // reconnect attempt, with the WebSocket close code (1006 for a lost
-// connection, 1000/1001 for a deliberate close) and whether another reconnect
+// connection, 1000/1001 for a deliberate close, 4000 when another tab or
+// device took over this window) and whether another reconnect
 // attempt follows; `neel.onreconnect` fires when such an attempt succeeds. A listener that throws is reported with console.warn and ignored.
 //
 // Errors: a rejected call carries an Error whose `name` (and `kind`) is the
@@ -42,11 +43,13 @@
 // positive integers starting at 1 per connection and are allocated when the
 // frame goes on the wire. Calls made before the socket is open (or while it
 // reconnects) are queued and flushed on open. On an abnormal close (anything
-// but 1000/1001 or neel.close()) in-flight promises are rejected with
+// but 1000/1001/4000 or neel.close()) in-flight promises are rejected with
 // NeelDisconnectedError and the shim reconnects up to MAX_RECONNECT_ATTEMPTS
 // times with exponential backoff (250, 500, 1000, 2000, 4000 ms), presenting
 // the same window id again. A close with 1000 or 1001 (server shutdown or
-// closeWindow) is final: no reconnect, and every later call rejects at once.
+// closeWindow) or CLOSE_DISPLACED (another connection bound this window) is
+// final: no reconnect, and every later call rejects at once. A displaced page
+// must not reconnect, or two open pages would displace each other forever.
 //
 // Wire format: docs/GUIDE.md, "The neel.js API" (Nim side: src/neel/protocol.nim).
 
@@ -62,6 +65,7 @@
   const WINDOW_ID = __NEEL_WINDOW_ID__;
   const EXPOSED = __NEEL_EXPOSED__;
 
+  const CLOSE_DISPLACED = 4000;
   const MAX_RECONNECT_ATTEMPTS = 5;
   const RECONNECT_BASE_MS = 250;
   const DISCONNECTED = "NeelDisconnectedError";
@@ -312,7 +316,7 @@
       socket = null;
       failPending("neel: connection lost (close code " + event.code + ")");
       if (terminated) return;
-      if (event.code === 1000 || event.code === 1001) {
+      if (event.code === 1000 || event.code === 1001 || event.code === CLOSE_DISPLACED) {
         terminate("neel: server closed the connection (close code " + event.code + ")", event.code);
         return;
       }
