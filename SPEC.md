@@ -427,7 +427,11 @@ and `onclose` receives `(4000, false)`. The shim names the code
 **10.2 Serve flag.** A fourth placeholder, `__NEEL_SERVE__`, rendered as
 `true` / `false` by `renderNeelJs`. The `static:` checks in `frontend.nim`
 are updated (four placeholders, each exactly once). Not exposed on `neel`, so
-`Object.keys(neel)` is unchanged.
+`Object.keys(neel)` is unchanged. As built (step 6): `ServePlaceholder*` in
+`frontend.nim`; `renderNeelJs(token, windowId, exposed, serve: bool)` with no
+default, so every caller states the mode; `neel.nim` passes `AppState.serve`.
+The shim reads it as `const SERVE`; the two renderings differ only in that
+literal.
 
 **10.3 Dormant instead of terminated (serve mode only).** When the shim runs
 out of reconnect attempts:
@@ -443,6 +447,42 @@ out of reconnect attempts:
   permanently in both modes.
 - `neel.ready`, once rejected, stays rejected (a Promise cannot be
   re-resolved); pages that may sleep should use `onreconnect`.
+
+As built (step 6, details agreed with the user):
+
+- Only a dormant shim reacts to the wake events. While connected,
+  reconnecting (backoff timer pending or a connect in flight), or
+  terminated, `visibilitychange` and `online` do nothing; so several events
+  in a row start one wake, and a visibility change to `"hidden"` never does
+  anything.
+- A wake clears dormant, resets `attempts` to 0, and connects at once; on
+  failure the usual 250/500/1000/2000/4000 ms backoff follows (1 + 5
+  connects, about 7.75 s, like a page load). Calls made during the round are
+  queued as in any reconnect.
+- A failed wake ends exactly like the first give-up: each failed attempt
+  fires `onclose(code, true)`, the last `onclose(code, false)`, queued calls
+  reject with `neel: gave up reconnecting after 5 attempts`, and the shim is
+  dormant again until the next event.
+- A call made while dormant rejects at once with `NeelDisconnectedError` and
+  the message `neel: not connected; reconnects when the page becomes visible
+  or goes online`. It does not start a wake. Consequence: a page that goes
+  dormant while visible and online (the tunnel was down for more than about
+  8 s while the user watched) stays dormant until a tab switch, a network
+  change, or a reload.
+- A successful wake fires `onreconnect`, also when the shim had never
+  connected before (its `ready` is already rejected, so `onreconnect` is the
+  page's only signal). The rule is now "every successful open except the one
+  that resolves `neel.ready`" (in local mode that is the same as "except the
+  first").
+- `neel.close()` while dormant terminates and fires `onclose(1000, false)`,
+  as `neel.close()` during a backoff does.
+- The listeners are added once at load and only when `SERVE` is true; local
+  mode adds none. They are never removed (they do nothing unless dormant).
+- In the shim: `terminate`'s body became `giveUp`, shared by `terminate`
+  (sets `terminated`, clears `dormant`) and `goDormant` (sets `dormant`);
+  `scheduleReconnect`'s give-up branch calls `goDormant` when `SERVE`,
+  otherwise `terminate`. `everOpened` became `readySettled` (set on the
+  first open and by `giveUp`). `ws.onclose` is unchanged.
 
 **10.4 Server restarts.** A restart changes the token, so a dormant shim's
 reconnects get a 403 until the page reloads. The guide documents an
@@ -1021,18 +1061,132 @@ Results (2026-10-15, user-run):
 
 ### 13.6 Step 6: shim serve behavior
 
-- **Status:** not started
+- **Status:** done (2026-10-15; `nimble test` and `nim c src/neel.nim` green
+  on **Windows 11** (win32 10.0.26200) with Nim 2.2.12. `nim` on PATH is
+  `~/.nimble/bin/nim.exe` (choosenim toolchain 2.2.12, `nim -v`: 2.2.12);
+  Nimble compiled with `~/.nimble/pkgs2/nim-2.2.12-1ce02ec.../bin/nim.exe`,
+  also 2.2.12.
+  `node` v24.20.0 was on PATH, so the shim behavior test ran (not skipped).
+  macOS not yet run by the user for this step.)
 - **Depends on:** steps 2 and 3
-- **Touches:** `neel.js`, `frontend.nim`
+- **Touches:** `neel.js`, `frontend.nim`; `neel.nim` (passes `a.serve` at the
+  `renderNeelJs` call site, and one header line); tests `t_frontend`,
+  `t_neel`, new `tests/fixtures/shim_reference.js` and
+  `tests/fixtures/shim_harness.js`
 - **Spec:** sections 10.2–10.4
-- **Cross-OS:** safe to defer. Browser-side JS; the DevTools offline toggle
-  and the phone run in the final pass.
+- **Cross-OS:** safe to defer (confirmed). Browser-side JS and one more
+  literal in a pure renderer: no platform branches, no OS APIs, no new state
+  shared between threads. The only OS-touching code is test-only (the node
+  test finds `node` with `findExe` and runs it with `startProcess` under the
+  temp dir). Under the every-step plan (13.0): `nimble test` on macOS (with
+  `node` installed, the first POSIX run of the behavior test) and on Windows.
+  The browser checks below go to the final pass; running the first one early
+  on any OS is cheap and is the only real-browser check of the new state.
 
 Tests: rendering with the serve flag and the updated `static:` checks
 (`t_frontend`). Manual: dormant and wake behavior with the DevTools offline
 toggle, then on a phone.
 
 **Notes:**
+- Wake details agreed with the user (events only matter while dormant, one
+  wake per round, first attempt immediate, failed wake goes dormant again
+  with `onclose(code, false)`, dormant calls reject without waking, a new
+  rejection message, `onreconnect` after a wake even if the shim never
+  connected, `neel.close()` while dormant terminates, listeners only in
+  serve mode). Section 10.3 "As built" records them (16.2).
+- Behavior is tested with an opt-in node harness, at the user's choice:
+  run when `node` is on PATH, skipped with a printed reason otherwise. No
+  runtime dependency; `tests/fixtures/` gains the harness and a frozen copy
+  of the pre-serve shim (16.2).
+- `renderNeelJs` takes `serve` with no default (my choice, so no caller can
+  forget it); the doc comments of `frontend.nim`, `renderNeelJs`, the
+  `neel.nim` route list, and the shim header describe the flag and the
+  dormant state. The guide is step 7 (section 14 updated with what it needs).
+- Built: `const SERVE`, `DORMANT_REASON`, the `dormant` flag, `giveUp` /
+  `terminate` / `goDormant`, the `SERVE` branch in `scheduleReconnect`,
+  `wake()`, the two listeners behind `if (SERVE)`, `readySettled` (was
+  `everOpened`). `ws.onclose` and its single terminating branch are
+  untouched.
+- Tests, always run (`t_frontend`): both renderings against an independent
+  rendering; the serve and local renderings identical apart from the
+  literal; four placeholders, each once in the source and none left after
+  rendering in either mode; a single-pass case with `__NEEL_SERVE__` inside
+  the token and an exposed name (misuse); a non-positive window id in both
+  modes; `Object.keys(neel)` read from `Object.defineProperties(neel, ...)`
+  in both renderings and the frozen reference, with no other property set on
+  `neel`; in `ws.onclose` the 1000/1001/4000 branch is first, terminates and
+  returns, and nothing there mentions dormant or wake; `SERVE` read only in
+  the give-up branch and the listener block; `goDormant` called once, behind
+  `SERVE`; only `goDormant` sets `dormant`; listeners and `wake()` calls only
+  inside the `SERVE` block. `t_neel`: the local run's served shim equals
+  `renderNeelJs(..., serve = false)` and the serve run's equals
+  `renderNeelJs(..., serve = true)`.
+- Tests, when `node` is on PATH (`t_frontend` "frontend: shim behavior
+  under node", 84 checks in `shim_harness.js`): the frozen reference, the
+  local rendering, and the serve rendering play 12 shared scenarios (first
+  open and queue flush, replies, a JS function called from Nim, a drop and
+  reconnect with `onreconnect`, a first connect that fails then succeeds,
+  1000/1001/4000 each final with wake events after them, `neel.close()` open,
+  during a backoff, and before the first open) with identical traces; local
+  and the reference also give up identically, after an open and before any,
+  with wake events ignored afterwards; serve gives up identically to local up
+  to that point. Serve-only scenarios cover every item of 10.3 "As built".
+  Local mode adds no listeners; serve adds one of each.
+- Mutations checked in the session (each reverted): the local shim rendered
+  as serve, the serve shim rendered as local, `wake` without the attempts
+  reset, a timer-delayed first wake attempt, `wake` ignoring the dormant flag,
+  dormant calls queued instead of rejected, `readySettled` not set on giving
+  up, the visibility check dropped, `terminate` not clearing `dormant`: each
+  fails the node test. A second `__NEEL_SERVE__` in the shim fails the build.
+  The node test reports the harness output on failure and is `[SKIPPED]` with
+  a printed reason when `node` is not on PATH (both checked).
+- `node --check` passes on both renderings (written under `$env:TEMP`).
+
+Manual checks. Any serve app works (the step 4 test app:
+`startApp(webDir = "web", serve = true, port = 8080)`), opened at
+`http://127.0.0.1:8080` in Chrome or Edge. In the DevTools console, first
+run:
+
+```js
+neel.onclose((c, r) => console.log("onclose", c, r));
+neel.onreconnect(() => console.log("onreconnect"));
+const probe = () => neel.call("x").then(
+  (v) => console.log("ok", v), (e) => console.log(e.name, e.message));
+```
+
+- `nimble test` on macOS and Windows (every-step plan). Expect all green,
+  and `[OK]` (not `[SKIPPED]`) for "serve, local, and the frozen reference
+  shim in a scripted browser" where `node` is installed. On a failure, the
+  harness report is printed under the failed check; send it verbatim.
+- Dormant and wake (final pass; can be run early): Network panel, set
+  throttling to "Offline". Expect `onclose 1006 true` five times over about
+  8 s, then `onclose 1006 false`, and no further `/ws` requests in the
+  Network panel. `probe()` prints `NeelDisconnectedError neel: not connected;
+  reconnects when the page becomes visible or goes online` at once. Set
+  throttling back to "No throttling": expect one new `/ws` request at once,
+  `onreconnect`, and `probe()` answered by the server again
+  (`NeelUnknownProcError no exposed proc named 'x'`, not the dormant
+  message). Repeat, but wake by switching to
+  another tab and back (still offline: expect one round of six failed
+  attempts and dormant again; then go online). If going offline does not
+  close the open WebSocket (DevTools versions differ), record it in 16.1 and
+  use Firefox's "Offline" throttling instead.
+- Server restart while dormant (final pass): get the page dormant as above,
+  stop the server with Ctrl-C (the page is not connected, so it gets no
+  1001), start it again, then go back online. Expect six failed `/ws`
+  attempts answered 403 (the token changed), `onclose 1006 false`, and the
+  page dormant again (`probe()` gives the dormant message). A reload
+  recovers it. A Ctrl-C while the page is connected sends 1001, which
+  terminates it instead: that is the 1001 case of the reload recipe.
+- Local mode give-up still terminal (final pass): in a local-mode example's
+  app window (`examples/roundtrip`), open DevTools, register the listeners,
+  go "Offline". Expect five `onclose 1006 true`, one `onclose 1006 false`,
+  `probe()` giving `neel: connection is closed`, and nothing on going back
+  online or switching tabs (no `/ws` request, no `onreconnect`). The app
+  then exits after its grace period, as before.
+- Phone (final pass, 13.8): open the serve app through the tunnel, lock the
+  phone for 5 minutes, unlock: the page reconnects by itself (`onreconnect`)
+  without a reload.
 
 ### 13.7 Step 7: documentation and example
 
@@ -1097,6 +1251,20 @@ Once, on Linux (the realistic deployment target):
   idle connection on its own" (true locally, not behind proxies; serve mode
   pings after 30 s of silence); the fixed-port caveat (1000 becomes 4000,
   and a second app on a taken fixed port now fails at start on Windows too).
+- **Guide, the shim (from step 6):** the dormant state and when it wakes
+  (section 10.3 "As built"), including that a call while dormant rejects
+  with `neel: not connected; reconnects when the page becomes visible or goes
+  online` and does not wake the shim, and that a page dormant while visible
+  and online waits for a tab switch, a network change, or a reload. The
+  `neel.onreconnect` row becomes "every successful connection except the one
+  that resolves `neel.ready`" (a wake after a shim that never connected
+  fires it). The `neel.ready` row: in serve mode a rejected `ready` does not
+  mean the shim has stopped. The "gave up" text and the reconnect paragraph
+  (around "reconnects up to 5 times") need the serve-mode exception. For the
+  reload recipe (10.4): in serve mode an `onclose(code, false)` with a code
+  other than 1000, 1001, or 4000 means the shim went dormant; a page can
+  reload when that happens right after a wake event (a failed wake), never
+  on 4000.
 - **Examples:** the "Refresh after a restart" item in
   `examples/stresstest/web/index.html` says the displaced window reports
   "close code 1000"; it is 4000 since step 3.
@@ -1277,6 +1445,22 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   two-instance and restart check. This is the first Linux run of steps
   1–5, so all five are green on macOS, Windows, and Linux. Not yet run on
   any OS: the examples (13.8 local-mode rows), which the final pass covers.
+- 2026-10-15, step 6, Windows: the session ran on Windows 11; `nimble test`
+  passed with `node` v24.20.0 on PATH, so the new shim behavior test ran
+  (84 harness checks, about a second). The harness needs only Node built-ins
+  (`vm`, `fs`) and ES2020; no npm. The user will install `node` on macOS and
+  Linux so the test runs there too; without it the test is `[SKIPPED]`.
+- 2026-10-15, step 6, Windows: the Windows working copy of `neel.js` has
+  CRLF line endings (`git ls-files --eol`: `i/lf w/crlf`), so
+  `NeelJsSource` (`staticRead`) holds CRLF on Windows and LF on POSIX. Text
+  checks on the shim must split with `splitLines` and never look for `"\n"`;
+  ad-hoc replacements on a Windows copy must match `"\r\n"`. The rendered
+  shim works either way.
+- 2026-10-15, step 6, all: in the DevTools console, `neel.call("x")` is a
+  convenient probe of the shim's state: answered by the server with
+  `NeelUnknownProcError` while connected, rejected at once with the dormant
+  message while dormant and with `neel: connection is closed` once
+  terminated. Used by the 13.6 manual checks.
 
 ### 16.2 Deviations from the spec
 
@@ -1329,6 +1513,22 @@ Format: `YYYY-MM-DD, step N: what changed and why; spec sections updated`.
   `PingObserver`, `setTestPingObserver`, and `testPingObserver`, so step 5
   also touches `testhooks.nim`. `server.nim` gained the read-only
   `pingIntervalMs(server)`. Sections 6 and 13.5 updated.
+- 2026-10-15, step 6: section 10.3 made precise (agreed with the user):
+  wake events matter only while dormant (so a burst starts one wake); a wake
+  connects at once, then backs off as usual; a failed wake ends like the
+  first give-up and goes dormant again; a dormant call rejects with a new
+  message and does not wake; `onreconnect` fires after a successful wake even
+  if the shim never connected, so its rule becomes "every open except the
+  one that resolves `neel.ready`"; `neel.close()` while dormant terminates
+  with `onclose(1000, false)`; listeners only in serve mode. Sections 10.3
+  ("As built") and 14 updated.
+- 2026-10-15, step 6: the shim's behavior is tested with an opt-in node
+  harness (`tests/fixtures/shim_harness.js`, run by `t_frontend` when `node`
+  is on PATH, skipped otherwise), and local mode is proven unchanged by
+  comparing traces against a frozen copy of the pre-serve shim
+  (`tests/fixtures/shim_reference.js`). Agreed with the user; test-only, no
+  runtime or Nimble dependency. Step 6 also touches `neel.nim` (the call
+  site and one header line) and `t_neel`. The 13.6 Touches line updated.
 
 ### 16.3 Gotchas
 
@@ -1391,7 +1591,8 @@ Rules every step must respect. The first entries come from the existing code.
   `frontend.nim` looks for `const CLOSE_DISPLACED = 4000;` in `neel.js`, and
   `t_frontend` expects exactly one close-code comparison line in `ws.onclose`.
   Step 6's dormant logic must keep 4000 in that terminating branch, and keep
-  it ahead of any dormant or reconnect path.
+  it ahead of any dormant or reconnect path. (Kept in step 6: `ws.onclose`
+  is unchanged, and `t_frontend` checks the branch in both renderings.)
 - **Serve mode ignores the `testhooks` launcher.** `runApp` always passes
   `noLaunch`, so a test that installs `setTestLauncher` and sees no launch is
   checking that nothing is launched, which is intended.
@@ -1447,3 +1648,26 @@ Rules every step must respect. The first entries come from the existing code.
   on every action it installs, so a restored action can differ from the
   original in that bit alone. `t_neel`'s `actionOf` masks it; any new check
   of `sigaction` flags must do the same.
+- **Local shim behavior has an oracle.** `tests/fixtures/shim_reference.js`
+  is the shim as it was before serve mode, frozen. The node harness requires
+  the local rendering (and, where serve mode must not differ, the serve
+  rendering) to leave exactly its trace in every shared scenario. Changing
+  local shim behavior on purpose means updating the reference and the
+  harness in the same step and saying so in 16.2; comments and refactors
+  need nothing.
+- **The node test can be skipped.** Without `node` on PATH, "frontend: shim
+  behavior under node" is `[SKIPPED]` and `nimble test` is still green. When
+  reporting a run, say whether it ran (`[OK]`) or was skipped.
+- **The harness duplicates the shim's messages.** `shim_harness.js` checks
+  the exact rejection texts (`GAVE_UP`, `DORMANT`, `CLOSED`) and the backoff
+  delays; changing them in `neel.js` means changing them there too. Call
+  labels in a scenario must be unique (`result` finds the first one).
+- **The serve-only lines of the shim are pinned by text.** `t_frontend`
+  "serve-only code is reachable only through the flag" compares exact lines:
+  every `SERVE` read, the `goDormant` call, the give-up block in
+  `scheduleReconnect`, and the listener block. Rewording those lines means
+  updating that test; adding a new `SERVE` read means adding it there, on
+  purpose.
+- **`renderNeelJs` takes `serve` explicitly.** It has no default; a new
+  caller (or test) states the mode. The served shim's mode comes from
+  `AppState.serve`.

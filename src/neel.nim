@@ -32,9 +32,9 @@
 ## - `/ws`: the WebSocket upgrade; requires the launch token and a known
 ##   window id in the query, otherwise 403.
 ## - `/neel.js`: the browser shim rendered for one window (token, window id,
-##   exposed names), `Cache-Control: no-store`. The window is the `window=`
-##   of the page URL in `Referer`; 404 when it names a window that is not
-##   open, or when it names none and more than one window is open.
+##   exposed names, serve flag), `Cache-Control: no-store`. The window is the
+##   `window=` of the page URL in `Referer`; 404 when it names a window that
+##   is not open, or when it names none and more than one window is open.
 ## - `/neel/no-browser`: the page shown when no browser was found and
 ##   `fallback = false`; 404 in serve mode.
 ## - `/` in serve mode, when `startPath` names another page: a 302 to it.
@@ -310,7 +310,8 @@ proc handleRequest(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
           "neel.js: cannot tell which window this page belongs to; open the " &
           "page through Neel (its URL carries ?window=<id>)"
       return respond(initResponse(404, reason, "text/plain"))
-    var r = okResponse(renderNeelJs(a.token, id, a.exposed), "application/javascript")
+    var r = okResponse(renderNeelJs(a.token, id, a.exposed, a.serve),
+                       "application/javascript")
     r.addHeader("Cache-Control", "no-store")
     respond(r)
   of NoBrowserPath:

@@ -1,24 +1,84 @@
 ## t_frontend.nim - placeholder substitution for the served `neel.js`, and
 ## request filtering (`requestRefusal`, `RequestFilter`, `normalizeOrigin`).
 ##
-## The shim itself cannot be executed here (no JS runtime is a dependency);
-## it is verified by hand in a browser against the server by running the
-## examples (`docs/GUIDE.md` "Running the examples").
+## No JS runtime is a dependency. The shim's text is checked here in plain
+## Nim; its connection behavior is checked by `fixtures/shim_harness.js`
+## when `node` is on PATH (the test is skipped otherwise), and by hand in a
+## browser against the server by running the examples (`docs/GUIDE.md`
+## "Running the examples").
 
-import std/[unittest, json, strutils]
+import std/[unittest, json, strutils, sequtils, os, osproc, streams, monotimes, times]
 import neel/[frontend, http]
 from neel/websocket import isValidCloseCode
 
 const
   Tricky = "a\"b\\c</script><script>alert(1)</script>\n\t\u00e9"
     ## Quotes, backslashes, a script terminator, control chars, non-ASCII.
+  ReferenceSource = staticRead("fixtures/shim_reference.js")
+    ## The shim as it was before serve mode (three placeholders, no serve
+    ## flag), frozen: local mode must still behave exactly like it.
+  HarnessPath = currentSourcePath().parentDir / "fixtures" / "shim_harness.js"
+  NeelKeys = @["call", "send", "expose", "close", "ready", "windowId", "connected",
+               "onclose", "onreconnect"]
+    ## `Object.keys(neel)` before the exposed proc names.
 
-proc expected(token: string; windowId: int; exposed: seq[string]): string =
+proc expected(token: string; windowId: int; exposed: seq[string]; serve: bool): string =
   ## Independent rendering: the source with each placeholder replaced once.
   NeelJsSource.multiReplace(
     (TokenPlaceholder, jsStringLiteral(token)),
     (WindowIdPlaceholder, $windowId),
+    (ExposedPlaceholder, jsStringArrayLiteral(exposed)),
+    (ServePlaceholder, if serve: "true" else: "false"))
+
+proc reference(token: string; windowId: int; exposed: seq[string]): string =
+  ## The frozen pre-serve shim, rendered as it was served then.
+  ReferenceSource.multiReplace(
+    (TokenPlaceholder, jsStringLiteral(token)),
+    (WindowIdPlaceholder, $windowId),
     (ExposedPlaceholder, jsStringArrayLiteral(exposed)))
+
+proc codeLines(js: string): seq[string] =
+  ## The non-empty lines of `js` without comments (whole-line `//` comments
+  ## and trailing `  // ...` ones), so counts see only what the code does.
+  for line in js.splitLines:
+    var l = line
+    let c = l.find("  // ")
+    if c >= 0:
+      l = l[0 ..< c]
+    if l.strip.len > 0 and not l.strip.startsWith("//"):
+      result.add l
+
+proc hasWord(s, word: string): bool =
+  ## `word` occurs in `s` as a whole identifier (`SERVE`, not `RESERVED`).
+  const Ident = IdentChars + {'$'}
+  var at = s.find(word)
+  while at >= 0:
+    let after = at + word.len
+    if (at == 0 or s[at - 1] notin Ident) and (after >= s.len or s[after] notin Ident):
+      return true
+    at = s.find(word, at + 1)
+  false
+
+proc neelKeys(js: string): seq[string] =
+  ## The names `Object.defineProperties(neel, {...})` defines, in order.
+  let start = js.find("Object.defineProperties(neel, {")
+  doAssert start >= 0, "no Object.defineProperties(neel, ...) in the shim"
+  let stop = js.find("});", start)
+  for line in js[start ..< stop].splitLines[1 .. ^1]:
+    let t = line.strip
+    if t.len > 0:
+      result.add t[0 ..< t.find(':')]
+
+proc blockAfter(lines: seq[string]; header: string): seq[string] =
+  ## The lines of the block opened by the code line equal to `header`
+  ## (stripped), up to the line that closes it at the header's indentation.
+  let at = lines.find(header)
+  doAssert at >= 0, "no line " & header.strip
+  let indent = lines[at].len - lines[at].strip(trailing = false).len
+  for line in lines[at + 1 .. ^1]:
+    if line.strip.startsWith("}") and line.len - line.strip(trailing = false).len == indent:
+      break
+    result.add line
 
 suite "frontend: literals":
   test "jsStringLiteral is a quoted JSON string that parses back":
@@ -43,19 +103,30 @@ suite "frontend: literals":
     check parsed[1].getStr == "</script>"
 
 suite "frontend: renderNeelJs":
-  test "all three placeholders are substituted with the exact literals":
-    let js = renderNeelJs("abc123", 7, @["add", "fail"])
-    check js == expected("abc123", 7, @["add", "fail"])
-    check js.count("\"abc123\"") == 1
-    check "= 7;" in js
-    check js.count("[\"add\",\"fail\"]") == 1
-    check TokenPlaceholder notin js
-    check WindowIdPlaceholder notin js
-    check ExposedPlaceholder notin js
+  test "all four placeholders are substituted with the exact literals":
+    for serve in [false, true]:
+      let js = renderNeelJs("abc123", 7, @["add", "fail"], serve)
+      check js == expected("abc123", 7, @["add", "fail"], serve)
+      check js.count("\"abc123\"") == 1
+      check "= 7;" in js
+      check js.count("[\"add\",\"fail\"]") == 1
+      check js.count("const SERVE = " & $serve & ";") == 1
+      check TokenPlaceholder notin js
+      check WindowIdPlaceholder notin js
+      check ExposedPlaceholder notin js
+      check ServePlaceholder notin js
+
+  test "the serve and local renderings differ only in the serve literal":
+    let serve = renderNeelJs("abc123", 7, @["add"], serve = true)
+    let local = renderNeelJs("abc123", 7, @["add"], serve = false)
+    check serve != local
+    check local.replace("const SERVE = false;", "const SERVE = true;") == serve
+    check serve.len == local.len - 1
+    check "const SERVE = __NEEL_SERVE__;" in NeelJsSource
 
   test "a hostile token is escaped and parses back to itself":
-    let js = renderNeelJs(Tricky, 1, @[])
-    check js == expected(Tricky, 1, @[])
+    let js = renderNeelJs(Tricky, 1, @[], false)
+    check js == expected(Tricky, 1, @[], false)
     check "</script>" notin js
     # Locate the literal: it is the only place where the escaped token appears.
     let lit = jsStringLiteral(Tricky)
@@ -66,71 +137,188 @@ suite "frontend: renderNeelJs":
   test "exposed list: empty and multi-name":
     # The source itself contains `[]` (an empty array literal), so compare counts.
     let base = NeelJsSource.count("[]")
-    check renderNeelJs("t", 1, @[]).count("[]") == base + 1
-    let js = renderNeelJs("t", 1, @["alpha", "beta", "gamma"])
+    check renderNeelJs("t", 1, @[], false).count("[]") == base + 1
+    let js = renderNeelJs("t", 1, @["alpha", "beta", "gamma"], false)
     check js.count("[\"alpha\",\"beta\",\"gamma\"]") == 1
     check js.count("[]") == base
 
-  test "no __NEEL_ remains in the output; the source has exactly three":
-    check NeelJsSource.count("__NEEL_") == 3
-    check "__NEEL_" notin renderNeelJs("token", 1, @["a"])
-    check "__NEEL_" notin renderNeelJs("", 42, @[])
+  test "no __NEEL_ remains in the output; the source has exactly four, each once":
+    check NeelJsSource.count("__NEEL_") == 4
+    for placeholder in [TokenPlaceholder, WindowIdPlaceholder, ExposedPlaceholder,
+                        ServePlaceholder]:
+      check NeelJsSource.count(placeholder) == 1
+    for serve in [false, true]:
+      check "__NEEL_" notin renderNeelJs("token", 1, @["a"], serve)
+      check "__NEEL_" notin renderNeelJs("", 42, @[], serve)
 
   test "substitution is a single pass: a placeholder name inside the token survives":
-    let token = "x" & WindowIdPlaceholder & "y"
-    let js = renderNeelJs(token, 3, @[ExposedPlaceholder])
+    let token = "x" & WindowIdPlaceholder & ServePlaceholder & "y"
+    let js = renderNeelJs(token, 3, @[ExposedPlaceholder, ServePlaceholder], true)
     check jsStringLiteral(token) in js
-    check jsStringArrayLiteral(@[ExposedPlaceholder]) in js
+    check jsStringArrayLiteral(@[ExposedPlaceholder, ServePlaceholder]) in js
     # The real placeholders were still replaced exactly once each.
     check js.count(WindowIdPlaceholder) == 1 # the one inside the token literal
     check js.count(ExposedPlaceholder) == 1  # the one inside the array literal
+    check js.count(ServePlaceholder) == 2    # one in the token, one in the array
+    check js.count("const SERVE = true;") == 1
 
   test "rendering is pure: byte-identical for equal arguments":
-    let a = renderNeelJs("same", 5, @["p", "q"])
-    let b = renderNeelJs("same", 5, @["p", "q"])
+    let a = renderNeelJs("same", 5, @["p", "q"], false)
+    let b = renderNeelJs("same", 5, @["p", "q"], false)
     check a == b
     check a.len == b.len
-    check renderNeelJs("same", 6, @["p", "q"]) != a
-    check renderNeelJs("other", 5, @["p", "q"]) != a
-    check renderNeelJs("same", 5, @["p"]) != a
+    check renderNeelJs("same", 6, @["p", "q"], false) != a
+    check renderNeelJs("other", 5, @["p", "q"], false) != a
+    check renderNeelJs("same", 5, @["p"], false) != a
+    check renderNeelJs("same", 5, @["p", "q"], true) != a
 
   test "window id must be positive":
-    expect AssertionDefect:
-      discard renderNeelJs("t", 0, @[])
-    expect AssertionDefect:
-      discard renderNeelJs("t", -1, @[])
+    for serve in [false, true]:
+      expect AssertionDefect:
+        discard renderNeelJs("t", 0, @[], serve)
+      expect AssertionDefect:
+        discard renderNeelJs("t", -1, @[], serve)
 
 suite "frontend: shared constants":
   test "the shim uses the exported /ws query parameter names":
     check WsPath == "/ws"
     check TokenQueryParam == "token"
     check WindowQueryParam == "window"
-    let js = renderNeelJs("tok", 1, @[])
+    let js = renderNeelJs("tok", 1, @[], false)
     check (WsPath & "?" & TokenQueryParam & "=") in js
     check ("&" & WindowQueryParam & "=") in js
 
   test "the shim defines CloseDisplaced and treats it as final, like 1000 and 1001":
     check CloseDisplaced == 4000
     check isValidCloseCode(CloseDisplaced)
-    let js = renderNeelJs("tok", 1, @[])
     let def = "const CLOSE_DISPLACED = " & $CloseDisplaced & ";"
-    check js.count(def) == 1
     check NeelJsSource.count(def) == 1
-    # The one branch that terminates instead of reconnecting.
     let finalBranch = "if (event.code === 1000 || event.code === 1001 || " &
                       "event.code === CLOSE_DISPLACED) {"
-    check js.count(finalBranch) == 1
-    let branch = js.find(finalBranch)
-    check js.find("terminate(", branch) < js.find("scheduleReconnect(", branch)
-    # Nothing else in the shim compares close codes.
-    check js.count("event.code ===") == 3
+    for serve in [false, true]:
+      let js = renderNeelJs("tok", 1, @[], serve)
+      check js.count(def) == 1
+      # The one branch that terminates instead of reconnecting.
+      check js.count(finalBranch) == 1
+      let branch = js.find(finalBranch)
+      check js.find("terminate(", branch) < js.find("scheduleReconnect(", branch)
+      # Nothing else in the shim compares close codes.
+      check js.count("event.code ===") == 3
+      # In ws.onclose the terminating branch comes first, and nothing there
+      # reaches the dormant state except through scheduleReconnect.
+      let onclose = codeLines(js).blockAfter("    ws.onclose = (event) => {")
+      let at = onclose.find("      " & finalBranch)
+      check at >= 0
+      check onclose[at + 1].strip.startsWith("terminate(")
+      check onclose[at + 2].strip == "return;"
+      check onclose[^1].strip == "scheduleReconnect(event.code);"
+      for line in onclose:
+        check "ormant" notin line
+        check "wake" notin line
 
   test "the rendered shim is a classic script that sets globalThis.neel":
-    let js = renderNeelJs("tok", 1, @[])
-    check "globalThis.neel = neel;" in js
-    for line in js.splitLines:
-      check not line.startsWith("import ")
-      check not line.startsWith("export ")
+    for serve in [false, true]:
+      let js = renderNeelJs("tok", 1, @[], serve)
+      check "globalThis.neel = neel;" in js
+      for line in js.splitLines:
+        check not line.startsWith("import ")
+        check not line.startsWith("export ")
+
+suite "frontend: the serve flag in the shim":
+  test "Object.keys(neel) is unchanged: the flag is not exposed":
+    let before = reference("tok", 1, @["add"])
+    check neelKeys(before) == NeelKeys
+    for serve in [false, true]:
+      let js = renderNeelJs("tok", 1, @["add"], serve)
+      check neelKeys(js) == NeelKeys
+      # The only other property defined on `neel` is each exposed proc.
+      check js.count("Object.defineProperty(neel, ") == 1
+      check before.count("Object.defineProperty(neel, ") == 1
+      for line in codeLines(js):
+        check not (line.contains("neel.") and line.hasWord("SERVE"))
+        check not line.strip.startsWith("neel.")
+
+  test "the frozen reference is the pre-serve shim":
+    check ReferenceSource.count("__NEEL_") == 3
+    check ServePlaceholder notin ReferenceSource
+    check not ReferenceSource.hasWord("SERVE")
+    check "ormant" notin ReferenceSource
+    check reference("tok", 1, @[]) != renderNeelJs("tok", 1, @[], false)
+
+  test "serve-only code is reachable only through the flag":
+    for serve in [false, true]:
+      let lines = codeLines(renderNeelJs("tok", 1, @["add"], serve))
+      proc having(needle: string): seq[string] =
+        for l in lines:
+          if (if needle.allCharsInSet(IdentChars): l.hasWord(needle) else: needle in l):
+            result.add l.strip
+      # The flag is defined once and read in exactly two places.
+      check having("SERVE") == @["const SERVE = " & $serve & ";",
+                                 "if (SERVE) goDormant(reason, code);",
+                                 "if (SERVE) {"]
+      # goDormant is called only behind the flag, and only goDormant sets dormant.
+      check having("goDormant(") == @["function goDormant(reason, code) {",
+                                      "if (SERVE) goDormant(reason, code);"]
+      check having("dormant = true;") == @["dormant = true;"]
+      check lines.blockAfter("  function goDormant(reason, code) {")[0].strip ==
+        "dormant = true;"
+      # Running out of attempts still terminates when the flag is off.
+      let giveUp = lines.blockAfter("    if (attempts >= MAX_RECONNECT_ATTEMPTS) {")
+      check giveUp.mapIt(it.strip) == @[
+        "const reason = \"neel: gave up reconnecting after \" + MAX_RECONNECT_ATTEMPTS + \" attempts\";",
+        "if (SERVE) goDormant(reason, code);",
+        "else terminate(reason, code);",
+        "return;"]
+      # The wake listeners exist only inside the flag's block, and wake() is
+      # called nowhere else.
+      let serveBlock = lines.blockAfter("  if (SERVE) {")
+      check having("addEventListener(").len == 2
+      check having("wake()").len == 3 # its definition and the two listeners
+      for l in lines:
+        if "addEventListener(" in l or ("wake()" in l and "function wake()" notin l):
+          check l in serveBlock
+      check serveBlock.mapIt(it.strip) == @[
+        "document.addEventListener(\"visibilitychange\", () => {",
+        "if (document.visibilityState === \"visible\") wake();",
+        "});",
+        "globalThis.addEventListener(\"online\", () => wake());"]
+
+suite "frontend: shim behavior under node":
+  test "serve, local, and the frozen reference shim in a scripted browser":
+    let node = findExe("node")
+    if node.len == 0:
+      echo "    skipped: node is not on PATH; the shim's behavior is then checked " &
+        "by hand in a browser"
+      skip()
+    else:
+      let dir = getTempDir() / ("neel-shim-" & $getCurrentProcessId())
+      createDir(dir)
+      try:
+        const exposed = @["add", "echo"]
+        writeFile(dir / "serve.js", renderNeelJs("tok", 3, exposed, serve = true))
+        writeFile(dir / "local.js", renderNeelJs("tok", 3, exposed, serve = false))
+        writeFile(dir / "reference.js", reference("tok", 3, exposed))
+        let p = startProcess(node, args = [HarnessPath, dir / "serve.js", dir / "local.js",
+                                           dir / "reference.js", dir / "report.txt"],
+                             options = {poStdErrToStdOut})
+        let deadline = getMonoTime() + initDuration(seconds = 60)
+        while p.running and getMonoTime() < deadline:
+          sleep(20)
+        let finished = not p.running
+        if not finished:
+          p.kill()
+        let exitCode = p.waitForExit()
+        let output = p.outputStream.readAll()
+        p.close()
+        let report =
+          if fileExists(dir / "report.txt"): readFile(dir / "report.txt") else: ""
+        if not finished or exitCode != 0 or not report.startsWith("ok "):
+          checkpoint "node harness report:\n" & report & output
+        check finished
+        check exitCode == 0
+        check report.startsWith("ok ")
+      finally:
+        removeDir(dir)
 
 proc req(path: string; headers: varargs[(string, string)]): HttpRequest =
   HttpRequest(httpMethod: hmGet, path: path, headers: @headers)

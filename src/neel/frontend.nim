@@ -1,17 +1,20 @@
 ## frontend.nim - serve-time rendering of the browser-side shim.
 ##
 ## `neel.js` (same directory) is read with `staticRead` into `NeelJsSource`.
-## It contains three placeholders - `__NEEL_TOKEN__`, `__NEEL_WINDOW_ID__`,
-## and `__NEEL_EXPOSED__` - that `renderNeelJs` replaces with JS literals
-## when `/neel.js` is served: the token is random per launch and the window
-## id differs per window, so the substitution cannot happen at compile time.
-## Do not rename the placeholders without updating `neel.js`.
+## It contains four placeholders - `__NEEL_TOKEN__`, `__NEEL_WINDOW_ID__`,
+## `__NEEL_EXPOSED__`, and `__NEEL_SERVE__` - that `renderNeelJs` replaces
+## with JS literals when `/neel.js` is served: the token is random per launch
+## and the window id differs per window, so the substitution cannot happen at
+## compile time. Do not rename the placeholders without updating `neel.js`.
+## The serve flag switches the shim's serve-mode behavior (dormant instead of
+## terminated after its reconnect attempts run out); it is not exposed on the
+## page's `neel` object.
 ##
 ## Every substituted value is a JS literal, never raw text: the token becomes
 ## a JSON string literal, the window id an integer literal, the exposed names
-## a JSON array of string literals. `std/json` does the escaping, and `</` is
-## additionally written as `<\/` so the output stays safe even when inlined in
-## an HTML `<script>` element. A `static:` block checks that each placeholder
+## a JSON array of string literals, the serve flag `true` or `false`.
+## `std/json` does the escaping, and `</` is additionally written as `<\/` so
+## the output stays safe even when inlined in an HTML `<script>` element. A `static:` block checks that each placeholder
 ## occurs exactly once and that rendering leaves no `__NEEL_` behind.
 ##
 ## This module also owns the names of the `/ws` query parameters the shim
@@ -43,6 +46,8 @@ const
     ## Replaced by a positive integer literal.
   ExposedPlaceholder* = "__NEEL_EXPOSED__"
     ## Replaced by a JSON array of string literals (the exposed proc names).
+  ServePlaceholder* = "__NEEL_SERVE__"
+    ## Replaced by `true` in serve mode, `false` otherwise.
   PlaceholderPrefix = "__NEEL_"
   NeelJsPath* = "/neel.js"
     ## Route of the rendered shim. `index.html` must load it with
@@ -97,18 +102,21 @@ proc jsStringArrayLiteral*(items: seq[string]): string {.gcsafe.} =
     result.add jsStringLiteral(item)
   result.add ']'
 
-proc renderNeelJs*(token: string; windowId: int; exposed: seq[string]): string
-    {.gcsafe.} =
-  ## The shim for one window: `NeelJsSource` with the three placeholders
+proc renderNeelJs*(token: string; windowId: int; exposed: seq[string];
+                   serve: bool): string {.gcsafe.} =
+  ## The shim for one window: `NeelJsSource` with the four placeholders
   ## replaced in a single pass (`multiReplace`), so a token that happens to
   ## contain a placeholder name is emitted verbatim inside its string literal.
-  ## Pure in its arguments; safe to call from a pool worker per request.
-  ## `windowId` must be positive (0 is Task 9's "no window" sentinel).
+  ## `serve` selects the serve-mode shim; the two renderings differ only in
+  ## that literal. Pure in its arguments; safe to call from a pool worker per
+  ## request. `windowId` must be positive (0 is Task 9's "no window"
+  ## sentinel).
   doAssert windowId > 0, "renderNeelJs: window id must be positive"
   NeelJsSource.multiReplace(
     (TokenPlaceholder, jsStringLiteral(token)),
     (WindowIdPlaceholder, $windowId),
-    (ExposedPlaceholder, jsStringArrayLiteral(exposed)))
+    (ExposedPlaceholder, jsStringArrayLiteral(exposed)),
+    (ServePlaceholder, $serve))
 
 proc normalizeOrigin*(origin: string): string =
   ## `origin` as browsers serialize it in an `Origin` header: scheme and host
@@ -251,7 +259,9 @@ static:
     "neel.js must contain " & WindowIdPlaceholder & " exactly once"
   doAssert NeelJsSource.count(ExposedPlaceholder) == 1,
     "neel.js must contain " & ExposedPlaceholder & " exactly once"
-  doAssert NeelJsSource.count(PlaceholderPrefix) == 3,
+  doAssert NeelJsSource.count(ServePlaceholder) == 1,
+    "neel.js must contain " & ServePlaceholder & " exactly once"
+  doAssert NeelJsSource.count(PlaceholderPrefix) == 4,
     "neel.js mentions an unknown " & PlaceholderPrefix & " placeholder"
   doAssert (WsPath & "?" & TokenQueryParam & "=") in NeelJsSource,
     "neel.js must build its URL from " & WsPath & "?" & TokenQueryParam & "="
@@ -259,5 +269,6 @@ static:
     "neel.js must append &" & WindowQueryParam & "= to its URL"
   doAssert NeelJsSource.count(ShimCloseDisplaced) == 1,
     "neel.js must define " & ShimCloseDisplaced & " exactly once"
-  doAssert PlaceholderPrefix notin renderNeelJs("token", 1, @["a", "b"]),
-    "renderNeelJs left a placeholder behind"
+  for serve in [false, true]:
+    doAssert PlaceholderPrefix notin renderNeelJs("token", 1, @["a", "b"], serve),
+      "renderNeelJs left a placeholder behind"

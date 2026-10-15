@@ -437,6 +437,10 @@ proc readMsg(c: var WsClient): Msg =
 proc sendMsg(c: WsClient; m: Msg) =
   c.sock.send(encodeText(encode(m), Key))
 
+const ExposedNames = @["add", "askJs", "whichWindow", "stop", "markWorker",
+                       "openSecond", "closeSecond"]
+  ## Every proc this test binary exposes, in registration order.
+
 proc tokenIn(shim: string): string =
   ## The launch token rendered into `const TOKEN = "...";`.
   const marker = "const TOKEN = \""
@@ -586,10 +590,9 @@ suite "neel: startApp end to end":
       check token.len == 32
       check token.allCharsInSet({'0' .. '9', 'a' .. 'f'})
       check ("const WINDOW_ID = 1;") in shim.body
-      const exposedNames = @["add", "askJs", "whichWindow", "stop", "markWorker",
-                             "openSecond", "closeSecond"]
-      check ("const EXPOSED = " & jsStringArrayLiteral(exposedNames) & ";") in shim.body
-      check shim.body == renderNeelJs(token, 1, exposedNames)
+      check ("const EXPOSED = " & jsStringArrayLiteral(ExposedNames) & ";") in shim.body
+      check "const SERVE = false;" in shim.body
+      check shim.body == renderNeelJs(token, 1, ExposedNames, serve = false)
       # A page that names no window (no Referer, an unparsable one, no
       # `window=`) gets the single open window.
       check http(port, NeelJsPath).body == shim.body
@@ -1080,6 +1083,9 @@ suite "neel: serve mode":
       check shim.status == 200
       check "const WINDOW_ID = 1;" in shim.body
       let token = tokenIn(shim.body)
+      # The serve-mode shim: dormant instead of terminated after giving up.
+      check "const SERVE = true;" in shim.body
+      check shim.body == renderNeelJs(token, 1, ExposedNames, serve = true)
 
       # Request filtering with the configured (normalized) origins.
       let login = http(port, "/sub/page.html", host = "myapp.example.com",
