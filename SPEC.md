@@ -558,6 +558,12 @@ with one early checkpoint where the code is platform-specific:
   passed, so its Linux risk is low. If VirtualBox stays impractical, WSL2 on
   the Windows machine is a real Linux kernel (epoll, signals) and a cheaper
   way to run `nimble test` on Linux earlier.
+- **Update (2026-10-15, after step 5):** the user ran Linux (Ubuntu in
+  VirtualBox) after all: `nimble test` and the step 4 and step 5 manual
+  checks passed, after one test-only fix (16.1, `SA_RESTORER`). Steps 1–5
+  are therefore green on all three OSes; the examples have not been run on
+  any OS yet. Steps 6 and 7 follow the every-step plan above (macOS and
+  Windows), and the final pass still runs everything on all three.
 
 Each step entry has a **Cross-OS** line: `safe to defer` (covered by the
 final pass) or `checkpoint` (needs a Windows/Linux run before the final
@@ -781,7 +787,9 @@ Manual checks (deferred to the final pass, 13.0):
   (2026-10-15): macOS** (`nimble test`, the first real run of the POSIX
   signal tests, plus the macOS manual checks below) **and Windows**
   (`nimble test` plus the Windows manual checks below), all passed.
-  **Linux: deferred to the final pass** (13.0).)
+  **Linux** (user-run after step 5, 2026-10-15): `nimble test` and the POSIX
+  manual checks below passed, after a test-only fix to how `t_neel` compares
+  signal actions (16.1, `SA_RESTORER`).)
 - **Depends on:** step 2
 - **Touches:** new `signals.nim`, `window.nim` (stop flag), `neel.nim`; new
   `tests/t_signals.nim`
@@ -795,8 +803,8 @@ Manual checks (deferred to the final pass, 13.0):
   by the handler thread). macOS and Linux: `nimble test` (first run of the
   POSIX signal tests) plus the `kill -TERM`, Ctrl-C, and second-signal checks
   below. Windows: `nimble test` plus the Ctrl-C, Ctrl-Break, and console-close
-  checks below. Done on macOS and Windows (2026-10-15, all passed); the Linux
-  run is deferred to the final pass.
+  checks below. Done on macOS and Windows (2026-10-15, all passed), and on
+  Linux after step 5 (passed).
 
 Tests: on Linux/macOS, send `SIGTERM` to the process during a serve-mode run
 and expect `erQuit`; handlers are restored after `startApp` returns. Windows:
@@ -889,7 +897,12 @@ Results (2026-10-15, user-run):
   Break key, so Ctrl-Break was sent with `GenerateConsoleCtrlEvent` to the
   app started in its own process group (the ad hoc script of 16.1): `returned
   erQuit`, `closed.txt` written, exit code 0, after 516 ms.
-- Linux: deferred to the final pass (13.0).
+- Linux (Ubuntu in VirtualBox, run after step 5): `nimble test` and the
+  POSIX manual checks above (Ctrl-C, `kill -TERM`, second signal with
+  `NEEL_HANG`): passed. The first `nimble test` run failed one check in
+  `t_neel` on a `SA_RESTORER` bit that glibc adds to restored actions; the
+  test was fixed, not the handlers (16.1). Local-mode Ctrl-C on an example
+  was not run (no examples run yet).
 
 ### 13.5 Step 5: keep-alive pings
 
@@ -903,7 +916,9 @@ Results (2026-10-15, user-run):
   assets). **User-confirmed (2026-10-15): macOS and Windows**, `nimble test`
   several times back to back on each, all passed; the first real run of the
   ping timer on kqueue. The two-instance and restart check passed on both.
-  **Linux: deferred to the final pass** (13.0).)
+  **Linux** (Ubuntu in VirtualBox, 2026-10-15): `nimble test` and the
+  two-instance check passed; the first real run of the epoll IO path and of
+  the ping timer on it.)
 - **Depends on:** step 2 (for the `runApp` wiring only)
 - **Touches:** `server.nim`, `neel.nim`, `testhooks.nim` (ping observer);
   tests `t_server`, `t_neel`
@@ -1000,7 +1015,9 @@ Results (2026-10-15, user-run):
   page connected), on Windows 11 and macOS: passed. The second copy failed
   at start with `OSError` and printed no startup line while the first kept
   serving; the restart bound the port at once.
-- Linux: deferred to the final pass (13.0).
+- Linux (Ubuntu in VirtualBox): `nimble test` and the two-instance and
+  restart check: passed (the second copy fails with "Address already in
+  use"). One `t_neel` check needed a test-only fix first (16.1).
 
 ### 13.6 Step 6: shim serve behavior
 
@@ -1042,16 +1059,16 @@ a section 16 entry, or `n/a`).
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` passes | pass (after step 5) | pass (after step 5) | |
+| `nimble test` passes | pass (after step 5) | pass (after step 5) | pass (after step 5) |
 | Local mode: the three examples behave as before (open, call, second window, close, exit after the grace period) | | | |
 | Local mode, fixed port: a browser tab at the app's URL displaces the app window (4000, no reconnect) | | | |
 | Serve: starts without a browser, prints the startup line | | | |
 | Serve: page loads at `http://127.0.0.1:<port>` | | | |
 | Serve: a second tab displaces the first (4000, no reconnect) | | | |
-| Serve: Ctrl-C exits cleanly | pass (after step 4) | pass (after step 4) | |
-| Serve: `kill -TERM` exits cleanly | pass (after step 4) | n/a | |
+| Serve: Ctrl-C exits cleanly | pass (after step 4) | pass (after step 4) | pass (after step 5) |
+| Serve: `kill -TERM` exits cleanly | pass (after step 4) | n/a | pass (after step 5) |
 | Serve: closing the console window exits cleanly | n/a | pass (after step 4) | n/a |
-| Serve: a second app on the same fixed port fails at start; a restart right after Ctrl-C binds | pass (after step 5) | pass (after step 5) | |
+| Serve: a second app on the same fixed port fails at start; a restart right after Ctrl-C binds | pass (after step 5) | pass (after step 5) | pass (after step 5) |
 | Serve: idle behind a proxy for 5 minutes without a reconnect | | | |
 | Serve: dormant shim wakes (DevTools offline toggle) | | | |
 
@@ -1254,6 +1271,12 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   is correct but not bit-identical. Fixed in the test: `actionOf` masks
   `SA_RESTORER` on Linux. Every other `t_neel` test passed on that run,
   including the epoll path and both signal tests.
+- 2026-10-15, after step 5, Linux: with that fix, `nimble test` passed on
+  Ubuntu (VirtualBox), as did the step 4 POSIX manual checks (Ctrl-C,
+  `kill -TERM`, second signal exiting 130 / 143) and the step 5
+  two-instance and restart check. This is the first Linux run of steps
+  1–5, so all five are green on macOS, Windows, and Linux. Not yet run on
+  any OS: the examples (13.8 local-mode rows), which the final pass covers.
 
 ### 16.2 Deviations from the spec
 
