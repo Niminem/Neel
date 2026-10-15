@@ -482,6 +482,11 @@ with one early checkpoint where the code is platform-specific:
   after every step.
 - **Commit after each step** (when the user asks), so a failure found late
   can be bisected to a step.
+- **From step 4 on (user's plan, 2026-10-15):** the user runs `nimble test`
+  on macOS, Windows, and Linux (Ubuntu in VirtualBox) after every step, not
+  only at the checkpoints. The session still runs it on its own machine; the
+  step's entry records which OSes the user has confirmed. The checkpoint and
+  final-pass manual checks are unchanged.
 
 Each step entry has a **Cross-OS** line: `safe to defer` (covered by the
 final pass) or `checkpoint` (needs a Windows/Linux run before the final
@@ -873,6 +878,10 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   `node --check` on a rendered shim (placeholders replaced by literals,
   written under `$env:TEMP`) is a quick syntax check after shim edits; there
   is still no JS test runner in the repo.
+- 2026-10-15, after step 3, all: the user now has Ubuntu in VirtualBox and
+  will run `nimble test` on all three OSes after every step from step 4 on
+  (13.0). Steps 1–3 have not been run on Linux yet; the first Linux run
+  covers them too.
 
 ### 16.2 Deviations from the spec
 
