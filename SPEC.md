@@ -1067,7 +1067,11 @@ Results (2026-10-15, user-run):
   Nimble compiled with `~/.nimble/pkgs2/nim-2.2.12-1ce02ec.../bin/nim.exe`,
   also 2.2.12.
   `node` v24.20.0 was on PATH, so the shim behavior test ran (not skipped).
-  macOS not yet run by the user for this step.)
+  **User-confirmed (2026-10-15): Linux** (Ubuntu in VirtualBox; `nimble
+  test` passed, with "frontend: shim behavior under node" `[OK]`, the first
+  POSIX run of the harness) **and macOS** (`nimble test` passed, the node
+  test `[OK]` as well, nothing skipped). Step 6 is
+  green on all three OSes. The browser checks below are still open.)
 - **Depends on:** steps 2 and 3
 - **Touches:** `neel.js`, `frontend.nim`; `neel.nim` (passes `a.serve` at the
   `renderNeelJs` call site, and one header line); tests `t_frontend`,
@@ -1213,7 +1217,7 @@ a section 16 entry, or `n/a`).
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` passes | pass (after step 5) | pass (after step 5) | pass (after step 5) |
+| `nimble test` passes | pass (after step 6) | pass (after step 6) | pass (after step 6) |
 | Local mode: the three examples behave as before (open, call, second window, close, exit after the grace period) | | | |
 | Local mode, fixed port: a browser tab at the app's URL displaces the app window (4000, no reconnect) | | | |
 | Serve: starts without a browser, prints the startup line | | | |
@@ -1450,6 +1454,13 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   (84 harness checks, about a second). The harness needs only Node built-ins
   (`vm`, `fs`) and ES2020; no npm. The user will install `node` on macOS and
   Linux so the test runs there too; without it the test is `[SKIPPED]`.
+- 2026-10-15, after step 6, Linux and macOS: the user ran `nimble test` on
+  both; both passed, with the node test `[OK]` on each (nothing skipped; on
+  Linux the first run of the harness on POSIX, with the LF working copy of
+  `neel.js`), so the
+  CRLF/LF difference does not affect the text checks. Steps 1–6 are green on
+  macOS, Windows, and Linux; still not run on any OS: the examples and the
+  browser checks (13.6, 13.8), which the final pass covers.
 - 2026-10-15, step 6, Windows: the Windows working copy of `neel.js` has
   CRLF line endings (`git ls-files --eol`: `i/lf w/crlf`), so
   `NeelJsSource` (`staticRead`) holds CRLF on Windows and LF on POSIX. Text
