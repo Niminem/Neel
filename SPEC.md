@@ -900,7 +900,10 @@ Results (2026-10-15, user-run):
   Windows `select` backend ran in the session; kqueue (macOS) and epoll
   (Linux) were **type-checked only** (`nim check --os:macosx` /
   `--os:linux` of `src/neel.nim`, `t_server`, and a `t_neel` copy with disk
-  assets). macOS and Linux not run yet.)
+  assets). **User-confirmed (2026-10-15): macOS and Windows**, `nimble test`
+  several times back to back on each, all passed; the first real run of the
+  ping timer on kqueue. The Windows two-instance check is not reported yet.
+  **Linux: deferred to the final pass** (13.0).)
 - **Depends on:** step 2 (for the `runApp` wiring only)
 - **Touches:** `server.nim`, `neel.nim`, `testhooks.nim` (ping observer);
   tests `t_server`, `t_neel`
@@ -989,6 +992,13 @@ Manual checks:
 - Linux, final pass: `nimble test` (first run on epoll) and the proxy check
   in 13.8.
 
+Results (2026-10-15, user-run):
+- macOS: `nimble test`, several runs back to back: passed (no ping-suite
+  flakes).
+- Windows 11: `nimble test`, several runs back to back: passed.
+- Windows two-instance and restart check: not yet reported.
+- Linux: deferred to the final pass (13.0).
+
 ### 13.6 Step 6: shim serve behavior
 
 - **Status:** not started
@@ -1028,7 +1038,7 @@ a section 16 entry, or `n/a`).
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` passes | pass (after step 4) | pass (after step 4) | |
+| `nimble test` passes | pass (after step 5) | pass (after step 5) | |
 | Local mode: the three examples behave as before (open, call, second window, close, exit after the grace period) | | | |
 | Local mode, fixed port: a browser tab at the app's URL displaces the app window (4000, no reconnect) | | | |
 | Serve: starts without a browser, prints the startup line | | | |
@@ -1217,6 +1227,10 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   kqueue and epoll were type-checked (`nim check --os:macosx` /
   `--os:linux`). `std/selectors` picks the backend; `server.nim` has no
   backend-specific code, so the ping timer is the same on all three.
+- 2026-10-15, step 5, macOS and Windows: the user ran `nimble test` several
+  times back to back on both; all passed, the ping suite included (its
+  first run on kqueue). The step-5 checkpoint is therefore green on macOS
+  and Windows; epoll (Linux) is first run in the final pass (13.0).
 - 2026-10-15, step 5, all: the IO loop wakes at most every `IoTickMs`
   (250 ms) or at the earliest deadline, and only `csWebSocket` connections
   shorten the timeout for pings. A test that looks for a ping during a
