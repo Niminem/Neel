@@ -544,18 +544,17 @@ Manual checks (deferred to the final pass, 13.0):
 - **Status:** done (2026-10-15; `nimble test` and `nim c src/neel.nim` green
   on **Windows 11** (win32 10.0.26200) with Nim 2.2.12. `nim` on PATH is
   `~/.nimble/bin/nim.exe`; Nimble compiled with
-  `~/.nimble/pkgs2/nim-2.2.12-1ce02ec.../bin/nim.exe`, also 2.2.12. Not yet
-  run on macOS or Linux, see the Cross-OS line.)
+  `~/.nimble/pkgs2/nim-2.2.12-1ce02ec.../bin/nim.exe`, also 2.2.12. The user
+  then ran `nimble test` on macOS the same day: passed. Linux not yet run.)
 - **Depends on:** step 1
 - **Touches:** `window.nim`, `neel.nim`
 - **Spec:** sections 3, 5, 6 (except signals, pings, and the shim)
 - **Cross-OS:** safe to defer (confirmed). No platform branches and no OS
   APIs. The only new state shared between threads is `WindowManager.serve`,
   written once in `initWindows` before any worker runs; the serve wait reuses
-  the existing lock, condition variable, and `quitRequested`. This session
-  ran on Windows, so the step's tests have not run on macOS or Linux yet; the
-  next macOS session's `nimble test` and the step-5 checkpoint (Linux) cover
-  it.
+  the existing lock, condition variable, and `quitRequested`. `nimble test`
+  has passed on Windows (in the session) and macOS (run by the user); Linux
+  is covered by the step-5 checkpoint.
 
 Scope: `serve` and `allowedOrigins` parameters and their validation; skip
 `findBrowser`; the no-op launcher and window 1; `waitForAppExit` serve
@@ -611,7 +610,7 @@ Tests (`t_window`, `t_neel`):
   (normalized origins, comma-separated).
 
 Manual checks (deferred to the final pass, 13.0):
-- `nimble test` on macOS and Linux (this session ran on Windows only).
+- `nimble test` on Linux (Windows and macOS passed on 2026-10-15).
 - A small serve app (`startApp(serve = true, port = 8080)`, optionally with
   `startPath = "/other.html"` and an `allowedOrigins` entry): no browser
   opens; the startup line appears on stdout; `http://127.0.0.1:8080/`
@@ -796,8 +795,8 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   the sandbox (or with `--nimcache` under `/tmp` for single files).
 - 2026-10-15, step 2, Windows: the session ran on Windows 11, not the Mac;
   `nimble test` passed there (the first Windows run of steps 1 and 2). The
-  rule that sessions run on macOS was not met for this step, so macOS still
-  owes a `nimble test` run. On Windows, use `$env:TEMP` instead of `/tmp`
+  user then ran `nimble test` on macOS the same day and it passed, so steps
+  1 and 2 are green on Windows and macOS; Linux is pending. On Windows, use `$env:TEMP` instead of `/tmp`
   for ad-hoc `--nimcache` and `-o:` paths. `nim c src/neel.nim` writes
   `src/neel.exe` (ignored by git; deleted after the check).
 - 2026-10-15, step 2, Windows: a TCP connect to a closed loopback port takes
