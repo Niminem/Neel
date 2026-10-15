@@ -1,7 +1,8 @@
 ## t_server.nim - integration tests against the IO loop with a std/net client.
 ##
-## Every server uses `port = 0`, every socket operation is bounded by a
-## timeout, and every server is shut down in a `finally`.
+## Every server uses `port = 0` (or the port of one that did), every socket
+## operation is bounded by a timeout, and every server is shut down in a
+## `finally`.
 
 import std/[unittest, net, nativesockets, strutils, algorithm, os, locks,
             monotimes, times, tables]
@@ -15,6 +16,11 @@ const
   RfcKey = "dGhlIHNhbXBsZSBub25jZQ=="
     ## RFC 6455 section 1.3 example `Sec-WebSocket-Key`.
   RfcAccept = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+  PingInterval = 300
+    ## `pingIntervalMs` of the keep-alive fixture.
+  PingCloseTimeout = 4 * PingInterval
+    ## `closeTimeoutMs` of the keep-alive fixture: a closing connection
+    ## lingers for several intervals, so a ping sent while closing would show.
 
 type
   State = object
@@ -74,7 +80,7 @@ proc snapshot(st: ptr State): State =
   result.requests = st.requests
   release st.lock
 
-proc startServer(st: ptr State): Server =
+proc startServer(st: ptr State; pingIntervalMs = 0; closeTimeoutMs = 500): Server =
   var srv: Server
   let onRequest: RequestHandler = proc(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
     acquire st.lock
@@ -108,7 +114,8 @@ proc startServer(st: ptr State): Server =
     release st.lock
   srv = newServer(onRequest = onRequest, onMessage = onMessage,
                   onOpen = onOpen, onClose = onClose,
-                  workers = 4, queueCapacity = 32, closeTimeoutMs = 500)
+                  workers = 4, queueCapacity = 32, closeTimeoutMs = closeTimeoutMs,
+                  pingIntervalMs = pingIntervalMs)
   srv.listen(0)
   srv
 
@@ -165,6 +172,11 @@ proc atEof(sock: Socket): bool =
     sock.recvSome(1).len == 0
   except OSError:
     true
+
+proc quietFor(sock: Socket; ms: int): bool =
+  ## True when nothing at all (not even EOF) arrives within `ms`.
+  var fds = @[sock.getFd()]
+  selectRead(fds, ms) == 0
 
 proc handshake(port: int; path = "/ws"; key = RfcKey): WsClient =
   result.sock = connect(port)
@@ -227,17 +239,28 @@ proc startBagServer(bag: ptr Bag; workers, queueCapacity: int): Server =
                      queueCapacity = queueCapacity, closeTimeoutMs = 500)
   result.listen(0)
 
-template serverTest(name: string; body: untyped) =
+template serverTestWith(name: string; pingIntervalMs, closeTimeoutMs: int;
+                        body: untyped) =
   test name:
     var st {.inject.}: State
     initLock st.lock
     let stp {.inject.} = addr st
-    let srv {.inject.} = startServer(stp)
+    let srv {.inject.} = startServer(stp, pingIntervalMs, closeTimeoutMs)
     try:
       body
     finally:
       srv.shutdown(beforeJoin = releaseState(stp))
       deinitLock st.lock
+
+template serverTest(name: string; body: untyped) =
+  serverTestWith(name, 0, 500, body)
+
+template pingTest(name: string; body: untyped) =
+  ## `serverTest` with keep-alive pings every `PingInterval` ms.
+  serverTestWith(name, PingInterval, PingCloseTimeout, body)
+
+proc msSince(t: MonoTime): int =
+  int((getMonoTime() - t).inMilliseconds)
 
 # --- tests -----------------------------------------------------------------------
 
@@ -261,6 +284,48 @@ suite "server: lifecycle":
     srv.shutdown()
     check not srv.running
     check srv.port == 0
+
+  serverTest "a second server cannot listen on a port that is already listening":
+    let second = newServer()
+    expect OSError:
+      second.listen(srv.port)
+    check not second.running
+    second.shutdown()
+    let sock = connect(srv.port)
+    sock.send("GET /hello?first HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    check sock.readResponse().body == "hello first"
+    sock.close()
+
+  test "a port is free again right after shutdown, with its connections in TIME_WAIT":
+    var st: State
+    initLock st.lock
+    let first = startServer(addr st)
+    let again: RequestHandler = proc(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
+      respond(okResponse("again", "text/plain"))
+    let second = newServer(onRequest = again)
+    try:
+      let port = first.port
+      var c = handshake(port)
+      let plain = connect(port)
+      plain.send("GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+      discard plain.readResponse()
+      # The server closes first, so the TIME_WAIT entries are on its port.
+      first.shutdown(beforeJoin = releaseState(addr st))
+      check c.readFrame().opcode == opClose
+      check c.sock.atEof()
+      check plain.atEof()
+      c.sock.close()
+      plain.close()
+      second.listen(port)
+      check second.port == port
+      let sock = connect(port)
+      sock.send("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+      check sock.readResponse().body == "again"
+      sock.close()
+    finally:
+      first.shutdown(beforeJoin = releaseState(addr st))
+      second.shutdown()
+      deinitLock st.lock
 
 suite "server: HTTP":
   serverTest "request goes through the handler and the response comes back":
@@ -601,6 +666,145 @@ suite "server: WebSocket":
     a.sock.close()
     b.sock.close()
     http.close()
+
+proc readUntilClose(c: var WsClient; maxFrames = 4): tuple[frame: Frame; pings: int] =
+  ## The first close frame among the next `maxFrames` frames, and how many
+  ## pings came before it. Raises if none of them is a close frame.
+  for _ in 1 .. maxFrames:
+    let f = c.readFrame()
+    if f.opcode == opClose:
+      result.frame = f
+      return
+    doAssert f.opcode == opPing, "unexpected " & $f.opcode & " before the close frame"
+    inc result.pings
+  raise newException(IOError, "no close frame within " & $maxFrames & " frames")
+
+proc echoed(c: var WsClient): tuple[payload: string; pings: int] =
+  ## The next text frame, and how many pings came before it.
+  while true:
+    let f = c.readFrame()
+    if f.opcode == opText:
+      result.payload = f.payload
+      return
+    doAssert f.opcode == opPing, "unexpected " & $f.opcode
+    inc result.pings
+
+suite "server: keep-alive pings":
+  serverTest "pingIntervalMs = 0 (the default) sends no pings":
+    check srv.pingIntervalMs == 0
+    check newServer(pingIntervalMs = -5).pingIntervalMs == 0
+    var c = handshake(srv.port)
+    check c.sock.quietFor(4 * PingInterval)
+    c.sock.send(encodeText("still here", Key))
+    let f = c.readFrame()
+    check f.opcode == opText
+    check f.payload == "still here"
+    c.sock.close()
+
+  pingTest "an idle upgraded connection is pinged; a pong restarts the idle time":
+    check srv.pingIntervalMs == PingInterval
+    var c = handshake(srv.port)
+    let upgraded = getMonoTime()
+    let p1 = c.readFrame()
+    let firstAfter = msSince(upgraded)
+    check p1.opcode == opPing
+    check p1.fin
+    check not p1.masked
+    check p1.payload == ""
+    # The 101 was written a moment before `upgraded`, so allow a little.
+    check firstAfter >= PingInterval - 50
+    sleep(PingInterval div 2)
+    let pongSent = getMonoTime()
+    c.sock.send(encodePong("", Key))
+    let p2 = c.readFrame()
+    # Measured from the pong: had it not counted, the ping would come about
+    # PingInterval div 2 earlier.
+    check p2.opcode == opPing
+    check msSince(pongSent) >= PingInterval
+    let s = snapshot(stp)
+    check s.messages.len == 0
+    check s.closed.len == 0
+    c.sock.send(encodeText("after pings", Key))
+    check c.echoed().payload == "after pings"
+    c.sock.close()
+
+  pingTest "a connection in use is not pinged, whichever side writes":
+    var c = handshake(srv.port)
+    let id = openedId(stp, 0)
+    var pings = 0
+    let t0 = getMonoTime()
+    # The peer writes (and the server echoes) every 50 ms.
+    for i in 0 ..< 12:
+      c.sock.send(encodeText("m" & $i, Key))
+      let e = c.echoed()
+      check e.payload == "m" & $i
+      pings += e.pings
+      sleep(50)
+    # Only the server writes, every 50 ms.
+    for i in 0 ..< 12:
+      check srv.send(id, "s" & $i)
+      let e = c.echoed()
+      check e.payload == "s" & $i
+      pings += e.pings
+      sleep(50)
+    check msSince(t0) >= 3 * PingInterval
+    check pings == 0
+    # Left alone, the same connection is pinged.
+    check c.readFrame().opcode == opPing
+    c.sock.close()
+
+  pingTest "a plain HTTP connection is never pinged":
+    let plain = connect(srv.port)
+    plain.send("GET /hello?a HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    check plain.readResponse().body == "hello a"
+    let silent = connect(srv.port) # connected, never sends anything
+    var c = handshake(srv.port)
+    check plain.quietFor(4 * PingInterval)
+    check silent.quietFor(1)
+    # Meanwhile the upgraded connection was pinged.
+    check c.readFrame().opcode == opPing
+    plain.send("GET /hello?b HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    check plain.readResponse().body == "hello b"
+    plain.close()
+    silent.close()
+    c.sock.close()
+
+  pingTest "pings stop once the server starts closing, and with the connection":
+    var c = handshake(srv.port)
+    let id = openedId(stp, 0)
+    check c.readFrame().opcode == opPing
+    let t0 = getMonoTime()
+    check srv.close(id, CloseNormal, "bye")
+    let (closeFrame, _) = c.readUntilClose()
+    check decodeClose(closeFrame).code == CloseNormal
+    # No reply: the connection lingers for several intervals and must end
+    # without another frame.
+    check c.sock.atEof()
+    check msSince(t0) >= PingCloseTimeout - 100
+    check waitUntil(IoTimeout, proc(): bool = snapshot(stp).closed == @[id])
+    c.sock.close()
+    # A peer-initiated close: answered, then EOF, nothing else.
+    var d = handshake(srv.port)
+    check d.readFrame().opcode == opPing
+    d.sock.send(encodeClose(CloseNormal, "", Key))
+    let (reply, _) = d.readUntilClose()
+    check decodeClose(reply).code == CloseNormal
+    check d.sock.atEof()
+    d.sock.close()
+
+  pingTest "shutdown stops the pings":
+    var a = handshake(srv.port)
+    var b = handshake(srv.port)
+    check a.readFrame().opcode == opPing
+    check b.readFrame().opcode == opPing
+    srv.shutdown(beforeJoin = releaseState(stp))
+    check not srv.running
+    for c in [addr a, addr b]:
+      let (f, _) = c[].readUntilClose()
+      check decodeClose(f).code == CloseGoingAway
+      check c[].sock.atEof()
+    a.sock.close()
+    b.sock.close()
 
 # Before Nim 2.2.12 the allocator could not free a block once the thread that
 # allocated it had exited (on Windows an intermittent SIGSEGV in

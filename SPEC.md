@@ -27,7 +27,7 @@ startApp(serve = true, port = 8080,
   redirect through a login page.
 - Survives proxy idle timeouts and phones that sleep.
 - Local mode (the default) behaves as it does today. Section 11 lists the
-  only observable difference.
+  only observable differences.
 - Supported on macOS, Windows, and Linux.
 
 **Non-goals**
@@ -285,7 +285,9 @@ The parameter checks (item 1 of the list above) run first in `runApp`, before th
 directory check and before `AppState` is written, so a refused start leaves
 nothing behind and a later `startApp` works. The `testhooks` launcher is
 ignored in serve mode (`noLaunch` is always used); the `testhooks` sweep is
-never called.
+never called. The `testhooks` ping observer (step 5) is called in both modes,
+right after `newServer`, with the server's `pingIntervalMs` (0 locally,
+30 000 in serve mode); it changes nothing.
 
 ---
 
@@ -367,6 +369,33 @@ This touches the module with platform branches (Windows sockets, `select` on
 Windows, kqueue on macOS, epoll on Linux), but only through the existing queue
 and flush paths.
 
+As built (step 5, activity rule agreed with the user):
+
+- **Activity** (`ConnObj.lastActivity`, a `MonoTime` on the IO thread): any
+  successful receive of more than 0 bytes (pongs, partial frames, anything),
+  any successful send of more than 0 bytes (our pings, the 101, every frame),
+  the upgrade itself, and **queueing a ping**. The last one means a peer whose
+  socket is backed up gets one ping per interval, not one per loop pass.
+- `processPings` runs after `processDeadlines` in every loop pass: for each
+  `csWebSocket` connection idle for at least the interval it appends
+  `encodePing()` to `outbound` under the lock, unless `closing` is already
+  set (a worker's `close` may have queued its frame since `processDirty`),
+  and calls `flush`. A connection in `csClosing` or plain HTTP is never
+  pinged.
+- `selectTimeout` also takes the time until the next ping is due on any
+  `csWebSocket` connection, rounded up by 1 ms so the loop does not spin, and
+  stays bounded by `IoTickMs`. Nothing on the IO thread waits for a pong.
+- `newServer(pingIntervalMs)` stores a negative value as 0; the read-only
+  `pingIntervalMs(server)` returns it. `PingIntervalMs = 30_000` is a private
+  constant in `neel.nim`; `server.nim` is not re-exported.
+- **Exclusive bind on Windows** (folded into step 5 at the user's request):
+  `openListener` sets `SO_EXCLUSIVEADDRUSE` on Windows instead of
+  `SO_REUSEADDR`, so a second server (in any mode) on a port that is already
+  listening fails `listen` with `OSError` instead of sharing it. POSIX keeps
+  `SO_REUSEADDR` (it never allowed two listeners there). Checked on
+  Windows 11: a restart still rebinds a port with server-side TIME_WAIT
+  entries (16.1).
+
 ---
 
 ## 9. The displaced close code
@@ -425,11 +454,18 @@ across restarts would remove the need for this; deferred (section 15).
 
 ## 11. Effect on local mode
 
-Only one observable difference: a displaced local connection (a duplicated
-tab, or a stale page refreshed against a fixed port) now receives close code
-4000 instead of 1000. The shim's behavior is identical (final, no
-reconnect); only the code reported to `neel.onclose` changes. The guide's
-caveat about fixed ports is updated accordingly.
+Two observable differences:
+
+- A displaced local connection (a duplicated tab, or a stale page refreshed
+  against a fixed port) now receives close code 4000 instead of 1000. The
+  shim's behavior is identical (final, no reconnect); only the code reported
+  to `neel.onclose` changes. The guide's caveat about fixed ports is updated
+  accordingly.
+- On Windows only, a second app started on a fixed port that another Neel
+  app already listens on now fails at start (`OSError` from `startApp`), as
+  it already did on macOS and Linux. Before, both bound the port and
+  connections went to either one (section 8, "Exclusive bind on Windows";
+  agreed with the user in step 5). The default `port = 0` is unaffected.
 
 Everything else is behind `serve`: pings default to off, the cross-site
 exception and allowed origins apply only in serve mode, the shim renders
@@ -808,8 +844,8 @@ manual (Ctrl-C, Ctrl-Break, closing the console window).
   `GenerateConsoleCtrlEvent` to a serve app started in its own process
   group, ended it with `erQuit` and exit code 0 after 168 ms.
 - Found, not fixed (out of scope): on Windows two serve apps bind the same
-  fixed port, because `server.nim` sets `SO_REUSEADDR` (16.1). Needs a
-  decision.
+  fixed port, because `server.nim` sets `SO_REUSEADDR` (16.1). Fixed in
+  step 5 (`SO_EXCLUSIVEADDRUSE`, 16.2).
 
 Manual checks. Test app (for example `/tmp/sig/app.nim` with a `web/` folder
 holding any `index.html`):
@@ -857,21 +893,101 @@ Results (2026-10-15, user-run):
 
 ### 13.5 Step 5: keep-alive pings
 
-- **Status:** not started
+- **Status:** done (2026-10-15; `nimble test` (three times) and
+  `nim c src/neel.nim` green on **Windows 11** (win32 10.0.26200) with Nim
+  2.2.12. `nim` on PATH is `~/.nimble/bin/nim.exe`; Nimble compiled with
+  `~/.nimble/pkgs2/nim-2.2.12-1ce02ec.../bin/nim.exe`, also 2.2.12. Only the
+  Windows `select` backend ran in the session; kqueue (macOS) and epoll
+  (Linux) were **type-checked only** (`nim check --os:macosx` /
+  `--os:linux` of `src/neel.nim`, `t_server`, and a `t_neel` copy with disk
+  assets). macOS and Linux not run yet.)
 - **Depends on:** step 2 (for the `runApp` wiring only)
-- **Touches:** `server.nim`, `neel.nim`
-- **Spec:** section 8
-- **Cross-OS:** checkpoint (run right after this step). `server.nim` has a
-  separate IO path per OS (Windows sockets and `select`, kqueue, epoll), and
-  the ping tests are timing-based. Since 2026-10-15 the checkpoint covers
-  macOS and Windows only; the epoll path is first run on Linux in the final
-  pass (13.0).
+- **Touches:** `server.nim`, `neel.nim`, `testhooks.nim` (ping observer);
+  tests `t_server`, `t_neel`
+- **Spec:** section 8 (and 11 for the Windows bind)
+- **Cross-OS:** checkpoint (confirmed). `server.nim` has a separate IO path
+  per OS (Windows sockets and `select`, kqueue, epoll); the ping timer runs
+  inside it, and the ping tests are timing-based. The step also changes a
+  Windows-only branch (`SO_EXCLUSIVEADDRUSE`). No new state shared between
+  threads: `lastActivity` is IO-thread only, `pingIntervalMs` is immutable
+  after `newServer`, and the ping bytes go through the existing `outbound`
+  queue under the existing lock. Under the every-step plan (13.0): macOS
+  (first run of the ping timer on kqueue) and Windows (`nimble test` on the
+  user's machine) right after this step; Linux (epoll) in the final pass.
 
 Tests (`t_server`, with a short interval such as 300 ms): an idle upgraded
 connection receives a ping; an active one does not; `pingIntervalMs = 0`
 sends none.
 
 **Notes:**
+- Activity rule agreed with the user: successful reads and writes of more
+  than 0 bytes (pongs and our own pings included), the upgrade, and a
+  queued ping all restart the idle time; the last one prevents one ping per
+  loop pass on a backed-up socket. Section 8 "As built" updated (16.2).
+- Windows `SO_REUSEADDR` replaced by `SO_EXCLUSIVEADDRUSE` in this step, at
+  the user's request, after a probe showed restarts still rebind (16.1). A
+  second local-mode app on a taken fixed port now fails on Windows; section
+  11 updated (16.2).
+- `runApp`'s interval is proven with a recording hook,
+  `testhooks.setTestPingObserver` (the user's choice over a 30 s wait); it
+  is called in both modes and changes nothing (16.2, section 6).
+- Built: `newServer(pingIntervalMs = 0)`, `pingIntervalMs(server)`,
+  `ConnObj.lastActivity`, `processPings` (after `processDeadlines`), the
+  ping term in `selectTimeout`, the Windows exclusive bind; `neel.nim`'s
+  private `PingIntervalMs = 30_000` passed only when `serve`. Doc comments
+  of `server.nim` (header, `newServer`, `listen`, `openListener`) and
+  `runApp` updated; the guide is step 7.
+- Tests: `t_server` gains the "server: keep-alive pings" suite (fixture:
+  300 ms interval, 1.2 s close timeout): no pings with the default 0 (and a
+  negative value stored as 0); an idle connection is pinged (empty,
+  unmasked, final, not before the interval) and a pong restarts the idle
+  time (the next ping comes at least 300 ms after the pong); a connection
+  kept busy by the peer, then by the server alone, gets no ping for over
+  three intervals and is pinged once left alone; plain HTTP connections
+  (served and silent) get nothing while an upgraded one is pinged; no
+  ping once the server starts closing (1.2 s of silence until EOF) nor
+  after a peer-initiated close; shutdown sends 1001 and EOF. The lifecycle
+  suite gains: a second server on a listening port raises `OSError`; a
+  port is rebound right after shutdown with server-side TIME_WAIT entries.
+  `t_neel`: local runs 1, 2, and 3 record interval 0; the main serve run
+  records 30 000; the three parameter refusals create no server.
+  `occupyPort` no longer needs `SO_EXCLUSIVEADDRUSE`.
+- Mutations checked in the session (each reverted): reads not counted
+  (the pong test fails), writes not counted (the busy test fails), closing
+  connections pinged (the closing test fails, only after the fixture's
+  close timeout was raised above the interval, see 16.3), Windows back to
+  `SO_REUSEADDR` (the second-server test fails).
+- Not covered automatically: the "queued ping restarts the idle time" rule
+  on a backed-up socket (needs a peer that stops reading with the kernel
+  buffers full); its effect is only that output does not pile up.
+- Timing: the unmutated ping suite passed 17 times out of 17 in the
+  session (one direct run, three `nimble test` runs, ten back-to-back runs,
+  and three copies in parallel to load the machine); no flakes seen. The bounds are exact by construction (a ping cannot come before
+  the interval measured from the server's own timestamps) except "first
+  ping after at least 250 ms" (50 ms slack for the 101's delivery).
+
+Manual checks:
+- macOS: `nimble test` (first run of the ping timer on kqueue). Expect all
+  green, the "server: keep-alive pings" suite included. Run it twice; report
+  any ping-suite failure verbatim instead of retrying it away.
+- Windows: `nimble test` on your machine. Same expectation.
+- Windows: two serve apps on the same port. Start the step 4 test app
+  (`startApp(webDir = "web", serve = true, port = 8080)`), then a second copy
+  in another console. Expect the second to fail at once with an `OSError`
+  ("Only one usage of each socket address ...") and no startup line; the
+  first keeps serving. Stop the first with Ctrl-C and start it again
+  straight away: it must start (no "address in use").
+- macOS (optional, same app): the same two-instance check; the second fails
+  with "Address already in use". This was already the behavior.
+- Any OS, serve mode (optional now; 13.8 "idle behind a proxy" is the real
+  check): open `http://127.0.0.1:8080` in Firefox, whose WebSocket inspector
+  (Network > the `/ws` request) can list control frames once they are
+  enabled in its message filter, and leave the page alone. Expect an empty
+  ping and the browser's pong about every 30 s. Chrome's Messages tab may
+  not list control frames at all. Local mode's "no pings" is covered by
+  `t_neel` (interval 0) and `t_server` (0 sends none).
+- Linux, final pass: `nimble test` (first run on epoll) and the proxy check
+  in 13.8.
 
 ### 13.6 Step 6: shim serve behavior
 
@@ -921,6 +1037,7 @@ a section 16 entry, or `n/a`).
 | Serve: Ctrl-C exits cleanly | pass (after step 4) | pass (after step 4) | |
 | Serve: `kill -TERM` exits cleanly | pass (after step 4) | n/a | |
 | Serve: closing the console window exits cleanly | n/a | pass (after step 4) | n/a |
+| Serve: a second app on the same fixed port fails at start; a restart right after Ctrl-C binds | | | |
 | Serve: idle behind a proxy for 5 minutes without a reconnect | | | |
 | Serve: dormant shim wakes (DevTools offline toggle) | | | |
 
@@ -946,8 +1063,9 @@ Once, on Linux (the realistic deployment target):
   a real setup before publishing.
 - **Guide updates elsewhere:** `startApp` parameter table (two rows); the
   `neel.onclose` row (code 4000); the Caveats entry "Neither side closes an
-  idle connection on its own" (true locally, not behind proxies); the fixed-
-  port caveat (1000 becomes 4000).
+  idle connection on its own" (true locally, not behind proxies; serve mode
+  pings after 30 s of silence); the fixed-port caveat (1000 becomes 4000,
+  and a second app on a taken fixed port now fails at start on Windows too).
 - **Examples:** the "Refresh after a restart" item in
   `examples/stresstest/web/index.html` says the displaced window reports
   "close code 1000"; it is 4000 since step 3.
@@ -1064,9 +1182,9 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   both bind and print the startup line, because `openListener` sets
   `SO_REUSEADDR`, which on Windows allows binding a port that is already
   listening (Windows wants `SO_EXCLUSIVEADDRUSE`). This existed before step 4
-  but matters for serve mode, which always uses a fixed port. Not fixed; the
-  user should decide whether a later step changes `server.nim`. `t_neel`'s
-  `occupyPort` uses `SO_EXCLUSIVEADDRUSE` so its taken-port test is reliable.
+  but matters for serve mode, which always uses a fixed port. Fixed in step
+  5: Windows now binds with `SO_EXCLUSIVEADDRUSE` (section 8, 16.2), and
+  `t_neel`'s `occupyPort` is a plain listener again.
 - 2026-10-15, step 4, Windows: console apps that load `user32.dll` or
   `gdi32.dll` never receive `CTRL_LOGOFF_EVENT` / `CTRL_SHUTDOWN_EVENT`
   (Microsoft `SetConsoleCtrlHandler` docs). A Neel serve binary imports only
@@ -1082,6 +1200,30 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   Windows machine; 13.0 updated (the step-5 checkpoint is macOS and Windows
   only, so epoll is first exercised at the end). Steps 1–3 have not run on
   Linux either.
+- 2026-10-15, step 5, Windows: Windows bind options, probed on Windows 11
+  loopback (ad-hoc program, not in the repo). Two listeners on one port
+  succeed only when both set `SO_REUSEADDR`; every other pairing fails (a
+  plain or exclusive socket after a `SO_REUSEADDR` one, or a `SO_REUSEADDR`
+  one after a plain or exclusive one, which fails with "access forbidden").
+  After the server closed an accepted connection first (one TIME_WAIT entry
+  on the port, seen in `netstat`) and closed its listener, an immediate
+  rebind succeeded with `SO_REUSEADDR`, with no option, and with
+  `SO_EXCLUSIVEADDRUSE`. Microsoft's documentation warns about exclusive
+  ports and TIME_WAIT; this did not occur here. Basis for the exclusive
+  bind (section 8); `t_server` pins both halves.
+- 2026-10-15, step 5, Windows: the session ran on Windows 11 again; `nimble
+  test` passed three times (109, 93, and 91 s) and the ping suite 17 times
+  (including three copies in parallel), without a flake. Only the `select` backend ran;
+  kqueue and epoll were type-checked (`nim check --os:macosx` /
+  `--os:linux`). `std/selectors` picks the backend; `server.nim` has no
+  backend-specific code, so the ping timer is the same on all three.
+- 2026-10-15, step 5, all: the IO loop wakes at most every `IoTickMs`
+  (250 ms) or at the earliest deadline, and only `csWebSocket` connections
+  shorten the timeout for pings. A test that looks for a ping during a
+  close therefore needs a close timeout well above the interval: with the
+  default fixture (500 ms close, 300 ms interval) the loop's next wake-up
+  after the ping fell due was the close deadline itself, so a mutation that
+  pinged closing connections passed unnoticed.
 
 ### 16.2 Deviations from the spec
 
@@ -1117,6 +1259,23 @@ Format: `YYYY-MM-DD, step N: what changed and why; spec sections updated`.
   existing `neel: server closed the connection (close code 4000)` (same
   branch as 1000/1001), not a displacement-specific one. Agreed with the
   user. Section 10.1 updated.
+- 2026-10-15, step 5: "last read or write" made precise (agreed with the
+  user): successful reads and writes of more than 0 bytes, the upgrade, and
+  queueing a ping restart the idle time. Without the last one, a peer whose
+  socket is backed up would get a new ping on every loop pass. A ping is
+  also skipped when `closing` is already set. Section 8 "As built" added.
+- 2026-10-15, step 5: the Windows `SO_REUSEADDR` finding of step 4 (16.1) is
+  fixed in this step at the user's request: `openListener` uses
+  `SO_EXCLUSIVEADDRUSE` on Windows. This adds a second local-mode
+  difference (on Windows, a second app on a taken fixed port fails at
+  start). Sections 1, 8, 11, and 14 updated; the 13.8 matrix gained a row.
+  The `neel-project` rule's "only accepted difference" wording now points
+  at section 11's list.
+- 2026-10-15, step 5: proving `runApp`'s interval needed a test hook (the
+  user chose a recording hook over 30 s waits): `testhooks` gained
+  `PingObserver`, `setTestPingObserver`, and `testPingObserver`, so step 5
+  also touches `testhooks.nim`. `server.nim` gained the read-only
+  `pingIntervalMs(server)`. Sections 6 and 13.5 updated.
 
 ### 16.3 Gotchas
 
@@ -1210,3 +1369,24 @@ Rules every step must respect. The first entries come from the existing code.
   console, including `nimble` and the shell. Tests call `onConsoleCtrl` on a
   thread of their own instead, and anything that needs a real console event
   goes in the manual checks.
+- **`lastActivity` belongs to the IO thread.** It is written in `readFrom`,
+  `flush`, the upgrade, and `processPings`, never under the lock and never
+  from a worker. Anything new that sends or receives on a connection goes
+  through `flush` / `readFrom` (or sets it there), or it will not count as
+  activity.
+- **A ping is a write on the wire, not a message.** It goes into `outbound`
+  under the lock and out through `flush`, never with a direct `rawSend`, and
+  never once `closing` is set (a close frame may already be queued).
+- **Ping tests: the echo fixture hides read-only activity.** `t_server`'s
+  fixture echoes every message, so a message is always also a write. Test
+  that reads count with a pong (read, never answered), and that writes count
+  with `srv.send` alone.
+- **Ping tests during a close need a long close timeout.** The loop wakes
+  every `IoTickMs` or at the earliest deadline, so with a close timeout near
+  the interval a stray ping on a closing connection may never get its turn
+  (16.1). The ping fixture uses `PingCloseTimeout` = 4 intervals.
+- **Two servers on one port fail on every OS.** Windows binds with
+  `SO_EXCLUSIVEADDRUSE`, POSIX with `SO_REUSEADDR`; in both cases `listen` on
+  a port that is already listening raises `OSError`, and a port is rebindable
+  right after shutdown. A test that needs a taken port can use a plain
+  listener (`t_neel`'s `occupyPort`).

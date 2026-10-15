@@ -87,6 +87,10 @@ const
   TokenBytes = 16
     ## Random bytes in the launch token (rendered as 32 lowercase hex chars,
     ## so the `/ws` query needs no percent-decoding).
+  PingIntervalMs = 30_000
+    ## Serve mode's keep-alive ping interval: below nginx's 60 s
+    ## `proxy_read_timeout` and the ~100 s after which Cloudflare closes an
+    ## idle WebSocket. Local mode sends no pings.
 
 type
   AppState = object
@@ -385,7 +389,8 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   ## `teardownWindows`, the table is dropped), and last the profile sweep
   ## (`sweepProfiles()`: delete profile dirs abandoned by killed or crashed
   ## apps, within `SweepBudgetMs`). `testhooks` may replace the browser
-  ## launch and the sweep (tests inject fakes); both are read once here.
+  ## launch and the sweep (tests inject fakes) and observe the server's ping
+  ## interval; all three are read once here.
   ## When no browser is found and `fallback` is `false`, the error page has
   ## been opened in the default browser: it is served for `gracePeriodMs`,
   ## then the `NeelBrowserError` propagates after teardown. A disk-mode web
@@ -396,7 +401,8 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   ## `allowedOrigins` entry (`ValueError`; `allowedOrigins` without `serve`
   ## is rejected too), skips `findBrowser` and the test launcher, creates
   ## window 1 with `openVirtualWindow` (nothing is launched), installs the
-  ## stop-signal handlers (`neel/signals`), prints
+  ## stop-signal handlers (`neel/signals`), pings WebSocket connections idle
+  ## for 30 s, so proxies keep them open (local mode sends no pings), prints
   ## `neel: serving http://127.0.0.1:<port> (allowed origins: ...)` to stdout,
   ## waits for `quitApp()` or a stop signal (both `erQuit`), and skips the
   ## profile sweep. After `shutdown` it reports shutdown finished (a Windows
@@ -411,6 +417,7 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
     raise newException(OSError, "neel: web directory not found: " & assets.root)
   let launcher = if serve: Launcher(noLaunch) else: testLauncher()
   let profileSweep = testProfileSweep()
+  let pingObserver = testPingObserver()
   let search = if serve: BrowserSearch() else: findBrowser(browsers, browserPath)
   app = AppState(running: true, token: newToken(), search: search,
                  fallback: fallback, assets: assets, dispatch: dispatch,
@@ -420,8 +427,11 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   app.srv = newServer(onRequest = handleRequest, onMessage = handleMessage,
                       onOpen = connectionOpened, onClose = connectionClosed,
                       workers = workers, queueCapacity = queueCapacity,
-                      maxMessageSize = maxMessageSize)
+                      maxMessageSize = maxMessageSize,
+                      pingIntervalMs = if serve: PingIntervalMs else: 0)
   try:
+    if not pingObserver.isNil:
+      pingObserver(app.srv.pingIntervalMs)
     initJsBridge(appSend, resolveWindow, app.tbl, callTimeoutMs)
     app.srv.listen(port)
     let base = "http://" & LoopbackHost & ":" & $app.srv.port

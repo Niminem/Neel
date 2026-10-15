@@ -37,8 +37,6 @@ when defined(posix):
     ## The current `SIGINT` and `SIGTERM` actions.
     (actionOf(SIGINT), actionOf(SIGTERM))
 else:
-  from std/winlean import SO_EXCLUSIVEADDRUSE
-
   proc stopActions(): int =
     ## Stand-in: Windows has no way to list console control handlers.
     0
@@ -90,6 +88,7 @@ type
     sweepAfterReturn: bool  # `startApp` had already returned when it ran
     windowOpens: int        # `countOpen` calls
     windowCloses: int       # `countClose` calls
+    pingIntervals: seq[int] # what `recordPingInterval` was told, per run
 
 var shared: Shared
 initLock shared.lock
@@ -153,6 +152,18 @@ proc recordSweep() {.gcsafe.} =
     shared.sweepAfterReturn = shared.done
     release shared.lock
 
+proc recordPingInterval(ms: int) {.gcsafe.} =
+  ## The test ping observer: the interval `runApp` gave its server.
+  {.cast(gcsafe).}:
+    acquire shared.lock
+    shared.pingIntervals.add ms
+    release shared.lock
+
+proc pingIntervals(): seq[int] =
+  acquire shared.lock
+  result = shared.pingIntervals
+  release shared.lock
+
 proc fakeLaunch(url, userDataDir: string; opts: LaunchOptions): BrowserHandle
     {.gcsafe.} =
   ## Stands in for the browser: records the URL, publishes the port.
@@ -181,6 +192,7 @@ proc appThread(run: int) {.thread.} =
   {.cast(gcsafe).}:
     setTestLauncher(fakeLaunch)
     setTestProfileSweep(recordSweep)
+    setTestPingObserver(recordPingInterval)
     try:
       case run
       of 1:
@@ -209,6 +221,7 @@ proc appThread(run: int) {.thread.} =
     finally:
       setTestLauncher(nil)
       setTestProfileSweep(nil)
+      setTestPingObserver(nil)
 
 const
   ServeOrigins = @["https://MyApp.Example.com:443", "http://tunnel.example:8080"]
@@ -224,6 +237,7 @@ proc serveThread(args: (int, string)) {.thread.} =
   {.cast(gcsafe).}:
     setTestLauncher(fakeLaunch)
     setTestProfileSweep(recordSweep)
+    setTestPingObserver(recordPingInterval)
     try:
       let reason = startApp(webDir = "fixtures/web", embedAssets = false,
                             serve = true, port = args[0],
@@ -240,6 +254,7 @@ proc serveThread(args: (int, string)) {.thread.} =
     finally:
       setTestLauncher(nil)
       setTestProfileSweep(nil)
+      setTestPingObserver(nil)
 
 proc resetShared() =
   acquire shared.lock
@@ -258,6 +273,7 @@ proc resetShared() =
   shared.sweepAfterReturn = false
   shared.windowOpens = 0
   shared.windowCloses = 0
+  shared.pingIntervals = @[]
   release shared.lock
 
 proc sharedPort(): int =
@@ -311,11 +327,9 @@ proc freePort(): int =
   int(s.getLocalAddr()[1])
 
 proc occupyPort(port: int): Socket =
-  ## A listener on `127.0.0.1:port` that Neel's own bind must fail against
-  ## (on Windows `SO_REUSEADDR` would otherwise let Neel share the port).
+  ## A plain listener on `127.0.0.1:port` that Neel's own bind must fail
+  ## against.
   result = newSocket()
-  when defined(windows):
-    setSockOptInt(result.getFd(), SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1)
   result.bindAddr(Port(port), "127.0.0.1")
   result.listen()
 
@@ -485,6 +499,7 @@ proc attemptThread(a: ptr Attempt) {.thread.} =
   {.cast(gcsafe).}:
     setTestLauncher(fakeLaunch)
     setTestProfileSweep(recordSweep)
+    setTestPingObserver(recordPingInterval)
     try:
       startApp(webDir = "fixtures/web", embedAssets = false, serve = a.serve,
                port = a.port, allowedOrigins = a.origins, browsers = @[],
@@ -494,6 +509,7 @@ proc attemptThread(a: ptr Attempt) {.thread.} =
     finally:
       setTestLauncher(nil)
       setTestProfileSweep(nil)
+      setTestPingObserver(nil)
       finish(erQuit)
 
 proc attemptStart(serve: bool; port: int; origins: seq[string]): string =
@@ -757,6 +773,8 @@ suite "neel: startApp end to end":
     let sweepExited = shared.sweepExited
     let sweepLate = shared.sweepAfterReturn
     release shared.lock
+    # Local mode creates its server without keep-alive pings.
+    check pingIntervals() == @[0]
     # The exit sweep ran once, after teardown and the joins, before returning.
     check sweeps == 1
     check sweepOpen == 0
@@ -802,6 +820,7 @@ suite "neel: startApp end to end":
     let sweeps = shared.sweeps
     let sweepDirs = shared.sweepDirsLeft
     release shared.lock
+    check pingIntervals() == @[0]
     check sweeps == 1
     check sweepDirs == 0
     check dirs.len == 1
@@ -867,6 +886,7 @@ suite "neel: startApp end to end":
     let sweeps = shared.sweeps
     let dirs = shared.userDataDirs
     release shared.lock
+    check pingIntervals() == @[0] # local mode sends no pings
     check sweeps == 1
     check closes() == 2
     check dirs.len == 2
@@ -877,6 +897,7 @@ suite "neel: startApp end to end":
     resetShared()
     setTestLauncher(fakeLaunch)
     setTestProfileSweep(recordSweep)
+    setTestPingObserver(recordPingInterval)
     var msg = ""
     try:
       startApp(webDir = "fixtures/no-such-web", embedAssets = false,
@@ -886,6 +907,7 @@ suite "neel: startApp end to end":
     finally:
       setTestLauncher(nil)
       setTestProfileSweep(nil)
+      setTestPingObserver(nil)
     check "web directory not found" in msg
     check "no-such-web" in msg
     acquire shared.lock
@@ -970,6 +992,7 @@ suite "neel: serve mode":
     check err.startsWith("ValueError: ")
     check "port" in err
     check nothingStarted()
+    check pingIntervals().len == 0 # no server was created
     check not stopHandlersInstalled()
     check stopActions() == actionsBefore
 
@@ -980,6 +1003,7 @@ suite "neel: serve mode":
                              origins = @["https://myapp.example.com"])
       check err == "ValueError: neel: allowedOrigins requires serve = true"
       check nothingStarted()
+      check pingIntervals().len == 0
       check not stopHandlersInstalled()
       check stopActions() == actionsBefore
 
@@ -992,6 +1016,7 @@ suite "neel: serve mode":
     check err.startsWith("ValueError: neel: allowedOrigins entry ")
     check "path" in err
     check nothingStarted()
+    check pingIntervals().len == 0
     check not canConnect(port)
     check not stopHandlersInstalled()
     check stopActions() == actionsBefore
@@ -1127,6 +1152,7 @@ suite "neel: serve mode":
     check shared.reason == erQuit
     check opens() == 1
     check closes() == 1
+    check pingIntervals() == @[30_000] # serve mode pings idle connections
     acquire shared.lock
     check shared.sweeps == 0
     check shared.launches.len == 0
