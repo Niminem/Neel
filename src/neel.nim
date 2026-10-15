@@ -18,11 +18,12 @@
 ## keyword argument verbatim to `runApp`, the private proc that wires the
 ## server, protocol, window, and browser modules together and blocks the
 ## calling thread until the last window closes (plus the grace period),
-## `quitApp()` is called, or no window ever connects (in serve mode, only
-## until `quitApp()`; no browser is launched). All IO and all exposed
-## procs run on Neel's own threads: the IO thread owns the sockets, a pool of
-## workers runs the hooks and the exposed procs, and `js.wait.*` may be used
-## from any thread that knows a window.
+## `quitApp()` is called, or no window ever connects (in serve mode, until
+## `quitApp()` or a stop signal: `SIGINT` / `SIGTERM`, or Ctrl-C, Ctrl-Break,
+## and closing the console on Windows; no browser is launched). All IO and
+## all exposed procs run on Neel's own threads: the IO thread owns the
+## sockets, a pool of workers runs the hooks and the exposed procs, and
+## `js.wait.*` may be used from any thread that knows a window.
 ##
 ## Routes served by `runApp`'s request handler (all on `127.0.0.1`). Every
 ## request first passes `frontend.requestRefusal` (`Host` must be
@@ -54,7 +55,7 @@ when (NimMajor, NimMinor, NimPatch) < (2, 2, 12):
 
 import std/[json, options, strutils, sysrand, uri, macros, os]
 import neel/[http, server, pool, protocol, expose, jsproxy, frontend, browser,
-             window, assets, testhooks]
+             window, assets, testhooks, signals]
 from neel/websocket import DefaultMaxMessageSize
 
 # --- re-exports ------------------------------------------------------------------
@@ -394,10 +395,14 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   ## Serve mode (`serve = true`) first rejects `port = 0` and a malformed
   ## `allowedOrigins` entry (`ValueError`; `allowedOrigins` without `serve`
   ## is rejected too), skips `findBrowser` and the test launcher, creates
-  ## window 1 with `openVirtualWindow` (nothing is launched), prints
+  ## window 1 with `openVirtualWindow` (nothing is launched), installs the
+  ## stop-signal handlers (`neel/signals`), prints
   ## `neel: serving http://127.0.0.1:<port> (allowed origins: ...)` to stdout,
-  ## waits for `quitApp()` only, and skips the profile sweep. The browser
-  ## parameters, `gracePeriodMs`, and `startupTimeoutMs` are ignored.
+  ## waits for `quitApp()` or a stop signal (both `erQuit`), and skips the
+  ## profile sweep. After `shutdown` it reports shutdown finished (a Windows
+  ## console-close handler waits for that) and restores the previous signal
+  ## handlers, also when the run raised. The browser parameters,
+  ## `gracePeriodMs`, and `startupTimeoutMs` are ignored.
   doAssert not dispatch.isNil, "runApp: dispatch is nil"
   doAssert not app.running, "startApp is already running in this process"
   checkServeParams(serve, port, allowedOrigins)
@@ -426,6 +431,7 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
                 onWindowClose, serve)
     if serve:
       discard openVirtualWindow(startPath)
+      installStopHandlers()
       printLine(serveStartupLine(app.srv.port, filter.origins))
     else:
       try:
@@ -439,8 +445,13 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
         raise
     result = waitForAppExit()
   finally:
-    app.srv.shutdown(beforeJoin = releaseSharedState)
-    app = AppState()
+    try:
+      app.srv.shutdown(beforeJoin = releaseSharedState)
+      app = AppState()
+    finally:
+      if serve:
+        reportShutdownFinished()
+        removeStopHandlers()
     if not serve:
       sweepAbandonedProfiles(profileSweep)
 

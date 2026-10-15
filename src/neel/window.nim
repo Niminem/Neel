@@ -47,7 +47,8 @@
 ##
 ## Serve mode (`initWindows(serve = true)`): `startApp` creates window 1 with
 ## `openVirtualWindow` through a launcher that launches nothing (`noLaunch`),
-## and that window is never retired: `waitForAppExit` returns only `erQuit`,
+## and that window is never retired: `waitForAppExit` returns only `erQuit`
+## (after `quitApp()`, or after `requestStop()` from a stop-signal handler),
 ## `onWindowOpen` fires on the first connection ever, `onWindowClose` only in
 ## `teardownWindows`. `openWindow` and `closeWindow` raise
 ## `NeelServeModeError`. No profile directory is created or cleared.
@@ -56,7 +57,9 @@
 ## `{.gcsafe.}`. One `Lock` guards the table, every record's mutable fields,
 ## and the lifecycle state; `initWindows` / `teardownWindows` run on the main
 ## thread while no worker can touch the module. The manager is reached through
-## a module-level `ptr` written only by those two procs.
+## a module-level `ptr` written only by those two procs. The stop request is
+## a module-level atomic outside the manager, since a signal handler may set
+## it while `teardownWindows` frees the manager.
 
 import std/[locks, tables, options, strutils, monotimes, times, algorithm]
 import ./pool
@@ -176,6 +179,31 @@ var mgr: ptr WindowManager
   ## while no other thread uses this module; read from any thread. A `ptr`
   ## global holds no GC'd memory, so `{.gcsafe.}` procs may read it.
 
+# The stop request (`stopFlag`) is set by `requestStop` from a signal handler
+# on any thread, cleared by `initWindows`, and read by the serve-mode wait. It
+# lives in static storage, so a handler may set it at any time. With GCC and
+# Clang it goes through the compiler's lock-free builtins directly, because
+# `std/atomics` wraps them in Nim procs that carry stack-trace frames
+# (thread-local state) in debug builds.
+when defined(gcc) or defined(clang) or defined(llvm_gcc):
+  var stopFlag: bool
+  proc atomicExchangeN(p: ptr bool; v: bool; order: cint): bool
+    {.importc: "__atomic_exchange_n", nodecl.}
+  proc atomicStoreN(p: ptr bool; v: bool; order: cint)
+    {.importc: "__atomic_store_n", nodecl.}
+  proc atomicLoadN(p: ptr bool; order: cint): bool
+    {.importc: "__atomic_load_n", nodecl.}
+  const SeqCst = cint(5) # __ATOMIC_SEQ_CST
+  template exchangeStop(v: bool): bool = atomicExchangeN(addr stopFlag, v, SeqCst)
+  template storeStop(v: bool) = atomicStoreN(addr stopFlag, v, SeqCst)
+  template loadStop(): bool = atomicLoadN(addr stopFlag, SeqCst)
+else:
+  import std/atomics
+  var stopFlag: Atomic[bool]
+  template exchangeStop(v: bool): bool = stopFlag.exchange(v)
+  template storeStop(v: bool) = stopFlag.store(v)
+  template loadStop(): bool = stopFlag.load
+
 # --- helpers ---------------------------------------------------------------------
 
 proc requireManager(): ptr WindowManager =
@@ -250,7 +278,8 @@ proc initWindows*(closeConn: CloseProc; pending: PendingTable; baseUrl: string;
   ## an override for tests (`nil` = `launchWithFallback`). `gracePeriodMs`
   ## must be at least `MinGracePeriodMs`. `serve` selects serve mode (see the
   ## module header), which ignores `gracePeriodMs` and `startupTimeoutMs`;
-  ## pass `noLaunch` as its `launcher`.
+  ## pass `noLaunch` as its `launcher`. Clears a stop request left by an
+  ## earlier run (`requestStop`).
   doAssert mgr == nil, "initWindows called twice; call teardownWindows first"
   doAssert not closeConn.isNil, "initWindows: closeConn is nil"
   doAssert not pending.isNil, "initWindows: pending is nil"
@@ -279,6 +308,7 @@ proc initWindows*(closeConn: CloseProc; pending: PendingTable; baseUrl: string;
   m.nextWindowId = 1
   m.windows = initTable[int, ptr WindowRecord]()
   m.connToWindow = initTable[ConnId, int]()
+  storeStop(false)
   mgr = m
 
 proc teardownWindows*() =
@@ -634,16 +664,26 @@ proc quitApp*() {.gcsafe.} =
   signal m.cond
   release m.lock
 
+{.push stackTrace: off.}
+proc requestStop*(): bool {.gcsafe, raises: [].} =
+  ## Asks a serve-mode app to exit: `waitForAppExit` returns `erQuit` within
+  ## `IdleTickMs`. Returns whether a stop was already requested. Safe in a
+  ## signal handler, unlike `quitApp`: one lock-free atomic exchange, no
+  ## lock, no allocation, no condition variable (so it cannot wake the wait
+  ## early), no stack-trace frame. Local mode ignores it.
+  exchangeStop(true)
+{.pop.}
+
 proc minOpt(a: var Option[MonoTime]; b: MonoTime) {.inline.} =
   if a.isNone or b < a.get:
     a = some b
 
 proc waitForQuit(m: ptr WindowManager): ExitReason =
   ## Serve mode's `waitForAppExit`: no retirement and no idle exit, only
-  ## `quitApp()`. Still wakes every `IdleTickMs`, so a flag that cannot
-  ## signal the condition variable is noticed within that bound.
+  ## `quitApp()` or `requestStop()`. Wakes every `IdleTickMs`, since
+  ## `requestStop` cannot signal the condition variable.
   acquire m.lock
-  while not m.quitRequested:
+  while not m.quitRequested and not loadStop():
     discard waitTimeout(m.cond, m.lock, IdleTickMs)
   release m.lock
   erQuit
@@ -658,10 +698,10 @@ proc waitForAppExit*(): ExitReason =
   ## has been gone for a grace period or that never connected within the
   ## startup timeout: their browser is terminated, their profile directory
   ## removed, `onWindowClose` fired (on this thread), and their record freed.
-  ## In serve mode it only waits for `quitApp()` (`erQuit`) and retires
-  ## nothing. Does not call server `shutdown`; the caller does, then
-  ## `resetJsBridge` and `teardownWindows`. Every internal wait is bounded by
-  ## `IdleTickMs`.
+  ## In serve mode it only waits for `quitApp()` or `requestStop()` (both
+  ## `erQuit`) and retires nothing. Does not call server `shutdown`; the
+  ## caller does, then `resetJsBridge` and `teardownWindows`. Every internal
+  ## wait is bounded by `IdleTickMs`.
   let m = requireManager()
   if m.serve:
     return waitForQuit(m)

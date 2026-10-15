@@ -20,7 +20,28 @@ import std/[unittest, locks, os, monotimes, times, typedthreads, net,
 # file uses `%`, `getInt`, `some`, `isNone`, ... through `import neel`'s
 # re-export, so the whole suite checks that applications get them for free.
 import neel
-import neel/[protocol, websocket, frontend, browser, testhooks]
+import neel/[protocol, websocket, frontend, browser, testhooks, signals]
+
+when defined(posix):
+  from std/posix import Sigaction, SIGINT, SIGTERM, kill, getpid
+
+  proc sigactionQuery(sig: cint; act, old: ptr Sigaction): cint
+    {.importc: "sigaction", header: "<signal.h>".}
+
+  proc actionOf(sig: cint): tuple[handler: pointer; flags: cint] =
+    var old: Sigaction
+    doAssert sigactionQuery(sig, nil, addr old) == 0
+    (cast[pointer](old.sa_handler), old.sa_flags)
+
+  proc stopActions(): auto =
+    ## The current `SIGINT` and `SIGTERM` actions.
+    (actionOf(SIGINT), actionOf(SIGTERM))
+else:
+  from std/winlean import SO_EXCLUSIVEADDRUSE
+
+  proc stopActions(): int =
+    ## Stand-in: Windows has no way to list console control handlers.
+    0
 
 const
   IoTimeout = 3000
@@ -288,6 +309,15 @@ proc freePort(): int =
   defer: s.close()
   s.bindAddr(Port(0), "127.0.0.1")
   int(s.getLocalAddr()[1])
+
+proc occupyPort(port: int): Socket =
+  ## A listener on `127.0.0.1:port` that Neel's own bind must fail against
+  ## (on Windows `SO_REUSEADDR` would otherwise let Neel share the port).
+  result = newSocket()
+  when defined(windows):
+    setSockOptInt(result.getFd(), SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1)
+  result.bindAddr(Port(port), "127.0.0.1")
+  result.listen()
 
 proc canConnect(port: int): bool =
   ## Whether something accepts TCP connections on `127.0.0.1:port`.
@@ -778,7 +808,11 @@ suite "neel: startApp end to end":
     check not dirExists(dirs[0])
 
   test "local mode: a non-root startPath leaves / alone; displaced 4000, closeWindow 1000, quit 1001":
+    let actionsBefore = stopActions()
     appRun(3):
+      # Local mode installs no stop handler: Ctrl-C behaves as before.
+      check not stopHandlersInstalled()
+      check stopActions() == actionsBefore
       let base = "http://127.0.0.1:" & $port
       acquire shared.lock
       check shared.launches == @[base & "/sub/page.html?window=1"]
@@ -827,6 +861,8 @@ suite "neel: startApp end to end":
       d.sock.close()
       check waitUntil(IoTimeout, isDone)
     check shared.reason == erQuit
+    check not stopHandlersInstalled()
+    check stopActions() == actionsBefore
     acquire shared.lock
     let sweeps = shared.sweeps
     let dirs = shared.userDataDirs
@@ -907,6 +943,11 @@ suite "neel: startApp end to end":
     check not compiles(waitForAppExit())
     check not declared(noLaunch)
     check not compiles(openVirtualWindow("/"))
+    # Qualified, so this file's `neel/signals` import cannot satisfy them.
+    check not compiles(neel.requestStop())
+    check not compiles(neel.installStopHandlers())
+    check not compiles(neel.removeStopHandlers())
+    check not compiles(neel.stopHandlersInstalled())
 
   test "js.<name> reaches the page unless a Nim proc accepts the proxy":
     # What docs/GUIDE.md "Calling the page from Nim" promises, checked with the
@@ -924,19 +965,26 @@ suite "neel: startApp end to end":
 
 suite "neel: serve mode":
   test "serve mode refuses port = 0 before anything starts":
+    let actionsBefore = stopActions()
     let err = attemptStart(serve = true, port = 0, origins = @[])
     check err.startsWith("ValueError: ")
     check "port" in err
     check nothingStarted()
+    check not stopHandlersInstalled()
+    check stopActions() == actionsBefore
 
   test "allowedOrigins without serve is refused before anything starts":
+    let actionsBefore = stopActions()
     for port in [0, freePort()]:
       let err = attemptStart(serve = false, port = port,
                              origins = @["https://myapp.example.com"])
       check err == "ValueError: neel: allowedOrigins requires serve = true"
       check nothingStarted()
+      check not stopHandlersInstalled()
+      check stopActions() == actionsBefore
 
   test "a malformed allowedOrigins entry is refused before the port is bound":
+    let actionsBefore = stopActions()
     let port = freePort()
     let err = attemptStart(serve = true, port = port,
                            origins = @["https://myapp.example.com",
@@ -945,6 +993,28 @@ suite "neel: serve mode":
     check "path" in err
     check nothingStarted()
     check not canConnect(port)
+    check not stopHandlersInstalled()
+    check stopActions() == actionsBefore
+
+  test "a port that is taken fails the start and leaves the signal handlers alone":
+    let actionsBefore = stopActions()
+    let port = freePort()
+    let blocker = occupyPort(port)
+    defer: blocker.close()
+    let err = attemptStart(serve = true, port = port, origins = @[])
+    check err.startsWith("OSError: ")
+    check nothingStarted()
+    check not stopHandlersInstalled()
+    check stopActions() == actionsBefore
+    # The next start on a free port installs and removes them as usual.
+    let next = freePort()
+    serveRun(next, "/"):
+      check waitUntil(IoTimeout, stopHandlersInstalled)
+      quitApp()
+      check waitUntil(IoTimeout, isDone)
+    check shared.reason == erQuit
+    check not stopHandlersInstalled()
+    check stopActions() == actionsBefore
 
   test "no browser, / redirects, public origins, one window for every device, only quitApp ends it":
     let port = freePort()
@@ -1080,3 +1150,84 @@ suite "neel: serve mode":
       check http(port, "/").header("Location") == "/sub/page.html"
       quitApp()
       check waitUntil(IoTimeout, isDone)
+
+template serveRunStoppedBy(stopAction: untyped) =
+  ## A serve run with one connected device, ended by `stopAction` (with
+  ## `port` bound) instead of `quitApp`. It must end exactly like a
+  ## `quitApp` run, and leave the previous signal handlers in place.
+  let actionsBefore = stopActions()
+  let port {.inject.} = freePort()
+  serveRun(port, "/"):
+    # Window 1 exists before the handlers go in; a signal before then would
+    # reach the previous handler.
+    check waitUntil(IoTimeout, stopHandlersInstalled)
+    when defined(posix):
+      check stopActions() != actionsBefore
+    let token = tokenIn(http(port, NeelJsPath).body)
+    var (c, st) = handshake(port, token, 1)
+    check st.startsWith("HTTP/1.1 101")
+    c.sendMsg(callMsg("add", @[%1, %2], id = 1))
+    check c.readMsg() == retMsg(1, %3)
+    check opens() == 1
+    let t0 = getMonoTime()
+    stopAction
+    check waitUntil(IoTimeout, isDone)
+    # Noticed within IdleTickMs (1 s), then the usual shutdown.
+    check int((getMonoTime() - t0).inMilliseconds) < 1000 + 1000
+    # Read only now: the signal has been handled, so no read is interrupted.
+    check c.readUntilClose() == CloseGoingAway
+    c.sock.close()
+  check shared.reason == erQuit
+  check opens() == 1
+  check closes() == 1 # onWindowClose, once, at teardown
+  acquire shared.lock
+  check shared.sweeps == 0
+  release shared.lock
+  check not stopHandlersInstalled()
+  check stopActions() == actionsBefore
+
+when defined(windows):
+  type CloseCall = object
+    port: int
+    returned: int32
+    tookMs: int
+    portOpenAfter: bool   # whether the server still listened when it returned
+
+  proc consoleClose(c: ptr CloseCall) {.thread.} =
+    ## What Windows does when the console window is closed: run the handler
+    ## on a thread of its own, then end the process once it returns.
+    let t0 = getMonoTime()
+    c.returned = onConsoleCtrl(CtrlCloseEvent)
+    c.tookMs = int((getMonoTime() - t0).inMilliseconds)
+    c.portOpenAfter = canConnect(c.port)
+
+suite "neel: serve mode stop signals":
+  when defined(posix):
+    test "SIGTERM sent to the process ends the run like quitApp; handlers restored":
+      serveRunStoppedBy:
+        check kill(getpid(), SIGTERM) == 0
+
+    test "SIGINT sent to the process ends the run like quitApp; Nim's handler restored":
+      # Without Neel's handler, Nim's own SIGINT handler would end this process.
+      serveRunStoppedBy:
+        check kill(getpid(), SIGINT) == 0
+
+  when defined(windows):
+    test "Ctrl-C (handler called directly) ends the run like quitApp":
+      serveRunStoppedBy:
+        check onConsoleCtrl(CtrlCEvent) == 1
+
+    test "Ctrl-Break (handler called directly) ends the run like quitApp":
+      serveRunStoppedBy:
+        check onConsoleCtrl(CtrlBreakEvent) == 1
+
+    test "closing the console: the handler returns once startApp has shut down":
+      var call: CloseCall
+      var th: Thread[ptr CloseCall]
+      serveRunStoppedBy:
+        call.port = port
+        createThread(th, consoleClose, addr call)
+      joinThread(th)
+      check call.returned == 1
+      check call.tookMs < ShutdownWaitMs   # released by the report, not the timeout
+      check not call.portOpenAfter

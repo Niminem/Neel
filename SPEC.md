@@ -297,25 +297,50 @@ Installed only in serve mode, for the duration of `runApp`, and removed
 safe in a signal handler. It only sets an atomic stop flag that
 `waitForAppExit` checks on every wake-up (at most every `IdleTickMs`).
 
-**Linux and macOS:** `SIGINT` and `SIGTERM` (`sigaction` from `std/posix`).
-A second signal while the flag is already set exits immediately with
-`_exit(130)` for `SIGINT` / `_exit(143)` for `SIGTERM`, so a hung shutdown
-can always be interrupted.
+As built (step 4): the flag is a module-level atomic in `window.nim`
+(outside the `WindowManager`, which `teardownWindows` frees while the
+handlers are still installed), set by `window.requestStop()` (returns
+whether it was already set) and cleared by `initWindows`. Only the serve
+wait (`waitForQuit`) reads it; local mode ignores it. `runApp` installs the
+handlers right after window 1 exists, and after `shutdown` (in a nested
+`finally`, so also when the run raised) reports shutdown finished and then
+removes them. `neel/signals` is not re-exported.
+
+**Linux and macOS:** `SIGINT` and `SIGTERM` (`sigaction` from `std/posix`,
+`SA_RESTART`, empty mask). A second signal while the flag is already set
+exits immediately with `_exit(130)` for `SIGINT` / `_exit(143)` for
+`SIGTERM`, so a hung shutdown can always be interrupted. Removal restores
+the exact saved `sigaction` of both signals: for `SIGINT` that is Nim's own
+handler, or whatever `setControlCHook` installed (16.1).
 
 **Windows:** `SetConsoleCtrlHandler` (imported from `kernel32`), handling
 `CTRL_C_EVENT`, `CTRL_BREAK_EVENT`, `CTRL_CLOSE_EVENT`, `CTRL_LOGOFF_EVENT`,
-and `CTRL_SHUTDOWN_EVENT`. The handler runs on a new thread.
+and `CTRL_SHUTDOWN_EVENT`. The handler runs on a new thread. Handlers are
+called last registered first and `TRUE` ends the chain, so ours pre-empts the
+C runtime's (which runs Nim's `SIGINT` handler); "restoring" is removing ours
+from the chain, which brings the earlier handlers back untouched. Other event
+types return `FALSE`.
 
-- Ctrl-C and Ctrl-Break: set the flag and return `TRUE`.
+- Ctrl-C and Ctrl-Break: set the flag and return `TRUE`. There is no
+  second-signal exit on Windows; a hung shutdown is ended by closing the
+  console window (next item).
 - Close, logoff, shutdown: Windows terminates the process as soon as the
   handler returns (or after its own timeout of a few seconds). The handler
-  sets the flag, then waits, bounded to about 4 s, for `runApp` to report
-  that shutdown has finished, then returns `TRUE`. Code after `startApp` may
-  not run in this case; documented.
+  sets the flag, then waits, bounded to `ShutdownWaitMs` = 4 s, for `runApp`
+  to report that shutdown has finished, then returns `TRUE`. Code after
+  `startApp` may not run in this case; documented. The report is a
+  manual-reset kernel event (created once, never closed, reset at install,
+  set after `shutdown`) that the handler waits on with `WaitForSingleObject`.
+- Logoff and shutdown reach the handler only while the process has not
+  loaded `user32.dll` or `gdi32.dll` (Windows rule for console apps). Neel
+  loads neither; an app that does (a GUI library) is killed at logoff
+  without a clean shutdown. Documented in step 7.
 
 Running as a Windows service is out of scope for v1. Service wrappers that
 send Ctrl-C to the console (NSSM does by default, to be confirmed in testing)
-work through the Ctrl-C path.
+work through the Ctrl-C path. A process started with
+`CREATE_NEW_PROCESS_GROUP` has Ctrl-C disabled by Windows and only sees
+Ctrl-Break (16.1).
 
 ---
 
@@ -701,21 +726,111 @@ Manual checks (deferred to the final pass, 13.0):
 
 ### 13.4 Step 4: stop signals
 
-- **Status:** not started
+- **Status:** done (2026-10-15; `nimble test` and `nim c src/neel.nim` green
+  on **Windows 11** (win32 10.0.26200) with Nim 2.2.12. `nim` on PATH is
+  `~/.nimble/bin/nim.exe` (choosenim toolchain 2.2.12); Nimble compiled with
+  `~/.nimble/pkgs2/nim-2.2.12-1ce02ec.../bin/nim.exe`, also 2.2.12. The POSIX
+  branch was **type-checked only** (`nim check --os:linux` and
+  `--os:macosx`), never compiled to C or run: the POSIX signal tests run for
+  the first time on the user's Mac and Linux machines. User-confirmed OSes:
+  none yet.)
 - **Depends on:** step 2
-- **Touches:** new `signals.nim`, `window.nim` (stop flag), `neel.nim`
+- **Touches:** new `signals.nim`, `window.nim` (stop flag), `neel.nim`; new
+  `tests/t_signals.nim`
 - **Spec:** section 7
-- **Cross-OS:** checkpoint (run after step 5). Entirely platform-specific:
-  `sigaction` on Linux/macOS; on Windows `SetConsoleCtrlHandler`, whose
-  handler runs on its own thread and waits up to ~4 s for shutdown. The
-  Windows paths have no automated test, so Ctrl-C, Ctrl-Break, and closing
-  the console window are checked by hand at the checkpoint.
+- **Cross-OS:** checkpoint (confirmed), to run **before step 5** under the
+  every-step plan (13.0), not only at the post-step-5 checkpoint. Entirely
+  platform-specific (`sigaction`; `SetConsoleCtrlHandler`, whose handler runs
+  on a thread Windows creates), and it adds state shared between threads:
+  the stop flag (written from a handler on any thread, read by the main
+  thread) and the Windows shutdown event (set by the main thread, waited on
+  by the handler thread). macOS and Linux: `nimble test` (first run of the
+  POSIX signal tests) plus the `kill -TERM`, Ctrl-C, and second-signal checks
+  below. Windows: `nimble test` plus the Ctrl-C, Ctrl-Break, and console-close
+  checks below.
 
 Tests: on Linux/macOS, send `SIGTERM` to the process during a serve-mode run
 and expect `erQuit`; handlers are restored after `startApp` returns. Windows:
 manual (Ctrl-C, Ctrl-Break, closing the console window).
 
 **Notes:**
+- No behavior deviations from section 7. Section 7 now records what was
+  built: where the flag lives and how it is cleared, Windows restore =
+  removing our handler from the chain, no second-signal exit on Windows
+  (as specified), the kernel event behind "shutdown finished", and the
+  `user32` / `gdi32` limit on logoff and shutdown events.
+- Handler code is frame-free: `std/atomics` wrappers carry stack-trace frames
+  (thread-local state) in debug builds, so the stop flag uses the GCC/Clang
+  `__atomic` builtins (other compilers fall back to `std/atomics`), the
+  Windows wait uses a kernel event, and the handlers are compiled with
+  `stackTrace: off`. Checked in the generated C (16.1).
+- Built: `neel/signals.nim` (`installStopHandlers`, `reportShutdownFinished`,
+  `removeStopHandlers`, `stopHandlersInstalled`; on Windows the exported
+  `onConsoleCtrl`, the `Ctrl*Event` constants, and `ShutdownWaitMs` for
+  tests); `window.requestStop()` and the stop flag check in `waitForQuit`;
+  `runApp` installs after `openVirtualWindow`, and its `finally` became
+  `try: shutdown finally: report; remove`, so a raising shutdown still
+  restores the handlers. Doc comments for `runApp` and the `neel.nim` and
+  `window.nim` headers mention stop signals; the guide is step 7.
+- Tests: `t_signals` (new): install/remove bookkeeping and double install
+  (all OSes); POSIX: actions replaced while installed and restored exactly,
+  a `setControlCHook` hook and a custom `SIGTERM` handler restored and still
+  working, real `SIGTERM` and `SIGINT` ending a serve wait; Windows: the
+  handler called directly for Ctrl-C/Ctrl-Break (stop, `TRUE`), unknown
+  events (`FALSE`, no stop), close released by the report, logoff/shutdown
+  after a report, close without a report bounded by `ShutdownWaitMs`.
+  `t_window`: `requestStop` from another thread ends the serve wait within
+  `IdleTickMs`, before the wait at once, `initWindows` clears a stale
+  request, local mode ignores it (still waiting past 1.3 s). `t_neel`: a new
+  suite with POSIX `SIGTERM` and `SIGINT` sent to the process during a full
+  serve run (`erQuit`, 1001 to the device, `onWindowClose` once, no sweep,
+  actions identical before and after), and Windows Ctrl-C, Ctrl-Break, and
+  console close through `onConsoleCtrl` (close returns only after `startApp`
+  shut down, within `ShutdownWaitMs`); the three refusals plus a new
+  taken-port refusal (fails inside the `try`) leave nothing installed and
+  the actions unchanged; local run 3 installs nothing (state and POSIX
+  actions checked during and after); the public-surface test checks none of
+  the signal procs is exported by `neel`.
+- Ad hoc on Windows (not in the repo): a real Ctrl-Break, sent with
+  `GenerateConsoleCtrlEvent` to a serve app started in its own process
+  group, ended it with `erQuit` and exit code 0 after 168 ms.
+- Found, not fixed (out of scope): on Windows two serve apps bind the same
+  fixed port, because `server.nim` sets `SO_REUSEADDR` (16.1). Needs a
+  decision.
+
+Manual checks. Test app (for example `/tmp/sig/app.nim` with a `web/` folder
+holding any `index.html`):
+
+```nim
+import std/os
+import neel
+proc logClose(w: Window) {.gcsafe.} =
+  writeFile(getAppDir() / "closed.txt", "onWindowClose ran\n")
+  if existsEnv("NEEL_HANG"): sleep(15_000)  # simulates a hung shutdown
+echo "returned ", startApp(webDir = "web", serve = true, port = 8080,
+                           onWindowClose = logClose)
+```
+
+- macOS and Linux: `nimble test` (the POSIX tests above run for the first
+  time).
+- macOS and Linux: run the app, open `http://127.0.0.1:8080`, press Ctrl-C
+  once. Expect `returned erQuit`, `closed.txt` written, exit code 0
+  (`echo $?`), and the page's `neel.onclose` reporting 1001 with no
+  reconnect attempts.
+- macOS and Linux: `kill -TERM <pid>` from another terminal. Same result.
+- macOS and Linux: with `NEEL_HANG=1`, press Ctrl-C, wait for `closed.txt`
+  to appear, press Ctrl-C again. Expect an immediate exit with code 130 and
+  no `returned` line. With `kill -TERM` twice instead, exit code 143.
+- Windows: `nimble test`.
+- Windows: run the app in a console, press Ctrl-C. Expect `returned erQuit`,
+  `closed.txt` written, `$LASTEXITCODE` 0. Then the same with Ctrl-Break.
+- Windows: start the app in its own console (`start app.exe`, or a
+  double-click), delete any old `closed.txt`, then close that console window
+  with its X button. Expect the process to be gone within about 2 s and
+  `closed.txt` written (the `returned` line may not appear: Windows ends the
+  process once the handler returns).
+- Local mode, any OS: Ctrl-C on a local-mode example still ends it the old
+  way (Nim prints `SIGINT: Interrupted by Ctrl-C.`; no Neel shutdown).
 
 ### 13.5 Step 5: keep-alive pings
 
@@ -882,6 +997,58 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   will run `nimble test` on all three OSes after every step from step 4 on
   (13.0). Steps 1–3 have not been run on Linux yet; the first Linux run
   covers them too.
+- 2026-10-15, step 4, all: how Nim's runtime handles `SIGINT` (Nim 2.2.12,
+  `lib/system/excpt.nim`). Unless built with `-d:noSignalHandler`, program
+  start calls C `signal(SIGINT, signalHandler)` (also for SEGV, ABRT, FPE,
+  ILL, BUS; `SIGPIPE` is ignored). That handler prints a stack trace and
+  `SIGINT: Interrupted by Ctrl-C.`, then on POSIX resets to `SIG_DFL` and
+  re-raises (the shell sees a SIGINT death), on Windows calls `quit(1)`.
+  `setControlCHook(hook)` is just `signal(SIGINT, hook)`; `unsetControlCHook`
+  puts `signalHandler` back. Nim installs nothing for `SIGTERM`. Consequences:
+  on POSIX, saving the whole `sigaction` at install and restoring it at
+  removal puts back Nim's handler or a user hook exactly (`t_signals` checks
+  both). On Windows the C runtime implements `signal(SIGINT)` with its own
+  console control handler, registered during Nim's startup; handlers run last
+  registered first and `TRUE` ends the chain, so Neel's pre-empts it and
+  removing Neel's restores it without touching it. Edge: a `setControlCHook`
+  call made during a serve run is overwritten on POSIX when the run ends.
+- 2026-10-15, step 4, all: `std/atomics` operations are generic Nim procs.
+  In debug builds their instances carry stack-trace frames (`nimfr_`), so
+  calling them pushes onto the thread-local `framePtr`. `{.push stackTrace:
+  off.}` at the call site does not remove them. On Windows the console
+  handler runs on a thread Nim did not create, where MinGW's emulated TLS
+  allocates on first access. The handler paths therefore use the GCC/Clang
+  `__atomic` builtins directly (in `window.nim`) and a kernel event (in
+  `signals.nim`). The generated C of `requestStop` is a single
+  `__atomic_exchange_n`; `onConsoleCtrl` calls only that and
+  `WaitForSingleObject`.
+- 2026-10-15, step 4, Windows: the session ran on Windows 11 again;
+  `nimble test` passed. The POSIX branch was checked with `nim check
+  --os:linux` / `--os:macosx` only. On a Windows host that works except for
+  `startApp(embedAssets = true)` in `t_neel`: the compile-time `parentDir`
+  uses the target's separator, so the Windows source path resolves to `.`.
+  Check a copy with that run switched to disk assets.
+- 2026-10-15, step 4, Windows: a real Ctrl-Break can be tested without a
+  console: start the app with `CreateProcessW(..., CREATE_NEW_PROCESS_GROUP)`
+  and call `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` (PowerShell
+  `Add-Type`; pass `[NullString]::Value`, not `$null`, for null strings).
+  The serve app returned `erQuit`, exit 0. Ctrl-C cannot be tested this way:
+  `CREATE_NEW_PROCESS_GROUP` disables Ctrl-C for that process, which also
+  matters for service wrappers (section 7).
+- 2026-10-15, step 4, Windows: two serve apps started on the same fixed port
+  both bind and print the startup line, because `openListener` sets
+  `SO_REUSEADDR`, which on Windows allows binding a port that is already
+  listening (Windows wants `SO_EXCLUSIVEADDRUSE`). This existed before step 4
+  but matters for serve mode, which always uses a fixed port. Not fixed; the
+  user should decide whether a later step changes `server.nim`. `t_neel`'s
+  `occupyPort` uses `SO_EXCLUSIVEADDRUSE` so its taken-port test is reliable.
+- 2026-10-15, step 4, Windows: console apps that load `user32.dll` or
+  `gdi32.dll` never receive `CTRL_LOGOFF_EVENT` / `CTRL_SHUTDOWN_EVENT`
+  (Microsoft `SetConsoleCtrlHandler` docs). A Neel serve binary imports only
+  `KERNEL32`, `msvcrt`, and `WS2_32`, and loads `Advapi32`, `Bcrypt`,
+  `kernel32`, and `Ws2_32` at runtime (checked with `objdump -p` and the
+  generated C), so it does receive them. Section 7 updated; for the step 7
+  guide.
 
 ### 16.2 Deviations from the spec
 
@@ -983,3 +1150,30 @@ Rules every step must respect. The first entries come from the existing code.
 - **Serve mode ignores the `testhooks` launcher.** `runApp` always passes
   `noLaunch`, so a test that installs `setTestLauncher` and sees no launch is
   checking that nothing is launched, which is intended.
+- **Signal tests wait for the handlers, not for window 1.** `runApp` installs
+  the stop handlers after `openVirtualWindow`, so `serveRun`'s "window 1
+  exists" does not mean they are in place. A `SIGTERM` sent in between hits
+  the default action and kills the test process. Wait for
+  `stopHandlersInstalled()` first, as `serveRunStoppedBy` does.
+- **Read test sockets only after a signal was handled.** A signal can land on
+  the test thread and interrupt `select`, which makes the tests' `recvSome`
+  fall through to a blocking `recv`. Send the signal, wait for the run to end,
+  then read the frames, which are already buffered.
+- **Code reachable from a signal handler stays frame-free.** No
+  `std/atomics` calls (they carry frames in debug builds), no exceptions, no
+  allocation; wrap it in `{.push stackTrace: off.}` and check the generated C.
+  This covers `window.requestStop` and everything in `signals.nim`'s
+  handlers.
+- **The stop request cannot wake the wait.** It is noticed only when
+  `waitForQuit` next wakes, so stop latency is `IdleTickMs` (1 s). Keep that
+  bound if the wait changes.
+- **Handlers stay installed during `shutdown`.** On POSIX a signal during a
+  hung shutdown is the "second signal" and exits at once; on Windows a
+  console close during shutdown waits for the report. The order in
+  `runApp`'s `finally` is `shutdown`, then `reportShutdownFinished`, then
+  `removeStopHandlers`, and the last two run even if `shutdown` raises.
+- **Windows tests call the console handler directly.**
+  `GenerateConsoleCtrlEvent` with group 0 reaches every process on the
+  console, including `nimble` and the shell. Tests call `onConsoleCtrl` on a
+  thread of their own instead, and anything that needs a real console event
+  goes in the manual checks.

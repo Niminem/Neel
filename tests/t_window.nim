@@ -174,6 +174,7 @@ type
     skQuit        ## sleep `delayMs`, then `quitApp()`
     skReconnect   ## sleep `delayMs`, bind + open `conn`, sleep `delayMs2`, close it
     skWaiter      ## `w.js.wait(2000).foo()` and record the exception kind
+    skStop        ## sleep `delayMs`, then `requestStop()` twice, as a signal handler would
 
   Script = object
     kind: ScriptKind
@@ -182,12 +183,17 @@ type
     conn: ConnId
     w: Window
     disconnected: bool
+    firstStop, secondStop: bool   # what each `requestStop()` returned
 
 proc runScript(s: ptr Script) {.thread.} =
   case s.kind
   of skQuit:
     sleep(s.delayMs)
     quitApp()
+  of skStop:
+    sleep(s.delayMs)
+    s.firstStop = requestStop()
+    s.secondStop = requestStop()
   of skReconnect:
     sleep(s.delayMs)
     connect(s.windowId, s.conn)
@@ -737,6 +743,71 @@ suite "window: serve mode":
     teardownWindows()
     check openedIds() == @[1]
     check closedIds() == @[1]
+
+  serveTest "requestStop from another thread ends the wait with erQuit within IdleTickMs":
+    connect(1, ConnA)
+    var s = Script(kind: skStop, delayMs: 100)
+    let t0 = getMonoTime()
+    var reason: ExitReason
+    withScript(s):
+      reason = waitForAppExit()
+    let took = elapsedMs(t0)
+    check reason == erQuit
+    check took >= 100 - 20
+    check took < 100 + 1000 + 500   # IdleTickMs, since nothing signals the wait
+    check not s.firstStop
+    check s.secondStop
+    # Nothing was retired or closed; teardown does that as for quitApp.
+    check w1.isOpen
+    check w1.isConnected
+    check closes().len == 0
+    check closedIds().len == 0
+
+  serveTest "a stop requested before the wait returns erQuit at once":
+    check not requestStop()
+    let t0 = getMonoTime()
+    check waitForAppExit() == erQuit
+    check elapsedMs(t0) < 200
+
+  test "initWindows clears a stop request left by an earlier run":
+    resetFake()
+    initWindows(fakeClose, fake.table, Base, fakeSearch, launcher = noLaunch,
+                serve = true)
+    try:
+      discard requestStop()
+      check waitForAppExit() == erQuit
+    finally:
+      teardownWindows()
+    # A request after teardown (a late signal) does not leak into the next run.
+    discard requestStop()
+    initWindows(fakeClose, fake.table, Base, fakeSearch, launcher = noLaunch,
+                serve = true)
+    try:
+      var s = Script(kind: skQuit, delayMs: 300)
+      let t0 = getMonoTime()
+      var reason: ExitReason
+      withScript(s):
+        reason = waitForAppExit()
+      check reason == erQuit
+      check elapsedMs(t0) >= 300 - 50
+      check not requestStop()
+    finally:
+      teardownWindows()
+
+  winTest "local mode: requestStop does not end the wait":
+    let w = openWindow()
+    connect(1, ConnA)
+    check not requestStop()
+    # Past IdleTickMs (1 s): the serve wait would have returned by now.
+    var s = Script(kind: skQuit, delayMs: 1300)
+    let t0 = getMonoTime()
+    var reason: ExitReason
+    withScript(s):
+      reason = waitForAppExit()
+    check reason == erQuit
+    check elapsedMs(t0) >= 1300 - 50
+    check w.isOpen
+    check closedIds().len == 0
 
   test "serve mode ignores gracePeriodMs and startupTimeoutMs":
     resetFake()
