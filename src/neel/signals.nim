@@ -12,7 +12,10 @@
 ##   `_exit(143)` (`SIGTERM`), so a hung shutdown can always be interrupted.
 ##   `removeStopHandlers` restores the exact previous `sigaction` of both,
 ##   which for `SIGINT` is normally Nim's own handler (installed at program
-##   start, replaced by `setControlCHook`).
+##   start, replaced by `setControlCHook`). On Linux, glibc adds
+##   `SA_RESTORER` to the flags of any action it installs, so a restored
+##   never-touched `SIGTERM` reads back with that bit set; the action itself
+##   is unchanged.
 ## - Windows: `SetConsoleCtrlHandler`. Handlers run on a thread the system
 ##   creates, last registered first; returning `TRUE` stops the chain, so
 ##   while ours is registered the C runtime's handler (which runs Nim's

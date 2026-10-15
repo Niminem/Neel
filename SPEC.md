@@ -1245,6 +1245,15 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   default fixture (500 ms close, 300 ms interval) the loop's next wake-up
   after the ping fell due was the close deadline itself, so a mutation that
   pinged closing connections passed unnoticed.
+- 2026-10-15, step 5, Linux: the first Linux `nimble test` failed one check
+  in `t_neel` ("a port that is taken..."): after the first serve run that
+  installed and removed the stop handlers, `SIGTERM` read back as
+  `{SIG_DFL, SA_RESTORER}` instead of `{SIG_DFL, 0}`. glibc's x86-64
+  `sigaction` always ORs `SA_RESTORER` into the flags it passes to the
+  kernel, and a never-touched `SIGTERM` starts with a true 0, so the restore
+  is correct but not bit-identical. Fixed in the test: `actionOf` masks
+  `SA_RESTORER` on Linux. Every other `t_neel` test passed on that run,
+  including the epoll path and both signal tests.
 
 ### 16.2 Deviations from the spec
 
@@ -1411,3 +1420,7 @@ Rules every step must respect. The first entries come from the existing code.
   a port that is already listening raises `OSError`, and a port is rebindable
   right after shutdown. A test that needs a taken port can use a plain
   listener (`t_neel`'s `occupyPort`).
+- **Compare signal actions without `SA_RESTORER`.** On Linux glibc sets it
+  on every action it installs, so a restored action can differ from the
+  original in that bit alone. `t_neel`'s `actionOf` masks it; any new check
+  of `sigaction` flags must do the same.

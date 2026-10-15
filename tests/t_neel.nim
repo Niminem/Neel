@@ -31,7 +31,13 @@ when defined(posix):
   proc actionOf(sig: cint): tuple[handler: pointer; flags: cint] =
     var old: Sigaction
     doAssert sigactionQuery(sig, nil, addr old) == 0
-    (cast[pointer](old.sa_handler), old.sa_flags)
+    var flags = old.sa_flags
+    when defined(linux):
+      # glibc adds SA_RESTORER to every action it installs, so a restored
+      # SIG_DFL reads back with it set; the bit is not part of the action.
+      const SaRestorer = cint(0x04000000)
+      flags = flags and not SaRestorer
+    (cast[pointer](old.sa_handler), flags)
 
   proc stopActions(): auto =
     ## The current `SIGINT` and `SIGTERM` actions.
