@@ -16,7 +16,8 @@
 ## keyword argument verbatim to `runApp`, the private proc that wires the
 ## server, protocol, window, and browser modules together and blocks the
 ## calling thread until the last window closes (plus the grace period),
-## `quitApp()` is called, or no window ever connects. All IO and all exposed
+## `quitApp()` is called, or no window ever connects (in serve mode, only
+## until `quitApp()`; no browser is launched). All IO and all exposed
 ## procs run on Neel's own threads: the IO thread owns the sockets, a pool of
 ## workers runs the hooks and the exposed procs, and `js.wait.*` may be used
 ## from any thread that knows a window.
@@ -32,7 +33,8 @@
 ##   of the page URL in `Referer`; 404 when it names a window that is not
 ##   open, or when it names none and more than one window is open.
 ## - `/neel/no-browser`: the page shown when no browser was found and
-##   `fallback = false`.
+##   `fallback = false`; 404 in serve mode.
+## - `/` in serve mode, when `startPath` names another page: a 302 to it.
 ## - everything else: the web directory through `neel/assets`.
 ##
 ## Tests replace the browser launch and the exit-time profile sweep through
@@ -70,7 +72,7 @@ export jsproxy except initJsBridge, resetJsBridge, SendProc, WindowResolver,
 export window.Window, ExitReason, WindowHook, openWindow, closeWindow,
        windows, window.window, requireWindow, currentWindow, isOpen,
        isConnected, quitApp, connectionCount, DefaultGracePeriodMs,
-       MinGracePeriodMs, DefaultStartupTimeoutMs
+       MinGracePeriodMs, DefaultStartupTimeoutMs, NeelServeModeError
 export Browser, NeelBrowserError, WindowSize, WindowPosition
 export NeelTimeoutError, NeelDisconnectedError, NeelRemoteError
 export DefaultWorkers, DefaultQueueCapacity, DefaultMaxMessageSize
@@ -98,6 +100,8 @@ type
     dispatch: DispatchProc
     exposed: seq[string]
     filter: RequestFilter
+    serve: bool
+    rootRedirect: string   # `Location` for `GET /`; "" serves `/` as usual
 
 var app: AppState
   ## Module global behind `startApp`; see `AppState`.
@@ -119,6 +123,39 @@ proc debugLog(msg: string) =
       stderr.writeLine(msg)
     except IOError:
       discard
+
+proc printLine(msg: string) =
+  ## Writes `msg` to stdout in every build. An app built without a console
+  ## (`--app:gui`) has no usable stdout, so a failed write is ignored.
+  try:
+    stdout.writeLine(msg)
+    stdout.flushFile()
+  except IOError:
+    discard
+
+proc checkServeParams(serve: bool; port: int; allowedOrigins: seq[string]) =
+  ## The parameter combinations serve mode forbids, checked before anything
+  ## is bound. The entries themselves are checked by `initRequestFilter`,
+  ## which accepts origins without `serve` and would ignore them silently.
+  if serve and port == 0:
+    raise newException(ValueError, "neel: serve mode needs a fixed port " &
+      "(port = 0 picks a random one, which a tunnel or proxy cannot reach)")
+  if not serve and allowedOrigins.len > 0:
+    raise newException(ValueError, "neel: allowedOrigins requires serve = true")
+
+proc rootRedirectFor(startPath: string): string =
+  ## Where serve mode sends `GET /`: `startPath` with a leading `/`, or `""`
+  ## when its path (before any `?` or `#`) is `/` itself, which a redirect
+  ## would send back to `/` forever.
+  var p = startPath
+  if p.len == 0 or p[0] != '/':
+    p = "/" & p
+  let pathEnd = p.find({'?', '#'})
+  if (if pathEnd < 0: p else: p[0 ..< pathEnd]) == "/": "" else: p
+
+proc serveStartupLine(port: int; origins: seq[string]): string =
+  "neel: serving http://" & LoopbackHost & ":" & $port & " (allowed origins: " &
+    (if origins.len == 0: "none" else: origins.join(", ")) & ")"
 
 proc newToken(): string =
   ## `TokenBytes` bytes from the OS random source as lowercase hex.
@@ -249,6 +286,10 @@ proc handleRequest(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
     return handleWs(a, conn, req)
   if req.httpMethod notin {hmGet, hmHead}:
     return respond(methodNotAllowed())
+  if req.path == "/" and a.rootRedirect.len > 0:
+    var r = initResponse(302)
+    r.addHeader("Location", a.rootRedirect)
+    return respond(r)
   case req.path
   of NeelJsPath:
     let (id, named) = neelJsWindowId(req)
@@ -265,6 +306,8 @@ proc handleRequest(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
     r.addHeader("Cache-Control", "no-store")
     respond(r)
   of NoBrowserPath:
+    if a.serve:
+      return respond(notFound())
     var r = okResponse(noBrowserPage(a.search, a.fallback), "text/html; charset=utf-8")
     r.addHeader("Cache-Control", "no-store")
     respond(r)
@@ -317,7 +360,8 @@ proc sweepAbandonedProfiles(sweep: ProfileSweep) =
     discard
 
 proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
-             startPath = "/"; port = 0; workers = DefaultWorkers;
+             startPath = "/"; port = 0; serve = false;
+             allowedOrigins: seq[string] = @[]; workers = DefaultWorkers;
              queueCapacity = DefaultQueueCapacity;
              callTimeoutMs = DefaultCallTimeoutMs;
              maxMessageSize = DefaultMaxMessageSize;
@@ -343,16 +387,27 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   ## then the `NeelBrowserError` propagates after teardown. A disk-mode web
   ## directory that does not exist raises `OSError` before anything starts
   ## (embedding already fails at compile time).
+  ##
+  ## Serve mode (`serve = true`) first rejects `port = 0` and a malformed
+  ## `allowedOrigins` entry (`ValueError`; `allowedOrigins` without `serve`
+  ## is rejected too), skips `findBrowser` and the test launcher, creates
+  ## window 1 with `openVirtualWindow` (nothing is launched), prints
+  ## `neel: serving http://127.0.0.1:<port> (allowed origins: ...)` to stdout,
+  ## waits for `quitApp()` only, and skips the profile sweep. The browser
+  ## parameters, `gracePeriodMs`, and `startupTimeoutMs` are ignored.
   doAssert not dispatch.isNil, "runApp: dispatch is nil"
   doAssert not app.running, "startApp is already running in this process"
+  checkServeParams(serve, port, allowedOrigins)
+  let filter = initRequestFilter(serve, allowedOrigins)
   if assets.mode == amDisk and not dirExists(assets.root):
     raise newException(OSError, "neel: web directory not found: " & assets.root)
-  let launcher = testLauncher()
+  let launcher = if serve: Launcher(noLaunch) else: testLauncher()
   let profileSweep = testProfileSweep()
-  let search = findBrowser(browsers, browserPath)
+  let search = if serve: BrowserSearch() else: findBrowser(browsers, browserPath)
   app = AppState(running: true, token: newToken(), search: search,
                  fallback: fallback, assets: assets, dispatch: dispatch,
-                 exposed: exposed, filter: initRequestFilter(serve = false))
+                 exposed: exposed, filter: filter, serve: serve,
+                 rootRedirect: if serve: rootRedirectFor(startPath) else: "")
   app.tbl = newPendingTable()
   app.srv = newServer(onRequest = handleRequest, onMessage = handleMessage,
                       onOpen = connectionOpened, onClose = connectionClosed,
@@ -365,21 +420,26 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
     initWindows(appClose, app.tbl, base, search, fallback,
                 LaunchOptions(size: size, position: position, extraFlags: extraFlags),
                 gracePeriodMs, startupTimeoutMs, launcher, onWindowOpen,
-                onWindowClose)
-    try:
-      discard openWindow(startPath)
-    except NeelBrowserError as e:
+                onWindowClose, serve)
+    if serve:
+      discard openVirtualWindow(startPath)
+      printLine(serveStartupLine(app.srv.port, filter.origins))
+    else:
       try:
-        stderr.writeLine("neel: " & e.msg)
-      except IOError:
-        discard
-      sleep(gracePeriodMs) # let the default browser fetch the error page
-      raise
+        discard openWindow(startPath)
+      except NeelBrowserError as e:
+        try:
+          stderr.writeLine("neel: " & e.msg)
+        except IOError:
+          discard
+        sleep(gracePeriodMs) # let the default browser fetch the error page
+        raise
     result = waitForAppExit()
   finally:
     app.srv.shutdown(beforeJoin = releaseSharedState)
     app = AppState()
-    sweepAbandonedProfiles(profileSweep)
+    if not serve:
+      sweepAbandonedProfiles(profileSweep)
 
 proc stampCallSite(n, site: NimNode) =
   ## Gives every node the macro created (recognisable by carrying this
@@ -415,6 +475,14 @@ macro startApp*(args: varargs[untyped]): untyped =
   ##   `gracePeriodMs = DefaultGracePeriodMs` (exit this long after the last
   ##   window closes; at least `MinGracePeriodMs`),
   ##   `startupTimeoutMs = DefaultStartupTimeoutMs`.
+  ## - `serve = false`: serve mode. No browser is launched and the app runs
+  ##   until `quitApp()`, with one window shared by whichever device
+  ##   connected last. Needs a fixed `port`; ignores the browser parameters,
+  ##   `gracePeriodMs`, and `startupTimeoutMs`.
+  ## - `allowedOrigins: seq[string] = @[]`: serve mode only. Extra origins
+  ##   (`https://host[:port]` or `http://host[:port]`) the app may be loaded
+  ##   from, e.g. through a tunnel or reverse proxy. Raises `ValueError` for
+  ##   a malformed entry.
   ## - `browsers = @[Chrome, Chromium, Edge]`, `fallback = true`, `browserPath = ""`,
   ##   `size = none(WindowSize)`, `position = none(WindowPosition)`,
   ##   `extraFlags: seq[string] = @[]`.

@@ -140,7 +140,7 @@ keeps the change additive, since adding an enum member breaks exhaustive
 | Accepted `Host` | `127.0.0.1:<port>` | that, or the host of an allowed origin |
 | Accepted `/ws` `Origin` | `http://127.0.0.1:<port>` | that, or an allowed origin |
 | Cross-site requests | refused | refused, except top-level document navigations |
-| `GET /` with `startPath != "/"` | serves `index.html` | 302 to `startPath` |
+| `GET /` (and `HEAD /`) when `startPath`'s path is not `/` | serves `index.html` | 302 to `startPath` |
 | `/neel/no-browser` | the no-browser page | 404 |
 | WebSocket pings | none | every 30 s on idle connections |
 | Startup line on stdout | none | always (section 6) |
@@ -211,10 +211,15 @@ proc noLaunch(url, userDataDir: string; opts: LaunchOptions): BrowserHandle
 ```
 
 `runApp` creates window 1 through a private entry point that shares
-`openWindow`'s code, so the record goes through the normal path. A `nil`
-handle is already the "not launched" state: `finishHandle(nil)` is a no-op
-(`window.nim` 180). The public `openWindow` and `closeWindow` check `m.serve`
-first and raise `NeelServeModeError`.
+`openWindow`'s code (`openVirtualWindow`, exported by `window.nim` but not
+re-exported by `neel`), so the record goes through the normal path. A `nil`
+handle is already the "not launched" state: `finishHandle(nil)` is a no-op.
+In serve mode the shared code names and clears no profile directory (the
+record's `userDataDir` is empty; `clearStaleUserDataDir` is not called).
+The public `openWindow` and `closeWindow` check `m.serve` first and raise
+`NeelServeModeError` (before an id is allocated; `closeWindow` raises for
+any id). `initWindows(serve = true)` skips the `gracePeriodMs` /
+`startupTimeoutMs` assertions, since serve mode ignores both.
 
 ### 5.2 `waitForAppExit` in serve mode
 
@@ -268,8 +273,19 @@ In serve mode, `runApp`:
 9. removes the signal handlers;
 10. skips the profile sweep (serve mode never creates profiles).
 
-Routing changes in serve mode: `GET /` returns `302 Location: <startPath>`
-when `startPath != "/"`; `/neel/no-browser` is a 404.
+Routing changes in serve mode: `GET /` (and `HEAD /`) returns
+`302 Location: <startPath>` when the path part of `startPath` (before any
+`?` or `#`, with a leading `/` added as `launchUrl` does) is not `/`;
+`Location` is that normalized `startPath`, query and fragment included. A
+`startPath` such as `/?tab=2` or `/#x` is not redirected to, since the
+browser would land on `/` again and loop; `/` then serves `index.html`.
+`/neel/no-browser` is a 404.
+
+The parameter checks (item 1 of the list above) run first in `runApp`, before the web
+directory check and before `AppState` is written, so a refused start leaves
+nothing behind and a later `startApp` works. The `testhooks` launcher is
+ignored in serve mode (`noLaunch` is always used); the `testhooks` sweep is
+never called.
 
 ---
 
@@ -525,13 +541,21 @@ Manual checks (deferred to the final pass, 13.0):
 
 ### 13.2 Step 2: serve core
 
-- **Status:** not started
+- **Status:** done (2026-10-15; `nimble test` and `nim c src/neel.nim` green
+  on **Windows 11** (win32 10.0.26200) with Nim 2.2.12. `nim` on PATH is
+  `~/.nimble/bin/nim.exe`; Nimble compiled with
+  `~/.nimble/pkgs2/nim-2.2.12-1ce02ec.../bin/nim.exe`, also 2.2.12. Not yet
+  run on macOS or Linux, see the Cross-OS line.)
 - **Depends on:** step 1
 - **Touches:** `window.nim`, `neel.nim`
 - **Spec:** sections 3, 5, 6 (except signals, pings, and the shim)
-- **Cross-OS:** safe to defer. No platform branches. It changes the window
-  lifecycle (state shared between threads), so the step-5 checkpoint's
-  `nimble test` on Windows doubles as its check.
+- **Cross-OS:** safe to defer (confirmed). No platform branches and no OS
+  APIs. The only new state shared between threads is `WindowManager.serve`,
+  written once in `initWindows` before any worker runs; the serve wait reuses
+  the existing lock, condition variable, and `quitRequested`. This session
+  ran on Windows, so the step's tests have not run on macOS or Linux yet; the
+  next macOS session's `nimble test` and the step-5 checkpoint (Linux) cover
+  it.
 
 Scope: `serve` and `allowedOrigins` parameters and their validation; skip
 `findBrowser`; the no-op launcher and window 1; `waitForAppExit` serve
@@ -550,6 +574,55 @@ Tests (`t_window`, `t_neel`):
 - `port = 0`, and `allowedOrigins` without `serve`, raise `ValueError`.
 
 **Notes:**
+- Serve-mode `GET /` redirects only when the path part of `startPath` is not
+  `/` (agreed with the user; the literal rule loops for `/?tab=2` or `/#x`).
+  `HEAD /` follows `GET /`. Sections 3.5 and 6 updated (16.2).
+- Serve mode names and clears no profile directory for window 1 (agreed
+  with the user). `initWindows(serve = true)` skips the grace-period and
+  startup-timeout assertions, since serve mode ignores both. Section 5.1
+  updated (16.2).
+- Built: `NeelServeModeError` (re-exported), `noLaunch`,
+  `openVirtualWindow` (not re-exported), `initWindows(serve)`, and the serve
+  branch of `waitForAppExit` (`waitForQuit`) in `window.nim`. `runApp`
+  gained `serve` and `allowedOrigins`, plus `checkServeParams`, the `/`
+  redirect, the `/neel/no-browser` 404, the startup line (`printLine`, stdout,
+  flushed, `IOError` ignored), and skips `findBrowser`, the test launcher,
+  and the sweep in serve mode. The doc comments for `startApp`, `runApp`,
+  and both module headers now describe serve mode; the full documentation
+  pass is still step 7.
+- Tests: `t_window` gains the "window: serve mode" suite. It covers window 1
+  with no launch and no profile dir (a stale `neel-<pid>-1` survives), outliving
+  `startupTimeoutMs` and `gracePeriodMs`, `quitApp`, `NeelServeModeError`
+  from both procs, `onWindowOpen` once across a displacement and a reconnect,
+  `onWindowClose` once at teardown, the ignored timeouts, and a local-mode
+  counterpart. `t_neel` gains a local run with `startPath = "/sub/page.html"`
+  (`/` still 200, no-browser page 200, open/close/quit, sweep runs) and the
+  "neel: serve mode" suite: the three `ValueError` refusals, each with nothing
+  launched, swept, or bound; a full serve run (no launch even with a
+  nonexistent `browserPath`, the redirect, 404, public `Host`, cross-site
+  login navigation, refused iframe, three devices on window 1, structured
+  `NeelServeModeError`, survival past both timeouts, `quitApp`, no sweep);
+  and the redirect loop guard. The public-surface test checks
+  `NeelServeModeError` is exported and `noLaunch` / `openVirtualWindow` are
+  not.
+- The startup line is printed into the `nimble test` output (one line per
+  serve run in `t_neel`). Its format is not asserted automatically: stdout
+  cannot be captured portably in-process. Checked by eye in this session
+  (normalized origins, comma-separated).
+
+Manual checks (deferred to the final pass, 13.0):
+- `nimble test` on macOS and Linux (this session ran on Windows only).
+- A small serve app (`startApp(serve = true, port = 8080)`, optionally with
+  `startPath = "/other.html"` and an `allowedOrigins` entry): no browser
+  opens; the startup line appears on stdout; `http://127.0.0.1:8080/`
+  redirects to `startPath` and the page works; closing the tab and waiting
+  longer than the grace period (and the startup timeout, without opening
+  it) does not end the app; `/neel/no-browser` is a 404; a second tab takes
+  over the first (close code 1000 until step 3); `quitApp()` from the page
+  ends it. Until step 4, Ctrl-C ends the process without Neel's shutdown.
+- Windows: the same app built with `--app:gui` starts and serves (the
+  startup-line write must not fail).
+- Local mode: the three examples behave as before.
 
 ### 13.3 Step 3: displaced close code
 
@@ -721,6 +794,16 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   `OSError: Operation not permitted` from `startApp` and Nim cannot write
   `~/.cache/nim`; both are the sandbox, not Neel. Run `nimble test` without
   the sandbox (or with `--nimcache` under `/tmp` for single files).
+- 2026-10-15, step 2, Windows: the session ran on Windows 11, not the Mac;
+  `nimble test` passed there (the first Windows run of steps 1 and 2). The
+  rule that sessions run on macOS was not met for this step, so macOS still
+  owes a `nimble test` run. On Windows, use `$env:TEMP` instead of `/tmp`
+  for ad-hoc `--nimcache` and `-o:` paths. `nim c src/neel.nim` writes
+  `src/neel.exe` (ignored by git; deleted after the check).
+- 2026-10-15, step 2, Windows: a TCP connect to a closed loopback port takes
+  about 2 s to fail on Windows (SYN retries), not instantly as on POSIX.
+  Test probes for "nothing is listening" (`t_neel` `canConnect`) need a
+  short connect timeout, or they stall the suite.
 
 ### 16.2 Deviations from the spec
 
@@ -735,6 +818,16 @@ Format: `YYYY-MM-DD, step N: what changed and why; spec sections updated`.
 - 2026-10-14, step 1: section 3.2 made precise (agreed with the user): host
   characters, port range 1–65535 and integer re-serialization, no trimming,
   non-ASCII rejected, duplicates kept once. Section 3.2 updated.
+- 2026-10-15, step 2: serve-mode `GET /` redirects only when the path part
+  of `startPath` is not `/`. The literal rule (`startPath != "/"`) sends
+  `/?tab=2` or `/#x` into an endless redirect. `HEAD /` behaves like
+  `GET /`. Agreed with the user. Sections 3.5 and 6 updated.
+- 2026-10-15, step 2: in serve mode, window 1's record has an empty
+  `userDataDir` and `clearStaleUserDataDir` is not called, so serve mode never
+  touches profile directories. `initWindows(serve = true)` skips the
+  grace-period and startup-timeout assertions, because "accepted and
+  ignored" (3.3) must not fail on values local mode rejects. The profile
+  part was agreed with the user. Section 5.1 updated.
 
 ### 16.3 Gotchas
 
@@ -776,3 +869,19 @@ Rules every step must respect. The first entries come from the existing code.
   of the pre-serve rules (`legacyRefusal`) and compares every local filter
   against it over a header grid. If a later step changes local filtering on
   purpose, change the oracle in the same step and say so in 16.2.
+- **Serve-mode tests wait for window 1, not for the port.** `listen` runs
+  before `openVirtualWindow`, so a request in between finds no window
+  (`/neel.js` 404, `/ws` 403). `t_neel`'s `serveRun` waits for
+  `windows().len == 1`; do the same in new serve-mode integration tests.
+- **The serve wait is `waitForQuit` in `window.nim`.** It loops on
+  `quitRequested` with `waitTimeout(..., IdleTickMs)`. A stop flag set by a
+  signal handler (it cannot signal the condition variable) must be checked
+  in that loop condition. It still returns `erQuit`.
+- **Displacement close-code assertions live in three places.** `t_window`
+  ("a reconnect re-associates..." and the "window: serve mode" hooks test),
+  the `t_window` integration test, and `t_neel`'s serve run (device B
+  displacing A) all expect `CloseNormal` today. Changing the code to
+  `CloseDisplaced` means updating all of them in the same change.
+- **Serve mode ignores the `testhooks` launcher.** `runApp` always passes
+  `noLaunch`, so a test that installs `setTestLauncher` and sees no launch is
+  checking that nothing is launched, which is intended.

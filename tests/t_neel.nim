@@ -67,6 +67,8 @@ type
     sweepDirsLeft: int      # launched profile dirs still on disk when it ran
     sweepExited: int        # `workersExited` when it ran
     sweepAfterReturn: bool  # `startApp` had already returned when it ran
+    windowOpens: int        # `countOpen` calls
+    windowCloses: int       # `countClose` calls
 
 var shared: Shared
 initLock shared.lock
@@ -100,6 +102,18 @@ proc recordWindowClose(w: Window) {.gcsafe.} =
   {.cast(gcsafe).}:
     acquire shared.lock
     shared.exitedAtWindowClose = shared.workersExited
+    release shared.lock
+
+proc countOpen(w: Window) {.gcsafe.} =
+  {.cast(gcsafe).}:
+    acquire shared.lock
+    inc shared.windowOpens
+    release shared.lock
+
+proc countClose(w: Window) {.gcsafe.} =
+  {.cast(gcsafe).}:
+    acquire shared.lock
+    inc shared.windowCloses
     release shared.lock
 
 proc recordSweep() {.gcsafe.} =
@@ -155,12 +169,51 @@ proc appThread(run: int) {.thread.} =
                               workers = 4, queueCapacity = 32,
                               onWindowClose = recordWindowClose)
         finish(reason)
-      else:
+      of 2:
         let reason = startApp("fixtures/web", embedAssets = true,
                               browsers = @[], gracePeriodMs = Grace,
                               startupTimeoutMs = 2000, callTimeoutMs = 2000,
                               workers = 4, queueCapacity = 32)
         finish(reason)
+      else:
+        let reason = startApp(webDir = "fixtures/web", embedAssets = false,
+                              serve = false, startPath = "/sub/page.html",
+                              browsers = @[], gracePeriodMs = Grace,
+                              startupTimeoutMs = 2000, callTimeoutMs = 2000,
+                              workers = 4, queueCapacity = 32,
+                              onWindowOpen = countOpen, onWindowClose = countClose)
+        finish(reason)
+    except CatchableError as e:
+      finish(erStartupTimeout, "startApp raised " & $e.name & ": " & e.msg)
+    finally:
+      setTestLauncher(nil)
+      setTestProfileSweep(nil)
+
+const
+  ServeOrigins = @["https://MyApp.Example.com:443", "http://tunnel.example:8080"]
+    ## `allowedOrigins` of the serve-mode run (normalized by Neel).
+  ServeStartupTimeout = 300
+    ## Passed to the serve-mode run, which must ignore it.
+
+proc serveThread(args: (int, string)) {.thread.} =
+  ## `startApp` in serve mode on port `args[0]` with `startPath = args[1]`.
+  ## The fake launcher and the recording sweep are
+  ## installed so the test can check that neither runs; the nonexistent
+  ## `browserPath` would raise `NeelBrowserError` if `findBrowser` ran.
+  {.cast(gcsafe).}:
+    setTestLauncher(fakeLaunch)
+    setTestProfileSweep(recordSweep)
+    try:
+      let reason = startApp(webDir = "fixtures/web", embedAssets = false,
+                            serve = true, port = args[0],
+                            allowedOrigins = ServeOrigins,
+                            startPath = args[1],
+                            browsers = @[Chrome], browserPath = "/no/such/browser",
+                            gracePeriodMs = Grace,
+                            startupTimeoutMs = ServeStartupTimeout,
+                            callTimeoutMs = 2000, workers = 4, queueCapacity = 32,
+                            onWindowOpen = countOpen, onWindowClose = countClose)
+      finish(reason)
     except CatchableError as e:
       finish(erStartupTimeout, "startApp raised " & $e.name & ": " & e.msg)
     finally:
@@ -182,6 +235,8 @@ proc resetShared() =
   shared.sweepDirsLeft = -1
   shared.sweepExited = -1
   shared.sweepAfterReturn = false
+  shared.windowOpens = 0
+  shared.windowCloses = 0
   release shared.lock
 
 proc sharedPort(): int =
@@ -225,6 +280,24 @@ proc recvSome(sock: Socket; maxLen = 65536): string =
   if n < 0:
     raiseOSError(osLastError())
   result.setLen(n)
+
+proc freePort(): int =
+  ## A port that was free a moment ago: bind an ephemeral one, read it,
+  ## release it. Serve mode refuses `port = 0`.
+  let s = newSocket()
+  defer: s.close()
+  s.bindAddr(Port(0), "127.0.0.1")
+  int(s.getLocalAddr()[1])
+
+proc canConnect(port: int): bool =
+  ## Whether something accepts TCP connections on `127.0.0.1:port`.
+  let s = newSocket(buffered = false)
+  defer: s.close()
+  try:
+    s.connect("127.0.0.1", Port(port), timeout = 500)
+    true
+  except OSError, TimeoutError:
+    false
 
 proc header(r: HttpReply; name: string): string =
   for (k, v) in r.headers:
@@ -347,6 +420,89 @@ template appRun(run: int; body: untyped) =
   let failure = shared.failure
   release shared.lock
   check failure == ""
+
+template serveRun(port: int; startPath: string; body: untyped) =
+  ## `appRun` for serve mode: nothing is launched, so the test waits for
+  ## window 1 to exist instead of a launch URL.
+  resetShared()
+  var th: Thread[(int, string)]
+  createThread(th, serveThread, (port, startPath))
+  try:
+    check waitUntil(IoTimeout, proc(): bool = isDone() or windows().len == 1)
+    acquire shared.lock
+    let early = shared.failure
+    release shared.lock
+    doAssert not isDone(), "serve-mode startApp ended early: " & early
+    body
+  finally:
+    if not waitUntil(IoTimeout, isDone):
+      quitApp()
+    joinThread(th)
+  acquire shared.lock
+  let failure = shared.failure
+  release shared.lock
+  check failure == ""
+
+type
+  Attempt = object
+    ## A `startApp` call that is expected to raise before starting.
+    serve: bool
+    port: int
+    origins: seq[string]
+    error: string   # "<exception name>: <message>", or "" if it returned
+
+proc attemptThread(a: ptr Attempt) {.thread.} =
+  {.cast(gcsafe).}:
+    setTestLauncher(fakeLaunch)
+    setTestProfileSweep(recordSweep)
+    try:
+      startApp(webDir = "fixtures/web", embedAssets = false, serve = a.serve,
+               port = a.port, allowedOrigins = a.origins, browsers = @[],
+               gracePeriodMs = Grace, startupTimeoutMs = 300)
+    except CatchableError as e:
+      a.error = $e.name & ": " & e.msg
+    finally:
+      setTestLauncher(nil)
+      setTestProfileSweep(nil)
+      finish(erQuit)
+
+proc attemptStart(serve: bool; port: int; origins: seq[string]): string =
+  ## Runs `startApp` on a thread (so a missing refusal cannot hang the
+  ## suite) and returns what it raised.
+  resetShared()
+  var a = Attempt(serve: serve, port: port, origins: origins)
+  var th: Thread[ptr Attempt]
+  createThread(th, attemptThread, addr a)
+  if not waitUntil(IoTimeout, isDone):
+    quitApp()
+  joinThread(th)
+  a.error
+
+proc nothingStarted(): bool =
+  ## No launch, no sweep, no hook since the last `resetShared`.
+  acquire shared.lock
+  result = shared.launches.len == 0 and shared.sweeps == 0 and
+           shared.windowOpens == 0 and shared.windowCloses == 0
+  release shared.lock
+
+proc readUntilClose(c: var WsClient; maxFrames = 3): int =
+  ## The close code of the first close frame among the next `maxFrames`
+  ## frames, or -1.
+  for _ in 1 .. maxFrames:
+    let f = c.readFrame()
+    if f.opcode == opClose:
+      return decodeClose(f).code
+  -1
+
+proc opens(): int =
+  acquire shared.lock
+  result = shared.windowOpens
+  release shared.lock
+
+proc closes(): int =
+  acquire shared.lock
+  result = shared.windowCloses
+  release shared.lock
 
 # --- tests -----------------------------------------------------------------------
 
@@ -617,6 +773,45 @@ suite "neel: startApp end to end":
     check dirs.len == 1
     check not dirExists(dirs[0])
 
+  test "local mode: a non-root startPath leaves / alone; windows open, close, and quit as before":
+    appRun(3):
+      let base = "http://127.0.0.1:" & $port
+      acquire shared.lock
+      check shared.launches == @[base & "/sub/page.html?window=1"]
+      release shared.lock
+      # `/` serves index.html as always; only serve mode redirects it.
+      let index = http(port, "/")
+      check index.status == 200
+      check index.header("Location") == ""
+      check index.body == readFile(FixtureDir / "index.html")
+      check http(port, NoBrowserPath).status == 200
+      let shim = http(port, NeelJsPath,
+                      headers = @[("Referer", base & "/sub/page.html?window=1")])
+      check shim.status == 200
+      let token = tokenIn(shim.body)
+      var (c, status) = handshake(port, token, 1)
+      check status.startsWith("HTTP/1.1 101")
+      check waitUntil(IoTimeout, proc(): bool = opens() == 1)
+      c.sendMsg(callMsg("openSecond", @[], id = 1))
+      check c.readMsg() == retMsg(1, %2)
+      c.sendMsg(callMsg("closeSecond", @[%2], id = 2))
+      check c.readMsg() == retMsg(2, newJNull())
+      check closes() == 1
+      c.sendMsg(callMsg("stop", @[], id = 3))
+      check c.readUntilClose() == CloseGoingAway
+      c.sock.close()
+      check waitUntil(IoTimeout, isDone)
+    check shared.reason == erQuit
+    acquire shared.lock
+    let sweeps = shared.sweeps
+    let dirs = shared.userDataDirs
+    release shared.lock
+    check sweeps == 1
+    check closes() == 2
+    check dirs.len == 2
+    check not dirExists(dirs[0])
+    check not dirExists(dirs[1])
+
   test "a missing web directory fails before anything starts":
     resetShared()
     setTestLauncher(fakeLaunch)
@@ -668,6 +863,7 @@ suite "neel: startApp end to end":
     check NeelDisconnectedError is CatchableError
     check NeelRemoteError is CatchableError
     check NeelBrowserError is CatchableError
+    check NeelServeModeError is CatchableError
     # Internal wiring stays internal. (`NeelProtocolError`, `NeelFrameError`,
     # `LaunchOptions`, `NeelJsPath`, and the test hooks are reachable here
     # only through this file's `neel/*` imports.)
@@ -682,6 +878,8 @@ suite "neel: startApp end to end":
     check not compiles(connectionOpened(1))
     check not compiles(resetJsBridge())
     check not compiles(waitForAppExit())
+    check not declared(noLaunch)
+    check not compiles(openVirtualWindow("/"))
 
   test "js.<name> reaches the page unless a Nim proc accepts the proxy":
     # What docs/GUIDE.md "Calling the page from Nim" promises, checked with the
@@ -696,3 +894,160 @@ suite "neel: startApp end to end":
     # The documented collisions: Nim's own procs win.
     check typeof(js.wait.echo()) is void
     check typeof(js.wait.repr()) is string
+
+suite "neel: serve mode":
+  test "serve mode refuses port = 0 before anything starts":
+    let err = attemptStart(serve = true, port = 0, origins = @[])
+    check err.startsWith("ValueError: ")
+    check "port" in err
+    check nothingStarted()
+
+  test "allowedOrigins without serve is refused before anything starts":
+    for port in [0, freePort()]:
+      let err = attemptStart(serve = false, port = port,
+                             origins = @["https://myapp.example.com"])
+      check err == "ValueError: neel: allowedOrigins requires serve = true"
+      check nothingStarted()
+
+  test "a malformed allowedOrigins entry is refused before the port is bound":
+    let port = freePort()
+    let err = attemptStart(serve = true, port = port,
+                           origins = @["https://myapp.example.com",
+                                       "https://myapp.example.com/"])
+    check err.startsWith("ValueError: neel: allowedOrigins entry ")
+    check "path" in err
+    check nothingStarted()
+    check not canConnect(port)
+
+  test "no browser, / redirects, public origins, one window for every device, only quitApp ends it":
+    let port = freePort()
+    serveRun(port, "/sub/page.html"):
+      # Nothing was launched or probed (the browserPath does not exist).
+      acquire shared.lock
+      check shared.launches.len == 0
+      check shared.userDataDirs.len == 0
+      release shared.lock
+      check windows().len == 1
+      check windows()[0].id == 1
+
+      # Routing.
+      let root = http(port, "/")
+      check root.status == 302
+      check root.header("Location") == "/sub/page.html"
+      check root.body == ""
+      check http(port, "/", "HEAD").status == 302
+      check http(port, "/?window=1").header("Location") == "/sub/page.html"
+      let page = http(port, "/sub/page.html")
+      check page.status == 200
+      check page.body == readFile(FixtureDir / "sub" / "page.html")
+      check http(port, "/index.html").body == readFile(FixtureDir / "index.html")
+      check http(port, "/", "POST").status == 405
+      let noBrowser = http(port, NoBrowserPath)
+      check noBrowser.status == 404
+      check "fallback" notin noBrowser.body
+
+      # The shim: a page loaded through a proxy names no window.
+      let shim = http(port, NeelJsPath, host = "myapp.example.com",
+                      headers = @[("Referer", "https://myapp.example.com/sub/page.html")])
+      check shim.status == 200
+      check "const WINDOW_ID = 1;" in shim.body
+      let token = tokenIn(shim.body)
+
+      # Request filtering with the configured (normalized) origins.
+      let login = http(port, "/sub/page.html", host = "myapp.example.com",
+                       headers = @[("Sec-Fetch-Site", "cross-site"),
+                                   ("Sec-Fetch-Mode", "navigate"),
+                                   ("Sec-Fetch-Dest", "document")])
+      check login.status == 200
+      check http(port, "/", host = "tunnel.example:8080").status == 302
+      let foreign = http(port, "/", host = "attacker.example")
+      check foreign.status == 403
+      check foreign.body == "neel: refused: the Host header must be 127.0.0.1:" &
+        $port & " or the host of an allowed origin"
+      let framed = http(port, "/sub/page.html", headers = @[
+        ("Sec-Fetch-Site", "cross-site"), ("Sec-Fetch-Mode", "navigate"),
+        ("Sec-Fetch-Dest", "iframe")])
+      check framed.status == 403
+
+      # Well past startupTimeoutMs without a connection: still running.
+      sleep(ServeStartupTimeout + 400)
+      check not isDone()
+      check windows().len == 1
+      check opens() == 0
+
+      # Device A, through the proxy.
+      var (a, stA) = handshake(port, token, 1, host = "myapp.example.com",
+                               origin = "https://myapp.example.com")
+      check stA.startsWith("HTTP/1.1 101")
+      a.sendMsg(callMsg("add", @[%2, %3], id = 1))
+      check a.readMsg() == retMsg(1, %5)
+      a.sendMsg(callMsg("whichWindow", @[], id = 2))
+      check a.readMsg() == retMsg(2, %1)
+      check opens() == 1
+      # The window API that serve mode does not support answers structurally.
+      a.sendMsg(callMsg("openSecond", @[], id = 3))
+      let opened = a.readMsg()
+      check opened.kind == msgErr
+      check opened.id == 3
+      check opened.error.kind == "NeelServeModeError"
+      a.sendMsg(callMsg("closeSecond", @[%1], id = 4))
+      let closed = a.readMsg()
+      check closed.kind == msgErr
+      check closed.error.kind == "NeelServeModeError"
+      check windows().len == 1
+
+      # Device B, on the machine itself, displaces A.
+      var (b, stB) = handshake(port, token, 1)
+      check stB.startsWith("HTTP/1.1 101")
+      check a.readUntilClose() == CloseNormal
+      a.sock.close()
+      b.sendMsg(callMsg("whichWindow", @[], id = 1))
+      check b.readMsg() == retMsg(1, %1)
+      check opens() == 1
+
+      # B goes away; well past gracePeriodMs the app is still up.
+      b.sock.close()
+      check waitUntil(IoTimeout, proc(): bool = connectionCount() == 0)
+      sleep(Grace + 400)
+      check not isDone()
+      check windows().len == 1
+      check closes() == 0
+
+      # Device C, behind a proxy that rewrites Host, reconnects to window 1.
+      var (c, stC) = handshake(port, token, 1, origin = "http://tunnel.example:8080")
+      check stC.startsWith("HTTP/1.1 101")
+      c.sendMsg(callMsg("whichWindow", @[], id = 1))
+      check c.readMsg() == retMsg(1, %1)
+      check opens() == 1
+
+      # quitApp ends the run.
+      c.sendMsg(callMsg("stop", @[], id = 2))
+      check c.readUntilClose() == CloseGoingAway
+      c.sock.close()
+      check waitUntil(IoTimeout, isDone)
+    check shared.reason == erQuit
+    check opens() == 1
+    check closes() == 1
+    acquire shared.lock
+    check shared.sweeps == 0
+    check shared.launches.len == 0
+    release shared.lock
+
+  test "a startPath whose path is / (query or fragment only) is not redirected to":
+    # Redirecting `/` to `/?tab=2` or `/#x` would land on `/` again forever.
+    for startPath in ["/?tab=2", "/#settings", "", "/"]:
+      let port = freePort()
+      serveRun(port, startPath):
+        let root = http(port, "/")
+        check root.status == 200
+        check root.header("Location") == ""
+        check root.body == readFile(FixtureDir / "index.html")
+        quitApp()
+        check waitUntil(IoTimeout, isDone)
+      check shared.reason == erQuit
+    # A startPath without a leading slash is redirected to its absolute form.
+    let port = freePort()
+    serveRun(port, "sub/page.html"):
+      check http(port, "/").header("Location") == "/sub/page.html"
+      quitApp()
+      check waitUntil(IoTimeout, isDone)

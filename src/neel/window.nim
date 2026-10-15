@@ -44,6 +44,13 @@
 ## been gone for a grace period (the browser window was closed by the user),
 ## so `windows()` stays truthful in multi-window apps. Every wait is bounded.
 ##
+## Serve mode (`initWindows(serve = true)`): `startApp` creates window 1 with
+## `openVirtualWindow` through a launcher that launches nothing (`noLaunch`),
+## and that window is never retired: `waitForAppExit` returns only `erQuit`,
+## `onWindowOpen` fires on the first connection ever, `onWindowClose` only in
+## `teardownWindows`. `openWindow` and `closeWindow` raise
+## `NeelServeModeError`. No profile directory is created or cleared.
+##
 ## Threading: everything callable from hooks or exposed procs is
 ## `{.gcsafe.}`. One `Lock` guards the table, every record's mutable fields,
 ## and the lifecycle state; `initWindows` / `teardownWindows` run on the main
@@ -96,6 +103,11 @@ type
     erStartupTimeout
       ## No window ever connected within `startupTimeoutMs`.
 
+  NeelServeModeError* = object of CatchableError
+    ## Raised by `openWindow` and `closeWindow` in serve mode, where the app
+    ## has exactly one window for its whole run. Raised in an exposed proc,
+    ## it reaches the page as a structured error.
+
   CloseProc* = proc(conn: ConnId; code: int): bool {.gcsafe.}
     ## Starts closing a WebSocket connection with a close code
     ## (`Server.close` in production).
@@ -133,6 +145,7 @@ type
     lock: Lock
     cond: Cond                 # signalled on every lifecycle-relevant change
     # Immutable after `initWindows`:
+    serve: bool
     closeConn: CloseProc
     pending: PendingTable
     baseUrl: string
@@ -210,6 +223,12 @@ proc realLauncher(url, userDataDir: string; opts: LaunchOptions): BrowserHandle
   launchWithFallback(m.search, url, noBrowserPageUrl(m.baseUrl, m.search),
                      m.fallback, userDataDir, opts)
 
+proc noLaunch*(url, userDataDir: string; opts: LaunchOptions): BrowserHandle
+    {.gcsafe.} =
+  ## The serve-mode launcher: opens nothing. The `nil` handle is the
+  ## "not launched" state every teardown path already accepts.
+  nil
+
 proc initWindows*(closeConn: CloseProc; pending: PendingTable; baseUrl: string;
                   search: BrowserSearch; fallback = true;
                   defaultOpts = LaunchOptions();
@@ -217,7 +236,8 @@ proc initWindows*(closeConn: CloseProc; pending: PendingTable; baseUrl: string;
                   startupTimeoutMs = DefaultStartupTimeoutMs;
                   launcher: Launcher = nil;
                   onWindowOpen: WindowHook = nil;
-                  onWindowClose: WindowHook = nil) =
+                  onWindowClose: WindowHook = nil;
+                  serve = false) =
   ## Creates the window table and lifecycle state. Call on the main thread
   ## after `listen` (the port is part of `baseUrl`) and before the first
   ## `openWindow`; `teardownWindows` undoes it. `closeConn` is `Server.close`
@@ -225,18 +245,22 @@ proc initWindows*(closeConn: CloseProc; pending: PendingTable; baseUrl: string;
   ## failed in `connectionClosed`, `search` the resolved `findBrowser` result,
   ## `fallback` / `defaultOpts` the `startApp` browser parameters, `launcher`
   ## an override for tests (`nil` = `launchWithFallback`). `gracePeriodMs`
-  ## must be at least `MinGracePeriodMs`.
+  ## must be at least `MinGracePeriodMs`. `serve` selects serve mode (see the
+  ## module header), which ignores `gracePeriodMs` and `startupTimeoutMs`;
+  ## pass `noLaunch` as its `launcher`.
   doAssert mgr == nil, "initWindows called twice; call teardownWindows first"
   doAssert not closeConn.isNil, "initWindows: closeConn is nil"
   doAssert not pending.isNil, "initWindows: pending is nil"
   doAssert baseUrl.len > 0, "initWindows: baseUrl is empty"
-  doAssert gracePeriodMs >= MinGracePeriodMs,
-    "initWindows: gracePeriodMs must be at least " & $MinGracePeriodMs &
-    " ms (neel.js retries 250 ms after an abnormal close)"
-  doAssert startupTimeoutMs > 0, "initWindows: startupTimeoutMs must be positive"
+  if not serve:
+    doAssert gracePeriodMs >= MinGracePeriodMs,
+      "initWindows: gracePeriodMs must be at least " & $MinGracePeriodMs &
+      " ms (neel.js retries 250 ms after an abnormal close)"
+    doAssert startupTimeoutMs > 0, "initWindows: startupTimeoutMs must be positive"
   let m = cast[ptr WindowManager](allocShared0(sizeof(WindowManager)))
   initLock m.lock
   initCond m.cond
+  m.serve = serve
   m.closeConn = closeConn
   m.pending = pending
   m.baseUrl = baseUrl
@@ -416,20 +440,12 @@ proc connectionCount*(): int {.gcsafe.} =
 
 # --- window API ------------------------------------------------------------------
 
-proc openWindow*(path = "/"; size = none(WindowSize);
-                 position = none(WindowPosition);
-                 extraFlags: seq[string] = @[]): Window {.gcsafe.} =
-  ## Opens a new browser window at `path` (relative to the server root) and
-  ## returns its handle. `size` / `position` override the `startApp`
-  ## defaults when given; `extraFlags` are appended to the default extra
-  ## flags. The window id is allocated first (monotonic from 1), the record
-  ## is registered before the launch so a fast page load can already bind,
-  ## a leftover profile dir with this pid and id is deleted
-  ## (`clearStaleUserDataDir`), then the launcher runs (`launchWithFallback`: a `NeelBrowserError` or a
-  ## `ValueError` for a bad size propagates and the record is dropped).
-  ## Callable from an exposed proc on a pool worker; blocks only for the
-  ## launch itself.
-  let m = requireManager()
+proc createWindow(m: ptr WindowManager; path: string; size: Option[WindowSize];
+                  position: Option[WindowPosition];
+                  extraFlags: seq[string]): Window {.gcsafe.} =
+  ## The body of `openWindow` and `openVirtualWindow`. In serve mode no
+  ## profile directory is named or cleared (the record's `userDataDir` stays
+  ## empty), since nothing is ever launched.
   acquire m.lock
   let id = m.nextWindowId
   inc m.nextWindowId
@@ -442,8 +458,10 @@ proc openWindow*(path = "/"; size = none(WindowSize);
   for f in extraFlags:
     opts.extraFlags.add f
   let url = launchUrl(m.baseUrl, path, id)
-  let dir = userDataDirFor(id)
-  clearStaleUserDataDir(dir)
+  var dir = ""
+  if not m.serve:
+    dir = userDataDirFor(id)
+    clearStaleUserDataDir(dir)
   let rec = cast[ptr WindowRecord](allocShared0(sizeof(WindowRecord)))
   rec.id = id
   rec.path = path
@@ -476,14 +494,47 @@ proc openWindow*(path = "/"; size = none(WindowSize);
   finishHandle(stray)
   Window(id: id, js: initJsProxy(id))
 
+proc openWindow*(path = "/"; size = none(WindowSize);
+                 position = none(WindowPosition);
+                 extraFlags: seq[string] = @[]): Window {.gcsafe.} =
+  ## Opens a new browser window at `path` (relative to the server root) and
+  ## returns its handle. `size` / `position` override the `startApp`
+  ## defaults when given; `extraFlags` are appended to the default extra
+  ## flags. The window id is allocated first (monotonic from 1), the record
+  ## is registered before the launch so a fast page load can already bind,
+  ## a leftover profile dir with this pid and id is deleted
+  ## (`clearStaleUserDataDir`), then the launcher runs (`launchWithFallback`: a `NeelBrowserError` or a
+  ## `ValueError` for a bad size propagates and the record is dropped).
+  ## Callable from an exposed proc on a pool worker; blocks only for the
+  ## launch itself. Raises `NeelServeModeError` in serve mode.
+  let m = requireManager()
+  if m.serve:
+    raise newException(NeelServeModeError, "openWindow is not available in " &
+      "serve mode: the app has one window, created by startApp")
+  createWindow(m, path, size, position, extraFlags)
+
+proc openVirtualWindow*(path: string): Window {.gcsafe.} =
+  ## Serve mode's window 1, created by `startApp` right after `initWindows`.
+  ## The record is registered like any window's and handed to the launcher
+  ## (`noLaunch`), so the window is open and bindable without a browser or
+  ## a profile directory. Serve mode only; not re-exported by `neel`.
+  let m = requireManager()
+  doAssert m.serve, "openVirtualWindow: serve mode only"
+  createWindow(m, path, none(WindowSize), none(WindowPosition), @[])
+
 proc closeWindow*(w: Window) {.gcsafe.} =
   ## Closes `w`: sends a 1000 close to its connection (so `neel.js` does not
   ## reconnect), terminates the browser process, releases the handle, deletes
   ## the profile directory, and fires `onWindowClose`. The id is refused by
   ## `bindConnection` from now on. The record is freed right away when the
   ## window has no connection, otherwise when that connection's
-  ## `connectionClosed` runs. Idempotent; a no-op for an unknown id.
+  ## `connectionClosed` runs. Idempotent; a no-op for an unknown id. Raises
+  ## `NeelServeModeError` in serve mode, whatever the id.
   let m = requireManager()
+  if m.serve:
+    raise newException(NeelServeModeError, "closeWindow is not available in " &
+      "serve mode: the app's only window stays open until the app stops " &
+      "(quitApp)")
   var toFree: ptr WindowRecord
   acquire m.lock
   let rec = m.windows.getOrDefault(w.id)
@@ -582,6 +633,16 @@ proc minOpt(a: var Option[MonoTime]; b: MonoTime) {.inline.} =
   if a.isNone or b < a.get:
     a = some b
 
+proc waitForQuit(m: ptr WindowManager): ExitReason =
+  ## Serve mode's `waitForAppExit`: no retirement and no idle exit, only
+  ## `quitApp()`. Still wakes every `IdleTickMs`, so a flag that cannot
+  ## signal the condition variable is noticed within that bound.
+  acquire m.lock
+  while not m.quitRequested:
+    discard waitTimeout(m.cond, m.lock, IdleTickMs)
+  release m.lock
+  erQuit
+
 proc waitForAppExit*(): ExitReason =
   ## Blocks the calling (main) thread until the app should exit and returns
   ## why: `erQuit` after `quitApp()`; `erLastWindowClosed` when the connection
@@ -592,9 +653,13 @@ proc waitForAppExit*(): ExitReason =
   ## has been gone for a grace period or that never connected within the
   ## startup timeout: their browser is terminated, their profile directory
   ## removed, `onWindowClose` fired (on this thread), and their record freed.
-  ## Does not call server `shutdown`; the caller does, then `resetJsBridge`
-  ## and `teardownWindows`. Every internal wait is bounded by `IdleTickMs`.
+  ## In serve mode it only waits for `quitApp()` (`erQuit`) and retires
+  ## nothing. Does not call server `shutdown`; the caller does, then
+  ## `resetJsBridge` and `teardownWindows`. Every internal wait is bounded by
+  ## `IdleTickMs`.
   let m = requireManager()
+  if m.serve:
+    return waitForQuit(m)
   let grace = initDuration(milliseconds = m.gracePeriodMs)
   let startup = initDuration(milliseconds = m.startupTimeoutMs)
   acquire m.lock
