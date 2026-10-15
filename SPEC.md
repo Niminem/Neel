@@ -902,7 +902,7 @@ Results (2026-10-15, user-run):
   `--os:linux` of `src/neel.nim`, `t_server`, and a `t_neel` copy with disk
   assets). **User-confirmed (2026-10-15): macOS and Windows**, `nimble test`
   several times back to back on each, all passed; the first real run of the
-  ping timer on kqueue. The Windows two-instance check is not reported yet.
+  ping timer on kqueue. The two-instance and restart check passed on both.
   **Linux: deferred to the final pass** (13.0).)
 - **Depends on:** step 2 (for the `runApp` wiring only)
 - **Touches:** `server.nim`, `neel.nim`, `testhooks.nim` (ping observer);
@@ -996,7 +996,10 @@ Results (2026-10-15, user-run):
 - macOS: `nimble test`, several runs back to back: passed (no ping-suite
   flakes).
 - Windows 11: `nimble test`, several runs back to back: passed.
-- Windows two-instance and restart check: not yet reported.
+- Two instances on port 8080, then a restart right after Ctrl-C (with a
+  page connected), on Windows 11 and macOS: passed. The second copy failed
+  at start with `OSError` and printed no startup line while the first kept
+  serving; the restart bound the port at once.
 - Linux: deferred to the final pass (13.0).
 
 ### 13.6 Step 6: shim serve behavior
@@ -1029,6 +1032,7 @@ published only once verified on a real setup.
 
 **Notes:**
 
+
 ### 13.8 Manual verification
 
 Run by the user on each OS in the final pass after step 7 (13.0). Earlier
@@ -1047,7 +1051,7 @@ a section 16 entry, or `n/a`).
 | Serve: Ctrl-C exits cleanly | pass (after step 4) | pass (after step 4) | |
 | Serve: `kill -TERM` exits cleanly | pass (after step 4) | n/a | |
 | Serve: closing the console window exits cleanly | n/a | pass (after step 4) | n/a |
-| Serve: a second app on the same fixed port fails at start; a restart right after Ctrl-C binds | | | |
+| Serve: a second app on the same fixed port fails at start; a restart right after Ctrl-C binds | pass (after step 5) | pass (after step 5) | |
 | Serve: idle behind a proxy for 5 minutes without a reconnect | | | |
 | Serve: dormant shim wakes (DevTools offline toggle) | | | |
 
@@ -1230,7 +1234,10 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
 - 2026-10-15, step 5, macOS and Windows: the user ran `nimble test` several
   times back to back on both; all passed, the ping suite included (its
   first run on kqueue). The step-5 checkpoint is therefore green on macOS
-  and Windows; epoll (Linux) is first run in the final pass (13.0).
+  and Windows; epoll (Linux) is first run in the final pass (13.0). The
+  two-instance and restart check also passed on both, so the exclusive
+  bind holds between real processes on Windows, and a restart with a
+  connected page still binds.
 - 2026-10-15, step 5, all: the IO loop wakes at most every `IoTickMs`
   (250 ms) or at the earliest deadline, and only `csWebSocket` connections
   shorten the timeout for pings. A test that looks for a ping during a
