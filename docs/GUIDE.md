@@ -38,6 +38,7 @@ Contents
 - [Serve mode](#serve-mode)
 - [Caveats](#caveats)
 - [The examples](#the-examples)
+- [What's new in 2.1](#whats-new-in-21)
 - [Migrating from Neel 1.x](#migrating-from-neel-1x)
 - [License](#license)
 
@@ -719,7 +720,8 @@ window managers already hide the terminal of a backgrounded process.
   including two calls from the same page issued back to back, so they must be
   `{.gcsafe.}` (the compiler enforces this; the error points at the proc) and
   must protect shared mutable state with a `Lock`, `Atomic`, or a channel.
-  Module-level `var`s of GC'd types are not GC-safe to touch.
+  Module-level `var`s of GC'd types are not GC-safe to touch (see
+  [Shared state](#shared-state) below).
 - There is no ordering guarantee between messages on one connection: a
   `neel.count()` issued right after `neel.increment.send()` may run before the
   increment. If order matters, await the first call or let the proc return
@@ -745,6 +747,43 @@ window managers already hide the terminal of a backgrounded process.
   tools. When the queue is full, the IO thread stops reading from the
   connections whose messages it cannot queue (TCP back-pressure); nothing is
   dropped.
+
+### Shared state
+
+State that several exposed procs read and write (a list, a table, a
+settings object) lives in a module-level `var` guarded by a `Lock`. The
+compiler rejects a GC'd global inside an exposed proc even under a lock, so
+the access is wrapped in `{.cast(gcsafe).}`, which is sound only because
+every access goes through the lock:
+
+```nim
+import std/locks
+import neel
+
+var
+  historyLock: Lock
+  history: seq[string] # guarded by historyLock
+
+initLock historyLock
+
+proc remember(item: string): int {.expose.} =
+  withLock historyLock:
+    {.cast(gcsafe).}: # `history` is only touched under `historyLock`
+      history.add item
+      result = history.len
+
+proc recall(): seq[string] {.expose.} =
+  withLock historyLock:
+    {.cast(gcsafe).}:
+      result = history # a copy; safe to use after the lock is released
+```
+
+Keep the locked section short and never call `js.wait.*` inside it: every
+other proc that needs the lock waits for the page, and a JS function that
+calls back into such a proc deadlocks until the wait times out. For
+a single counter or flag, an `Atomic[int]` / `Atomic[bool]` from
+`std/atomics` needs no lock and no cast. `examples/serve` uses this pattern
+for its shared note.
 
 ## `startApp` parameters
 
@@ -1306,6 +1345,18 @@ manual reload. Step by step, including the dashboard, costs, and removal:
   [reload recipe](#reloading-after-a-server-restart). Positional arguments
   are allowed origins and `--port=N` replaces the port
   (`./serve https://<name>.trycloudflare.com`).
+
+## What's new in 2.1
+
+- [Serve mode](#serve-mode): `startApp(serve = true, port = ...,
+  allowedOrigins = ...)` runs the app as a persistent server without a
+  browser, reached through an SSH forward, a tunnel, or a reverse proxy.
+- A displaced connection (another tab or device taking a window over) now
+  closes with code 4000 (`CloseDisplaced`) instead of 1000. The shim's
+  behavior is unchanged (final, no reconnect); only the code reported to
+  `neel.onclose` differs.
+- On Windows, starting a second app on a fixed port that is already in use
+  now fails with `OSError`, as it already did on macOS and Linux.
 
 ## Migrating from Neel 1.x
 

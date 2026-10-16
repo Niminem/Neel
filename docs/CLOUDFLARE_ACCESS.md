@@ -12,6 +12,11 @@ October 2026.
 For the short version and how this setup compares to the others, see
 [Setups](GUIDE.md#setups) in the guide.
 
+This page covers the verified setup and nothing more. For anything beyond
+it, such as running `cloudflared` or the app as a service, other login
+methods, or Cloudflare errors not described here, see Cloudflare's
+documentation or ask an AI assistant.
+
 ## What you need
 
 - A domain whose DNS Cloudflare runs. On the Free plan that means the whole
@@ -24,7 +29,13 @@ For the short version and how this setup compares to the others, see
   on `PATH`), Homebrew or Cloudflare's release binaries on macOS, Cloudflare's
   packages or release binaries on Linux.
 - The app, started with `serve = true`, a fixed `port`, and the hostname in
-  `allowedOrigins`. The examples below use `examples/serve` on port 8080.
+  `allowedOrigins`. The examples below use `examples/serve` on port 8080;
+  in your own app that is:
+
+  ```nim
+  startApp(serve = true, port = 8080,
+           allowedOrigins = @["https://notes.example.com"])
+  ```
 
 ## 1. Move the domain's DNS to Cloudflare
 

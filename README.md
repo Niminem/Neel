@@ -346,7 +346,25 @@ Everything else (validation, stop signals, reconnecting, the reload recipe for s
 
 Keep the following in mind when developing your Neel app:
 
-- Exposed procs run concurrently on worker threads, even two calls from the same page issued back to back. Guard shared state with a `Lock`, an `Atomic`, or a channel.
+- Exposed procs run concurrently on worker threads, even two calls from the same page issued back to back. Guard shared state with a `Lock`, an `Atomic`, or a channel. A global of a GC'd type (`seq`, `string`, `Table`, ...) also needs `{.cast(gcsafe).}` around the locked access, or the compiler rejects it:
+
+  ```nim
+  import std/locks
+
+  var
+    historyLock: Lock
+    history: seq[string] # guarded by historyLock
+
+  initLock historyLock
+
+  proc remember(item: string): int {.expose.} =
+    withLock historyLock:
+      {.cast(gcsafe).}: # sound only because every access holds the lock
+        history.add item
+        result = history.len
+  ```
+
+  More in [Shared state](docs/GUIDE.md#shared-state).
 - There is no ordering guarantee between messages on one connection: if one call must finish before the next starts, `await` it first.
 - A Defect (`IndexDefect`, `AssertionDefect`, ...) raised in an exposed proc terminates the app; only `CatchableError`s become errors in the page.
 - The grace period (3 s in debug builds, 10 s in release builds, `gracePeriodMs`) exists because a page refresh or a dropped connection looks like a closed window for a moment; the app exits only when no window comes back within it.
@@ -367,6 +385,12 @@ The other two exist mostly for manual (and stress) testing of Neel itself, but t
 - [Stress test](examples/stresstest): exercises every feature in one page, under load and in edge cases (every supported type, every error kind, hundreds of concurrent calls, large payloads, pushes from a plain thread).
 
 
+
+## What's New in 2.1
+
+- [Serve mode](#serve-mode): `startApp(serve = true, port = ..., allowedOrigins = ...)` runs the app as a persistent server without a browser, reached through an SSH forward, a tunnel, or a reverse proxy.
+- A displaced connection (another tab or device taking a window over) now closes with code `4000` (`CloseDisplaced`) instead of `1000`.
+- On Windows, starting a second app on a fixed port that is already in use now fails with `OSError`, as it already did on macOS and Linux.
 
 ## What's New in 2.0 / Migrating from 1.x
 
