@@ -1343,26 +1343,26 @@ page becomes visible or goes online` while dormant, and
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` passes (node test `[OK]`, not `[SKIPPED]`) | pass (after step 6) | pass (after step 6) | pass (after step 6) |
-| Local: the three examples behave as before | | | |
-| Local: fixed port, a browser tab displaces the app window (4000) | | | |
-| Local: Ctrl-C ends a local-mode app the old way | | pass (after step 4) | |
-| Local: the shim's give-up is still terminal | | | |
-| Serve: starts without a browser, prints the startup line | | | |
-| Serve: page loads at `http://127.0.0.1:<port>`, the note round-trips | | | |
-| Serve: a second tab displaces the first (4000, no reconnect, no loop) | | | |
-| Serve: Ctrl-C exits cleanly | pass (after step 4) | pass (after step 4) | pass (after step 5) |
+| `nimble test` passes (node test `[OK]`, not `[SKIPPED]`) | pass (after step 6) | pass | pass (after step 6) |
+| Local: the three examples behave as before | | pass | |
+| Local: fixed port, a browser tab displaces the app window (4000) | | pass | |
+| Local: Ctrl-C ends a local-mode app the old way | | pass (release; debug crashes in Nim's handler, 16.1) | |
+| Local: the shim's give-up is still terminal | | pass | |
+| Serve: starts without a browser, prints the startup line | | pass | |
+| Serve: page loads at `http://127.0.0.1:<port>`, the note round-trips | | pass | |
+| Serve: a second tab displaces the first (4000, no reconnect, no loop) | | pass | |
+| Serve: Ctrl-C exits cleanly | pass (after step 4) | pass | pass (after step 5) |
 | Serve: `kill -TERM` exits cleanly | pass (after step 4) | n/a | pass (after step 5) |
 | Serve: a second signal exits at once (130 / 143) | pass (after step 4) | n/a | pass (after step 5) |
-| Serve: Ctrl-Break exits cleanly | n/a | pass (after step 4) | n/a |
-| Serve: closing the console window exits cleanly | n/a | pass (after step 4) | n/a |
-| Serve: a second app on the same fixed port fails at start; a restart right after Ctrl-C binds | pass (after step 5) | pass (after step 5) | pass (after step 5) |
-| Serve: "Stop server", then a restart: the page reloads by itself | | | |
-| Serve: dormant shim wakes (DevTools offline toggle) | | | |
-| Serve: server restart while dormant: the failed wake reloads the page | | | |
-| Serve: SSH forward from another machine; `localhost` refused | | | |
-| Serve: an `--app:gui` build starts and serves | n/a | | n/a |
-| Serve: idle behind a proxy for 5 minutes without a reconnect | | | |
+| Serve: Ctrl-Break exits cleanly | n/a | pass (`GenerateConsoleCtrlEvent`, 211 ms) | n/a |
+| Serve: closing the console window exits cleanly | n/a | pass | n/a |
+| Serve: a second app on the same fixed port fails at start; a restart right after Ctrl-C binds | pass (after step 5) | pass | pass (after step 5) |
+| Serve: "Stop server", then a restart: the page reloads by itself | | pass | |
+| Serve: dormant shim wakes (DevTools offline toggle) | | pass (outage via a TCP relay, 16.1) | |
+| Serve: server restart while dormant: the failed wake reloads the page | | pass (outage via a TCP relay, 16.1) | |
+| Serve: SSH forward from another machine; `localhost` refused | | n/a (no OpenSSH Server) | |
+| Serve: an `--app:gui` build starts and serves | n/a | pass | n/a |
+| Serve: idle behind a proxy for 5 minutes without a reconnect | | pass (cloudflared quick tunnel, Edge, about 10 min) | |
 
 Once, on Linux (the realistic deployment target; the server runs on Linux,
 the browsers anywhere):
@@ -1394,8 +1394,10 @@ verbatim (the harness report is printed under the failed check).
   `neel.askPage(...)` shows `the page answered: what now? -> forty-two`.
   "openSecond" opens window 2 and the terminal prints `window 2 opened`.
   "askSecond": answer the prompt (the value comes back), Cancel
-  (`PromptCancelled`), wait 5 s (`NeelTimeoutError`), close window 2 while
-  the prompt is up (`NeelDisconnectedError`), ask again
+  (`PromptCancelled`), wait 5 s (`NeelTimeoutError`), end window 2 while
+  the prompt is up (`NeelDisconnectedError`; kill its browser process,
+  since closing it with X lets Chrome dismiss the prompt first, which gives
+  `PromptCancelled`, 16.1), ask again
   (`NeelNoWindowError`). "listWindows" lists the open windows. Close
   window 1: `window 1 closed` and the process ends about 3 s later.
 - `./examples/stresstest/stresstest`: press every section's buttons; no
@@ -1418,7 +1420,9 @@ window: it works again, and the window the restart opened reads
 **Local: Ctrl-C ends a local-mode app the old way.**
 `./examples/roundtrip/roundtrip`, then Ctrl-C in its terminal. Expect Nim's
 `SIGINT: Interrupted by Ctrl-C.` and the process gone at once, with no
-`window 1 closed` line (no Neel shutdown).
+`window 1 closed` line (no Neel shutdown). On Windows run this with a
+release build (`nim c -d:release ...`): a debug build crashes in Nim's own
+handler (exit `-1073741819`, no message; documented in the guide, 16.1).
 
 **Local: the shim's give-up is still terminal.** The stresstest page's
 "Reconnect and give up" check: `./examples/stresstest/stresstest`, note the
@@ -1978,6 +1982,83 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   `node:http`. The `/ws` upgrade with a chosen `Origin`, and the calls over
   it, were done on a raw `net` socket (hand-written handshake and masked
   frames), which controls every header.
+- 2026-10-16, final pass, Windows (Chrome): in `examples/roundtrip`,
+  closing window 2 with its X while the "askSecond" prompt is up gives
+  `PromptCancelled`, not `NeelDisconnectedError` (twice). Chrome dismisses
+  the dialog first, so `prompt` returns `null`, `second.js` throws, and
+  the shim sends that reply before the socket closes. Not a Neel issue
+  (local mode, unchanged since 2.0). Force-killing window 2's browser
+  process during the prompt gives `NeelDisconnectedError: connection 11
+  closed while waiting for id 1`, which is the path the check is after.
+  The 13.8 procedure now says so.
+- 2026-10-16, final pass, Windows: **fail**, row "Local: Ctrl-C ends a
+  local-mode app the old way". Debug build of `examples/roundtrip` (built
+  this session from `5a4fb0d`, Nim 2.2.12), run in the user's PowerShell,
+  Ctrl-C once after `window 1 opened`. Verbatim:
+
+  ```
+  PS C:\Users\leonl\OneDrive\Desktop\deleteme\Neel> .\examples\roundtrip\roundtrip.exe
+  window 1 opened
+  PS C:\Users\leonl\OneDrive\Desktop\deleteme\Neel> $LASTEXITCODE
+  -1073741819
+  ```
+
+  No `SIGINT: Interrupted by Ctrl-C.` and exit code `0xC0000005`
+  (`STATUS_ACCESS_VIOLATION`) instead of 1: the process crashed. The same
+  check passed after step 4 (13.4 "Results").
+  Diagnosis the same day (no code changed; binaries under `$env:TEMP`,
+  gcc MinGW-W64 x86_64-posix-seh 11.1.0 from `~/.nimble/bin`): debug
+  `roundtrip` crashed the same way 3 more times out of 3, after a pause of
+  about a second; a release `roundtrip` printed `SIGINT: Interrupted by
+  Ctrl-C.` and exited 1; a bare Nim program with no Neel
+  (`while true: sleep(100)`) crashed identically as a debug build
+  (`-1073741819`, no message) and was correct as a release build (message,
+  exit 1). Verbatim (partial, the terminal was cleared):
+
+  ```
+  PS C:\...\Neel> & $env:TEMP\neel-ctrlc\roundtrip-release.exe
+  window 1 opened
+  SIGINT: Interrupted by Ctrl-C.
+  PS C:\...\Neel> & $env:TEMP\neel-ctrlc\bare-debug.exe
+  bare: running, press Ctrl-C
+  PS C:\...\Neel> $LASTEXITCODE
+  -1073741819
+  PS C:\...\Neel> & $env:TEMP\neel-ctrlc\roundtrip-release.exe
+  window 1 opened
+  SIGINT: Interrupted by Ctrl-C.
+  PS C:\...\Neel> $LASTEXITCODE
+  1
+  PS C:\...\Neel>  & $env:TEMP\neel-ctrlc\bare-release.exe
+  bare: running, press Ctrl-C
+  SIGINT: Interrupted by Ctrl-C.
+  PS C:\...\Neel> $LASTEXITCODE
+  1
+  ```
+
+  So it is Nim's own debug-build `SIGINT` handler, not Neel: local mode
+  installs no handler, and the crash needs no Neel code. Likely cause
+  (unverified): on Windows the C runtime runs that handler on a console
+  thread Windows creates, and the debug handler writes a stack trace
+  through thread-local state (`framePtr`, MinGW emulated TLS), the hazard
+  noted for step 4 above; Nim's `excpt.nim` says as much ("the signal
+  handler is called from a non-Nim thread and any allocation will
+  (likely) cause a crash"). Why it passed after step 4 is not known.
+  Not fixed, by the user's decision: documented in the guide (Caveats,
+  and a pointer from "Stopping a server"); the 13.8 row is a pass on
+  release builds.
+- 2026-10-16, final pass, Windows (Chrome): DevTools Network throttling
+  "Offline" does not close an open WebSocket: no `onclose`, the page stays
+  `connected`. The dormant row was run with an outage instead: a Node TCP
+  relay on `127.0.0.1:5360` to the server (started with that origin
+  allowed), stopped and restarted (ad hoc, under `$env:TEMP`).
+- 2026-10-16, final pass, Windows: cloudflared 2026.10.1 (winget) quick
+  tunnel to `examples/serve`: 502 before the app was up; with the tunnel
+  URL as the allowed origin the page worked in Edge and stayed connected
+  about 10 min untouched (no `onclose`, so the 30 s pings hold Cloudflare
+  open); restarted without the argument, the tunnel got `403` `neel:
+  refused: the Host header must be 127.0.0.1:5359`, so cloudflared forwards
+  the public `Host` (2.3). Not yet run on Linux, where the quick-tunnel row
+  of 13.8 belongs; the guide still says "not yet verified".
 
 ### 16.2 Deviations from the spec
 

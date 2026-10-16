@@ -933,7 +933,8 @@ within about a second.
 The signal handlers are installed only while a serve-mode `startApp` runs,
 and the previous handlers are back in place when it returns. Local mode
 installs none: Ctrl-C ends a local-mode app the default way, without
-Neel's shutdown.
+Neel's shutdown (on Windows, a debug build crashes there; see
+[Caveats](#caveats)).
 
 - Linux and macOS: `SIGINT` (Ctrl-C) and `SIGTERM` (`kill`, `systemctl
   stop`, `docker stop`). A second signal while the shutdown is still running
@@ -1243,6 +1244,18 @@ tunnel is public (see above), so use it only to try things out.
   called before it starts or after it returns they fail an assertion.
   `windows()` is then empty, `window(id)` is `none`, and `js` raises
   `NeelNoWindowError`. Only one `startApp` may run at a time per process.
+- On Windows, Ctrl-C crashes a debug build (one without `-d:release`)
+  wherever Nim's own Ctrl-C handler runs, which includes every local-mode
+  app. After a short pause the process ends with an access violation
+  (`$LASTEXITCODE` is `-1073741819`, `0xC0000005`) instead of printing
+  `SIGINT: Interrupted by Ctrl-C.` and exiting with 1. Windows runs the
+  handler on a thread of its own, and in a debug build the handler
+  allocates there to build a stack trace. Any Nim program built this way
+  does it, with or without Neel. Nothing else is lost, since Ctrl-C ends
+  a local-mode app without Neel's shutdown anyway, but expect the crash.
+  To stop a local-mode app cleanly, close its windows or call `quitApp()`.
+  Release builds are not affected, and neither is serve mode, which
+  handles Ctrl-C itself.
 
 ## The examples
 
