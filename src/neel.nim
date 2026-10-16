@@ -1,4 +1,4 @@
-## neel.nim - public surface of Neel 2.0.
+## neel.nim - public surface of Neel 2.1.
 ##
 ## This is the only module an application imports. It provides `startApp`
 ## and re-exports the user-facing pieces of the internal modules under
@@ -85,7 +85,7 @@ export NeelTimeoutError, NeelDisconnectedError, NeelRemoteError
 export DefaultWorkers, DefaultQueueCapacity, DefaultMaxMessageSize
 
 const
-  NeelVersion* = "2.0.0"
+  NeelVersion* = "2.1.0"
     ## Library version string, kept in sync with `neel.nimble`.
   TokenBytes = 16
     ## Random bytes in the launch token (rendered as 32 lowercase hex chars,

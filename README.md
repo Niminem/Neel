@@ -6,7 +6,7 @@ Write the user interface in HTML, CSS, and JavaScript and everything else in Nim
 
 > Neel runs its own thread-based HTTP/WebSocket server on `127.0.0.1`, in the spirit of [Mummy](https://github.com/guzba/mummy): one IO thread owns the sockets, a pool of worker threads runs your procs, and there is no async anywhere. It opens Chrome, Chromium, or Edge in app mode on that server, so your app gets its own window without tabs or an address bar. When none of them is installed, or when you ask for it, the app opens in a tab of your default browser instead.
 
-**This README gets you started and very well may be all you need. Every detail (the full type list, error messages, browser discovery, lifecycle, threading, and caveats) is in the [Neel 2.0 guide](docs/GUIDE.md).**
+**This README gets you started and very well may be all you need. Every detail (the full type list, error messages, browser discovery, lifecycle, threading, and caveats) is in the [Neel 2.1 guide](docs/GUIDE.md).**
 
 Features:
 
@@ -40,7 +40,7 @@ The best visualization libraries that exist are in JavaScript, and the most powe
 - No Nimble dependencies, only the standard library.
 - Google Chrome, Chromium, or Microsoft Edge for app-mode windows; without one of them, any default browser, in a tab.
 
-Neel 2.0 is verified on macOS, Windows, and Linux (Ubuntu). Edge is verified on Windows only (as Edge is just edge-case browser on other OSs).
+Neel 2.1 is verified on macOS, Windows, and Linux (Ubuntu). Edge is verified on Windows only (as Edge is just edge-case browser on other OSs).
 
 ## Installation
 

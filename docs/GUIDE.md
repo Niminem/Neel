@@ -1,4 +1,4 @@
-# Neel 2.0 guide
+# Neel 2.1 guide
 
 The complete reference. For an introduction and a first app, start with the
 [README](../README.md).
@@ -9,7 +9,7 @@ CSS, and JavaScript. The Nim program runs a small HTTP/WebSocket server on
 sides: a Nim proc marked `{.expose.}` becomes `neel.<name>(...)` in the page
 and returns a Promise; a JS function registered with `neel.expose` becomes
 `js.<name>(...)` in Nim, with `js.wait.<name>(...)` when a return value is
-needed. Neel 2.0 is inspired by Python's [Eel](https://github.com/python-eel/Eel).
+needed. Neel is inspired by Python's [Eel](https://github.com/python-eel/Eel).
 In [serve mode](#serve-mode) the same app runs as a persistent server for one
 user instead: no browser is launched, and the app is opened from any of the
 user's devices through an SSH port forward, a tunnel, or a reverse proxy.

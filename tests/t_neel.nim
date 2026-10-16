@@ -925,7 +925,7 @@ suite "neel: startApp end to end":
     release shared.lock
 
   test "the public surface re-exports what applications need":
-    check NeelVersion == "2.0.0"
+    check NeelVersion == "2.1.0"
     check DefaultGracePeriodMs >= MinGracePeriodMs
     check DefaultMaxMessageSize == 16 * 1024 * 1024
     check currentWindowId() == NoWindow
