@@ -28,7 +28,9 @@
 ## Routes served by `runApp`'s request handler (all on `127.0.0.1`). Every
 ## request first passes `frontend.requestRefusal` (`Host` must be
 ## `127.0.0.1:<port>`, no `Sec-Fetch-Site: cross-site`, and for `/ws` an
-## `Origin` of `http://127.0.0.1:<port>`), otherwise 403:
+## `Origin` of `http://127.0.0.1:<port>`; in serve mode the hosts and
+## origins of `allowedOrigins` are accepted too, and cross-site top-level
+## navigations pass), otherwise 403:
 ## - `/ws`: the WebSocket upgrade; requires the launch token and a known
 ##   window id in the query, otherwise 403.
 ## - `/neel.js`: the browser shim rendered for one window (token, window id,
@@ -40,8 +42,9 @@
 ## - `/` in serve mode, when `startPath` names another page: a 302 to it.
 ## - everything else: the web directory through `neel/assets`.
 ##
-## Tests replace the browser launch and the exit-time profile sweep through
-## `neel/testhooks`, which is not re-exported.
+## Tests replace the browser launch and the exit-time profile sweep, and
+## observe the server's ping interval, through `neel/testhooks`, which is
+## not re-exported.
 ##
 ## Everything else lives in `neel/*.nim`; each module's header comment states
 ## its single responsibility.

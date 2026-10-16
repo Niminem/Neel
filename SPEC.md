@@ -1,6 +1,7 @@
 # Serve mode: specification
 
-Status: decisions settled (reviewed 2026-10-14); implementation in progress.
+Status: decisions settled (reviewed 2026-10-14); steps 1–7 done
+(2026-10-16); the final pass on all three OSes (13.8) is pending.
 Progress is tracked per step in section 13; findings, deviations, and gotchas
 are logged in section 16.
 
@@ -419,10 +420,14 @@ No version skew is possible: the shim is compiled into the same binary
 ## 10. Shim changes (`neel.js`)
 
 **10.1 Close codes.** `ws.onclose` terminates on 1000, 1001, and 4000, in
-one branch: a 4000 close rejects pending and later calls with
-`neel: server closed the connection (close code 4000)`, like 1000 and 1001,
-and `onclose` receives `(4000, false)`. The shim names the code
-`CLOSE_DISPLACED`.
+one branch, and `onclose` receives `(4000, false)`. The shim names the code
+`CLOSE_DISPLACED`. Messages, as built (corrected in step 7, 16.1): calls in
+flight reject with `neel: connection lost (close code 4000)` (`failPending`
+runs first, for every code), calls made afterwards with `neel: connection
+is closed`; `terminate`'s own reason, `neel: server closed the connection
+(close code 4000)`, reaches only queued calls and an unsettled `neel.ready`,
+neither of which can exist when the close arrives on an open socket. Same
+for 1000 and 1001.
 
 **10.2 Serve flag.** A fourth placeholder, `__NEEL_SERVE__`, rendered as
 `true` / `false` by `renderNeelJs`. The `static:` checks in `frontend.nim`
@@ -489,6 +494,17 @@ reconnects get a 403 until the page reloads. The guide documents an
 app-level recipe: reload on a 1001 close, or when a dormant shim's wake-up
 attempt gives up. **Never reload on 4000**, or two devices loop. A stable token
 across restarts would remove the need for this; deferred (section 15).
+
+As documented (step 7, agreed with the user): the page does not reload at
+once. It waits 2 s, then polls `fetch(location.href, {cache: "no-store",
+redirect: "manual"})` every 2 s and reloads when the response is `ok` or
+`type === "opaqueredirect"` (an auth proxy's login redirect); network errors
+and 5xx (a tunnel answering 502) keep polling, and a successful reconnect
+(`onreconnect`) stops it. "A wake-up attempt gives up" is detected in the
+page by a flag set when `visibilitychange` (visible) or `online` fires while
+the page shows dormant; the shim's own listeners run first. A restart first
+noticed by an ordinary reconnect round (not a wake) ends dormant, and the
+page reloads only after the next wake event (16.1).
 
 ---
 
@@ -1194,49 +1210,491 @@ const probe = () => neel.call("x").then(
 
 ### 13.7 Step 7: documentation and example
 
-- **Status:** not started
+- **Status:** done (2026-10-16; `nimble test` and `nim c src/neel.nim` green
+  on **Windows 11** (win32 10.0.26200) with Nim 2.2.12. `nim` on PATH is
+  `~/.nimble/bin/nim.exe` (`nim -v`: 2.2.12); Nimble compiled with
+  `~/.nimble/pkgs2/nim-2.2.12-1ce02ec.../bin/nim.exe`, also 2.2.12. `node`
+  is on PATH, so "serve, local, and the frozen reference shim in a scripted
+  browser" ran: `[OK]`. macOS and Linux not run for this step; the final
+  pass (13.8) covers them.)
 - **Depends on:** steps 1–6
-- **Touches:** `README.md`, `docs/GUIDE.md`, module headers, new `examples/serve`
+- **Touches:** `README.md`, `docs/GUIDE.md`, the headers of `neel.nim`,
+  `frontend.nim`, and `window.nim` (comments only), new `examples/serve`,
+  `examples/stresstest/web/index.html`; `SPEC.md` 10.1 (wording) and 14
 - **Spec:** sections 12, 14
-- **Cross-OS:** triggers the final pass: the full 13.8 matrix on all three
-  OSes, using `examples/serve`.
+- **Cross-OS:** safe to defer (confirmed): documentation, comments, and an
+  example; no platform branches, OS APIs, or new state shared between
+  threads in Neel (the example's note is app state under its own `Lock`).
+  It is the step that **triggers the final pass**: the full 13.8 checklist
+  on macOS, Windows, and Linux, using `examples/serve` and the existing
+  examples.
 
 Scope: everything in section 14, plus an `examples/serve` app with run
 instructions for an SSH forward and `cloudflared`. Proxy configs are
 published only once verified on a real setup.
 
 **Notes:**
+- Reload recipe (decided with the user before this session): triggers as in
+  10.4 (1001, or a give-up right after a wake event; never 4000), but the
+  page does not reload at once: it waits 2 s, then polls
+  `fetch(location.href, {cache: "no-store", redirect: "manual"})` every
+  2 s and reloads on `ok` or `type === "opaqueredirect"`; network errors and
+  5xx keep polling, and a successful reconnect stops the poll.
+- The cloudflared quick tunnel is documented (guide and example) and marked
+  "not yet verified": `cloudflared` is not installed on the session machine.
+  Tailscale Serve, nginx, Caddy, and Cloudflare Tunnel with Access are only
+  drafts in 13.8; section 14 updated (16.2). The section 12 note about
+  nginx's `Upgrade` / `Connection` headers is generic in the guide (no
+  proxy named).
+- Section 10.1 described the rejection texts of a final close wrongly; the
+  code (pinned by the harness and the frozen reference) is unchanged, 10.1
+  is corrected, and the guide documents what the shim does (16.1).
+- Gap documented, not changed: a restart first noticed by an ordinary
+  reconnect round (not a wake) ends dormant, so the page reloads only after
+  the next wake event (16.1; guide, "Reloading after a server restart").
+- Beyond section 14 (all agreed before the session): the Lifecycle,
+  Multiple windows, Assets, `startApp` parameters, Security, and `neel.js`
+  rejection-list updates; README Features bullet, security line, Examples
+  entry; guide Contents, "Running the examples", "The examples". Also,
+  my additions: `erLastWindowClosed` / `erStartupTimeout` marked local-only,
+  the `startPath`, `port`, and hook rows of the parameter table, a warning
+  that a quick tunnel is public, and the stresstest page's "any code but
+  1000/1001" (now with 4000) and its quoted close message (now the status
+  text the page shows).
+- `examples/serve` choices of mine: the page also shows when it was loaded
+  and a reconnect counter (so the manual checks can tell a reload from a
+  reconnect), keeps unsaved edits when a reconnect reloads the note, asks
+  for confirmation before "Stop server", and stops with
+  `neel.stopServer.send()` (no reply to lose to the shutdown race). The
+  Nim side quits with the message on a `ValueError` or `OSError` from
+  `startApp` (`ValueError: neel: allowedOrigins entry ...`), exit code 1.
+- Module headers: the three "Task N" leftovers (`frontend.nim`,
+  `window.nim` twice) are gone; `neel.nim`'s route-list sentence now covers
+  serve mode's hosts, origins, and cross-site navigations, and its
+  `testhooks` sentence the ping observer. `server.nim` needed nothing.
+- Checked in the session: all four examples compile (debug; `serve` also
+  release), binaries and nimcache under `$env:TEMP`. `serve` ran in debug
+  and release, driven by an ad-hoc raw-socket Node script (not in the
+  repo): the startup line, `GET /` 200 (index.html), `/neel/no-browser`
+  404, `Host: localhost:5359` 403, the shim rendered with `SERVE = true`,
+  the `/ws` upgrade (101), `serverInfo` / `saveNote` / `getNote`, then
+  `stopServer` gave a 1001 close and `serve exited: erQuit` (release: exit
+  code 0). Also: `--port=abc`, an unknown option, `https://x.com/`, and a
+  taken port each exit 1 with a one-line message (`OSError: Only one usage
+  of each socket address ...`); `--port=5360 https://Notes.Example.com:443
+  http://localhost:5360` prints `(allowed origins: https://notes.example.com,
+  http://localhost:5360)` and accepts `Host: localhost:5360`. `node --check`
+  passes on `web/main.js`.
+- Not checked in the session: the page in a real browser (no browser
+  automation here). Its connection states and the reload recipe are the
+  13.8 serve rows.
 
+Manual checks: the whole of 13.8 (final pass), in particular the
+`examples/serve` rows on all three OSes, the browser checks from 13.6, and
+the proxy and phone rows.
 
 ### 13.8 Manual verification
 
 Run by the user on each OS in the final pass after step 7 (13.0). Earlier
 checkpoints fill some rows in early, marked with the step they were run
 after; the final pass re-runs them. Record results here (`pass`, `fail` with
-a section 16 entry, or `n/a`).
+a section 16 entry, or `n/a`). Each row's name matches a procedure below.
+
+**Setup, once per OS.** From the repository root, in a terminal:
+
+```
+nim c examples/serve/serve.nim
+nim c examples/filepicker/filepicker.nim
+nim c examples/roundtrip/roundtrip.nim
+nim c examples/stresstest/stresstest.nim
+```
+
+These are debug builds; each binary lands next to its source. The
+procedures write `./examples/serve/serve`; on Windows that is
+`.\examples\serve\serve.exe` (likewise for the others). Exit status:
+`echo $?` on macOS and Linux, `$LASTEXITCODE` in PowerShell. A kill is
+`kill -9 <pid>` on macOS and Linux and `Stop-Process -Id <pid> -Force` on
+Windows. DevTools: F12 or Ctrl+Shift+I (Cmd+Opt+I on macOS), also in an
+app-mode window. Browser: Chrome or Edge unless a row says otherwise.
+
+The `examples/serve` page shows a status line (`connected`,
+`connection lost (close code N), reconnecting`, `not connected; reconnects
+when ...` = dormant, `opened on another device` with a "Use it here"
+button, `... Waiting for the server; this page reloads when it answers.`),
+the line `page loaded <time>, reconnects: <n>` (a reload resets both, a
+reconnect only increments the counter), and the server's pid and start
+time (they change only when the server restarts). The note lives in memory
+only, so a restart empties it.
+
+Console probe, pasted into the DevTools console of a page under test (from
+13.6):
+
+```js
+neel.onclose((c, r) => console.log("onclose", c, r));
+neel.onreconnect(() => console.log("onreconnect"));
+const probe = () => neel.call("x").then(
+  (v) => console.log("ok", v), (e) => console.log(e.name, e.message));
+```
+
+`probe()` answers `NeelUnknownProcError no exposed proc named 'x'` while
+connected, `NeelDisconnectedError neel: not connected; reconnects when the
+page becomes visible or goes online` while dormant, and
+`NeelDisconnectedError neel: connection is closed` once terminated.
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` passes | pass (after step 6) | pass (after step 6) | pass (after step 6) |
-| Local mode: the three examples behave as before (open, call, second window, close, exit after the grace period) | | | |
-| Local mode, fixed port: a browser tab at the app's URL displaces the app window (4000, no reconnect) | | | |
+| `nimble test` passes (node test `[OK]`, not `[SKIPPED]`) | pass (after step 6) | pass (after step 6) | pass (after step 6) |
+| Local: the three examples behave as before | | | |
+| Local: fixed port, a browser tab displaces the app window (4000) | | | |
+| Local: Ctrl-C ends a local-mode app the old way | | pass (after step 4) | |
+| Local: the shim's give-up is still terminal | | | |
 | Serve: starts without a browser, prints the startup line | | | |
-| Serve: page loads at `http://127.0.0.1:<port>` | | | |
-| Serve: a second tab displaces the first (4000, no reconnect) | | | |
+| Serve: page loads at `http://127.0.0.1:<port>`, the note round-trips | | | |
+| Serve: a second tab displaces the first (4000, no reconnect, no loop) | | | |
 | Serve: Ctrl-C exits cleanly | pass (after step 4) | pass (after step 4) | pass (after step 5) |
 | Serve: `kill -TERM` exits cleanly | pass (after step 4) | n/a | pass (after step 5) |
+| Serve: a second signal exits at once (130 / 143) | pass (after step 4) | n/a | pass (after step 5) |
+| Serve: Ctrl-Break exits cleanly | n/a | pass (after step 4) | n/a |
 | Serve: closing the console window exits cleanly | n/a | pass (after step 4) | n/a |
 | Serve: a second app on the same fixed port fails at start; a restart right after Ctrl-C binds | pass (after step 5) | pass (after step 5) | pass (after step 5) |
-| Serve: idle behind a proxy for 5 minutes without a reconnect | | | |
+| Serve: "Stop server", then a restart: the page reloads by itself | | | |
 | Serve: dormant shim wakes (DevTools offline toggle) | | | |
+| Serve: server restart while dormant: the failed wake reloads the page | | | |
+| Serve: SSH forward from another machine; `localhost` refused | | | |
+| Serve: an `--app:gui` build starts and serves | n/a | | n/a |
+| Serve: idle behind a proxy for 5 minutes without a reconnect | | | |
 
-Once, on Linux (the realistic deployment target):
+Once, on Linux (the realistic deployment target; the server runs on Linux,
+the browsers anywhere):
 
 | Check | Result |
 |---|---|
+| cloudflared quick tunnel: the page works over `https` / `wss` | |
 | Behind Cloudflare Tunnel with Access: first load after login works (confirms 2.1) | |
 | Phone: open, lock for 5 minutes, unlock: the page reconnects by itself | |
+| Phone and laptop share the note; "Use it here" takes the session back | |
 | Server restart: the documented reload recipe recovers the page | |
+| Draft: Tailscale Serve | |
+| Draft: nginx (with the `Upgrade` / `Connection` headers) | |
+| Draft: Caddy | |
+
+#### Procedures
+
+**`nimble test` passes.** `nimble test` in the repository root, with `node`
+on PATH. Expect `Success: All tests passed` and `[OK]` for "serve, local,
+and the frozen reference shim in a scripted browser". Report any failure
+verbatim (the harness report is printed under the failed check).
+
+**Local: the three examples behave as before.**
+- `./examples/filepicker/filepicker`: an app window opens. "Pick a random
+  entry" with `Desktop` shows a name; `nosuchdir` shows
+  `MissingDirectoryError: no such directory: ...`. Close the window: the
+  process ends about 3 s later.
+- `./examples/roundtrip/roundtrip`: `neel.sum(...)` shows `15`;
+  `neel.askPage(...)` shows `the page answered: what now? -> forty-two`.
+  "openSecond" opens window 2 and the terminal prints `window 2 opened`.
+  "askSecond": answer the prompt (the value comes back), Cancel
+  (`PromptCancelled`), wait 5 s (`NeelTimeoutError`), close window 2 while
+  the prompt is up (`NeelDisconnectedError`), ask again
+  (`NeelNoWindowError`). "listWindows" lists the open windows. Close
+  window 1: `window 1 closed` and the process ends about 3 s later.
+- `./examples/stresstest/stresstest`: press every section's buttons; no
+  log line reads `FAIL` or `UNEXPECTED`. Then the page's own manual checks
+  "Refresh", "Close this browser window", and "Quit button" (each in a new
+  run); "Reconnect and give up" and "Refresh after a restart" belong to the
+  rows below.
+
+**Local: fixed port, a browser tab displaces the app window (4000).**
+`./examples/stresstest/stresstest 8765`. In a normal browser tab open
+`http://127.0.0.1:8765/?window=1`. Expect the app window's status
+`closed (close code 4000, neel.connected = false)` and no further `/ws`
+requests from it (its DevTools Network panel); the tab works ("whoAmI()"
+gives 1). Then the page's "Refresh after a restart" check: kill the app
+(the pid is in asJson()), wait for the status "closed (close code 1006
+...)", start `./examples/stresstest/stresstest 8765` again, refresh the old
+window: it works again, and the window the restart opened reads
+`closed (close code 4000, ...)`.
+
+**Local: Ctrl-C ends a local-mode app the old way.**
+`./examples/roundtrip/roundtrip`, then Ctrl-C in its terminal. Expect Nim's
+`SIGINT: Interrupted by Ctrl-C.` and the process gone at once, with no
+`window 1 closed` line (no Neel shutdown).
+
+**Local: the shim's give-up is still terminal.** The stresstest page's
+"Reconnect and give up" check: `./examples/stresstest/stresstest`, note the
+pid from asJson(), paste the console probe into the app window's DevTools,
+kill the process (the browser window stays). Expect `onclose 1006 true`
+five times over about 8 s, then `onclose 1006 false`; `probe()` gives
+`neel: connection is closed`. Then toggle DevTools Network throttling to
+"Offline" and back, and minimize and restore the window: no new `/ws`
+request, no `onreconnect`, no status change. (Going offline instead of
+killing does not work for this row: the server sees the close and exits
+after its 3 s grace period, which closes the window before the 7.75 s
+give-up.)
+
+**Serve: starts without a browser, prints the startup line.**
+- `./examples/serve/serve`: no browser opens; stdout shows exactly
+  `neel: serving http://127.0.0.1:5359 (allowed origins: none)`. Ctrl-C.
+- `./examples/serve/serve --port=8080 HTTPS://Notes.Example.com:443
+  http://localhost:8080`: `neel: serving http://127.0.0.1:8080 (allowed
+  origins: https://notes.example.com, http://localhost:8080)`. Ctrl-C.
+- `./examples/serve/serve https://x.com/`: one line, `ValueError: neel:
+  allowedOrigins entry "https://x.com/" has a path (a trailing / counts as
+  one); expected http://host[:port] or https://host[:port]`, exit status 1,
+  no startup line.
+
+**Serve: page loads at `http://127.0.0.1:<port>`, the note round-trips.**
+`./examples/serve/serve`, open `http://127.0.0.1:5359`. Expect the status
+`connected`, the pid and start time, `never saved`. Type a note and press
+Save: `saved <time>`. Reload: the note is still there. Also:
+`http://127.0.0.1:5359/neel/no-browser` is a 404, and
+`http://localhost:5359` is a 403 reading `neel: refused: the Host header
+must be 127.0.0.1:5359`. Leave the tab closed for longer than 30 s: the app
+keeps running (no grace period).
+
+**Serve: a second tab displaces the first (4000, no reconnect, no loop).**
+With the app running and tab A connected (console probe pasted), open the
+same URL in tab B. B shows `connected` and A's note. A shows `opened on
+another device` and "Use it here"; its console shows `onclose 4000 false`;
+its Network panel shows no further `/ws` request; `probe()` gives `neel:
+connection is closed`. Edit and save in B, then press "Use it here" in A:
+A reloads, shows B's edit, and B now reads `opened on another device`.
+Wait 30 s: neither tab reloads or reconnects by itself.
+
+**Serve: Ctrl-C exits cleanly.** `./examples/serve/serve`, open the page,
+Ctrl-C in the terminal. Expect `serve exited: erQuit`, exit status 0, and
+the page's `The server stopped. Waiting for the server; ...` (it received
+the 1001). (The step-4 test app checks `onWindowClose` as well; see 13.4.)
+
+**Serve: `kill -TERM` exits cleanly** (macOS, Linux). As the previous row,
+but `kill -TERM <pid>` from another terminal (the pid is on the page).
+Same result.
+
+**Serve: a second signal exits at once (130 / 143)** (macOS, Linux). Needs
+a hanging shutdown, so it uses the step-4 test app with `NEEL_HANG=1`
+(13.4, manual checks): Ctrl-C, wait for `closed.txt`, Ctrl-C again. Expect
+an immediate exit with status 130 and no `returned` line; with
+`kill -TERM` twice, 143.
+
+**Serve: Ctrl-Break exits cleanly** (Windows). In a console, start
+`.\examples\serve\serve.exe`, open the page, press Ctrl-Break (on a machine
+without a Break key, use the `GenerateConsoleCtrlEvent` recipe of 16.1).
+Expect `serve exited: erQuit`, exit status 0, the page waiting for the
+server.
+
+**Serve: closing the console window exits cleanly** (Windows). From
+PowerShell, `Start-Process .\examples\serve\serve.exe` (a new console),
+open the page, close that console with its X button. Expect the process
+gone within about 2 s (`Get-Process serve` finds nothing) and the page's
+`The server stopped. ...` (the 1001 went out before Windows ended the
+process). The `serve exited` line may not appear.
+
+**Serve: a second app on the same fixed port fails at start; a restart
+right after Ctrl-C binds.** With `./examples/serve/serve` running and its
+page connected, start a second `./examples/serve/serve` in another
+terminal. Expect one `OSError: ...` line (Windows: `Only one usage of each
+socket address ...`; macOS and Linux: `Address already in use`), exit
+status 1, no startup line; the first keeps serving (the page still saves).
+Ctrl-C the first and start it again at once: it prints the startup line.
+
+**Serve: "Stop server", then a restart: the page reloads by itself.**
+`./examples/serve/serve`, open the page, paste the console probe, note the
+pid. Press "Stop server" and confirm. Expect `serve exited: erQuit` and exit
+status 0 in the terminal; in the page `onclose 1001 false` and `The server
+stopped. Waiting for the server; this page reloads when it answers.`; in
+the Network panel a failing request for `/` every 2 s, and no reload. Wait
+10 s, then start `./examples/serve/serve` again. Expect the page to reload
+within about 2 s: a new `page loaded` time, `reconnects: 0`, a new pid and
+start time, an empty note. Repeat with Ctrl-C instead of the button: same
+result.
+
+**Serve: dormant shim wakes (DevTools offline toggle).** The 13.6 check,
+with `examples/serve`. Open the page, paste the console probe. In the
+Network panel set throttling to "Offline". Expect `onclose 1006 true` five
+times over about 8 s, then `onclose 1006 false`, the status `not connected;
+reconnects when ...`, and no further `/ws` request. `probe()` gives the
+dormant message at once. Set throttling back to "No throttling": one new
+`/ws` request at once, `onreconnect`, status `connected`, `reconnects: 1`,
+the `page loaded` time unchanged, and `probe()` answered by the server
+again. Repeat, but wake by switching to another tab and back while still
+offline: one round of six failed attempts (five `true`, one `false`), the
+shim dormant again (`probe()` gives the dormant message), and the page
+showing `The server refused the reconnect (it may have restarted). Waiting
+for the server; ...` (a failed wake). Go back online: expect `onreconnect`
+and the status `connected` without a reload (`page loaded` unchanged); a
+reload instead is also correct if the page's poll answered first. If going
+offline does not close the open WebSocket (DevTools versions differ),
+record it in 16.1 and use Firefox's "Offline" throttling, or an SSH forward
+(next rows) killed and restarted as the outage.
+
+**Serve: server restart while dormant: the failed wake reloads the page.**
+Get the page dormant as in the previous row. Ctrl-C the server (the page is
+not connected, so it gets no 1001) and start it again (new pid). Set
+throttling back to "No throttling". Expect six `/ws` attempts answered 403
+in the Network panel, `onclose 1006 false`, the page's `The server refused
+the reconnect ...`, and within about 2 s a reload: new `page loaded` time,
+new pid and start time, status `connected`. (Without the example's recipe,
+13.6 expected the page to stay dormant until a manual reload.)
+
+**Serve: SSH forward from another machine; `localhost` refused.** The
+server runs `./examples/serve/serve` on machine A (an SSH server: macOS
+with Remote Login on, Linux with `sshd`, Windows only with OpenSSH Server
+installed, otherwise `n/a`). On machine B: `ssh -N -L 5359:127.0.0.1:5359
+<user>@<A>`, then open `http://127.0.0.1:5359` there. Expect the page to
+work (note round-trips). On B, `http://localhost:5359` is a 403 (`neel:
+refused: the Host header must be 127.0.0.1:5359`). Restart the app on A as
+`./examples/serve/serve http://localhost:5359`: now `http://localhost:5359`
+on B works too. Killing the `ssh` process and starting it again is an
+outage with the same token: the page goes dormant and wakes on a tab switch
+(an alternative for the dormant row).
+
+**Serve: an `--app:gui` build starts and serves** (Windows; the 13.2
+check). `nim c -d:release --app:gui -o:$env:TEMP\serve-gui.exe
+examples/serve/serve.nim`, then `& $env:TEMP\serve-gui.exe`. Expect no
+console window, the page working at `http://127.0.0.1:5359`, and "Stop
+server" ending the process (`Get-Process serve-gui` finds nothing).
+
+**Serve: idle behind a proxy for 5 minutes without a reconnect.** Through
+the cloudflared quick tunnel (below) or any of the drafts. Open the page at
+the public URL, paste the console probe, leave the tab in the foreground
+untouched for 5 minutes. Expect no `onclose` line, the status `connected`,
+`reconnects: 0`. Optional: Firefox's WebSocket inspector (Network, the
+`/ws` request, with control frames enabled in its filter) shows a ping and
+its pong about every 30 s. Without pings Cloudflare would close the
+connection after about 100 s and nginx after 60 s.
+
+**cloudflared quick tunnel: the page works over `https` / `wss`.** On the
+Linux server: `cloudflared tunnel --url http://127.0.0.1:5359` and note the
+`https://<name>.trycloudflare.com` URL it prints. Opening it now gives a
+502 (no app yet). Start `./examples/serve/serve
+https://<name>.trycloudflare.com`; the startup line lists that origin. Open
+the URL on a laptop: the page works; in the Network panel `/ws` is
+`wss://<name>.trycloudflare.com/ws?...` with status 101. Restart the app
+without the argument: the page is a 403 reading `neel: refused: the Host
+header must be 127.0.0.1:5359`, since cloudflared forwards the public `Host`
+(confirms 2.3 for cloudflared). If this all passes, drop "not yet verified"
+from the guide's and the example's cloudflared text.
+
+**Behind Cloudflare Tunnel with Access: first load after login works
+(confirms 2.1).** Needs a Cloudflare account with a domain and Zero Trust.
+Draft, not yet verified:
+
+```
+cloudflared tunnel login
+cloudflared tunnel create neel-serve
+cloudflared tunnel route dns neel-serve notes.<domain>
+```
+
+`~/.cloudflared/config.yml`:
+
+```yaml
+tunnel: neel-serve
+credentials-file: /home/<user>/.cloudflared/<tunnel-id>.json
+ingress:
+  - hostname: notes.<domain>
+    service: http://127.0.0.1:5359
+  - service: http_status:404
+```
+
+Then `cloudflared tunnel run neel-serve`. In the Zero Trust dashboard add an
+Access application (self-hosted, domain `notes.<domain>`) with a policy
+that allows your e-mail address. Start `./examples/serve/serve
+https://notes.<domain>`. In a private browser window, with DevTools'
+"Preserve log" on, open `https://notes.<domain>`: log in on the Access page
+(one-time PIN). Expect the redirect back to load the app (no 403); the
+document request to `notes.<domain>` after the redirect from
+`<team>.cloudflareaccess.com` shows `Sec-Fetch-Site: cross-site` and status
+200; `/ws` is 101. Then the idle row through this setup. Optional
+(`opaqueredirect`): in a fresh private window, log in, let the page connect,
+then revoke the session in the dashboard (or wait out a short session
+duration set on the application), stop the server with Ctrl-C and start it
+again: the page's poll gets the Access redirect and reloads into the login
+page instead of waiting forever.
+
+**Phone: open, lock for 5 minutes, unlock: the page reconnects by itself.**
+Through the quick tunnel or the Access setup. Open the page on the phone,
+lock it for 5 minutes, unlock. Expect the status back to `connected` within
+a few seconds, `reconnects` at least 1, and the `page loaded` time
+unchanged (no reload). If the browser reloaded the tab instead (the
+`page loaded` time changed), record it in 16.1; the page still works.
+
+**Phone and laptop share the note; "Use it here" takes the session back.**
+Save a note on the laptop; open the app on the phone: it shows the note and
+the laptop reads `opened on another device`. Edit and save on the phone;
+press "Use it here" on the laptop: it shows the phone's edit, and the phone
+reads `opened on another device`.
+
+**Server restart: the documented reload recipe recovers the page.** Through
+the tunnel, on the laptop and on the phone:
+- Connected page: Ctrl-C the server. The page shows `The server stopped.
+  Waiting ...`; while the app is down the poll gets 502 from cloudflared and
+  keeps waiting. Start the app again (same origin, same cloudflared): the
+  page reloads by itself within about 2 s (new pid).
+- Dormant page: make the page dormant (on the phone, lock it until the
+  connection is gone; on the laptop, the DevTools offline toggle), restart
+  the server, then wake the page (unlock, or go online). Expect the failed
+  wake, then a reload (new pid). If the page shows `not connected; reconnects
+  when ...` instead (its connection died unnoticed and the restart was
+  first seen by an ordinary reconnect round, 16.1), switch away and back
+  once: it then reloads.
+
+**Draft: Tailscale Serve.** Not yet verified. On the server, with Tailscale
+up:
+
+```
+tailscale serve --bg http://127.0.0.1:5359
+tailscale serve status        # shows https://<machine>.<tailnet>.ts.net
+./examples/serve/serve https://<machine>.<tailnet>.ts.net
+```
+
+Open the URL from another device on the tailnet: the page works, `/ws` is
+101; then the idle row. `tailscale serve reset` turns it off. Record
+whether Tailscale forwards the public `Host` or rewrites it (both are
+accepted).
+
+**Draft: nginx (with the `Upgrade` / `Connection` headers).** Not yet
+verified. A site, with a certificate for the name:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name notes.example.com;
+    ssl_certificate     /etc/ssl/notes/fullchain.pem;
+    ssl_certificate_key /etc/ssl/notes/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:5359;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+Start `./examples/serve/serve https://notes.example.com`. Expect the page
+to work (nginx sends `Host: 127.0.0.1:5359` by default, which passes; with
+`proxy_set_header Host $host;` the public host passes too), then the idle
+row (nginx's `proxy_read_timeout` is 60 s, so this is the real test of the
+pings). Remove the two `proxy_set_header` lines and reload nginx: the page
+loads but `/ws` fails (Neel answers a plain `GET /ws` with 403) and the
+shim goes dormant, which is why the guide asks for the headers. For a
+quick test without a certificate: `listen 8081;` and the origin
+`http://<server name>:8081`.
+
+**Draft: Caddy.** Not yet verified. `Caddyfile`:
+
+```
+notes.example.com {
+    reverse_proxy 127.0.0.1:5359
+}
+```
+
+Caddy obtains the certificate, proxies WebSockets without extra
+configuration, and forwards the public `Host`. Start
+`./examples/serve/serve https://notes.example.com`; expect the page to
+work, then the idle row. For a quick test without a domain: `caddy
+reverse-proxy --from :8082 --to 127.0.0.1:5359` and the origin
+`http://<server name>:8082`.
 
 ---
 
@@ -1249,7 +1707,12 @@ Once, on Linux (the realistic deployment target):
   displacement (code 4000); hooks; the security model (section 12); the
   reconnect behavior and the reload recipe; known-good proxy setups
   (cloudflared, Tailscale Serve, nginx, Caddy, SSH forward), each verified on
-  a real setup before publishing.
+  a real setup before publishing. As shipped in step 7 (agreed with the
+  user): the SSH forward and the cloudflared quick tunnel, the latter marked
+  "not yet verified"; Tailscale Serve, nginx, Caddy, and Cloudflare Tunnel
+  with Access exist only as drafts in 13.8 and move into the guide once
+  verified. The guide names no proxy in the section 12 header note; it says
+  generically that some proxies need the `Upgrade` / `Connection` headers.
 - **Guide updates elsewhere:** `startApp` parameter table (two rows); the
   `neel.onclose` row (code 4000); the Caveats entry "Neither side closes an
   idle connection on its own" (true locally, not behind proxies; serve mode
@@ -1472,6 +1935,49 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   `NeelUnknownProcError` while connected, rejected at once with the dormant
   message while dormant and with `neel: connection is closed` once
   terminated. Used by the 13.6 manual checks.
+- 2026-10-16, step 7, Windows: the session ran on Windows 11; `nimble test`
+  passed with the node shim test `[OK]`, and `nim c src/neel.nim` passed.
+  All four examples compiled; `examples/serve` ran in debug and release.
+  `cloudflared` is not installed on this machine, so the quick tunnel stays
+  "not yet verified".
+- 2026-10-16, step 7, all: section 10.1 (and the step 3 notes) said a final
+  close rejects pending and later calls with `neel: server closed the
+  connection (close code N)`. The shim never did that: `ws.onclose` calls
+  `failPending("neel: connection lost (close code N)")` before the
+  terminating branch, and later calls get `neel: connection is closed`.
+  `terminate`'s reason only reaches queued calls and an unsettled
+  `neel.ready`, and neither exists when the close arrives on an open socket.
+  The harness and the frozen reference agree with the code. Docs only: 10.1
+  corrected, the guide documents the real texts, and the stresstest page no
+  longer quotes the message (it quotes its own status line).
+- 2026-10-16, step 7, all: the reload recipe misses one case. When the
+  connection died unnoticed (a phone locked while the server restarted, so
+  the 1001 never arrived), the page's first reconnect round after unlocking
+  is an ordinary one, not a wake; its 403s end it dormant, and the page
+  reloads only after the next wake event (a tab switch or another unlock),
+  which then fails as a wake. Documented in the guide and in 13.8, not
+  changed (the triggers are the agreed ones of 10.4).
+- 2026-10-16, step 7, all: the 13.6 check "local mode give-up still
+  terminal" cannot be run with the DevTools offline toggle: the server sees
+  the close, a debug build's 3 s grace period ends the app, and teardown
+  closes the browser window before the shim's 7.75 s of attempts are over.
+  13.8 uses a killed server instead (the stresstest page's "Reconnect and
+  give up"); a killed app leaves its browser window open.
+- 2026-10-16, step 7, all: `examples/serve`'s note is a module-level string
+  written by whichever worker saved it, so it outlives that worker once the
+  pool shuts down. That is the cross-thread free Nim >= 2.2.12 handles (and
+  Neel requires); no Neel state is involved. The example also keeps pid and
+  start time in plain `int` / `int64` globals written before `startApp`, so
+  only the note needs `{.cast(gcsafe).}`.
+- 2026-10-16, step 7, all: `std/parseopt` with default settings takes an
+  option's value only after `=` or `:`, so `serve --port 8080` reads an
+  empty value and the example exits with `serve: --port expects a number,
+  got ""`. The docs write `--port=N`.
+- 2026-10-16, step 7, Windows: ad-hoc HTTP checks from Node: `fetch` (undici)
+  drops a `Host` header silently, so a wrong-`Host` request needs
+  `node:http`. The `/ws` upgrade with a chosen `Origin`, and the calls over
+  it, were done on a raw `net` socket (hand-written handshake and masked
+  frames), which controls every header.
 
 ### 16.2 Deviations from the spec
 
@@ -1540,6 +2046,19 @@ Format: `YYYY-MM-DD, step N: what changed and why; spec sections updated`.
   (`tests/fixtures/shim_reference.js`). Agreed with the user; test-only, no
   runtime or Nimble dependency. Step 6 also touches `neel.nim` (the call
   site and one header line) and `t_neel`. The 13.6 Touches line updated.
+- 2026-10-16, step 7: proxy setups in the shipped docs are the SSH forward
+  and the cloudflared quick tunnel, the latter marked "not yet verified";
+  Tailscale Serve, nginx, Caddy, and Cloudflare Tunnel with Access are
+  drafts in 13.8 only, to move into the guide once the user verifies them.
+  Section 12's nginx header note appears in the guide without naming a
+  proxy. Agreed with the user. Section 14 updated.
+- 2026-10-16, step 7: the reload recipe waits for the server before
+  reloading (poll every 2 s, reload on `ok` or `opaqueredirect`; errors and
+  5xx keep polling) instead of reloading at once. Agreed with the user.
+  Section 10.4 updated.
+- 2026-10-16, step 7: section 10.1's description of the final-close
+  rejection texts corrected to what the shim has always done (16.1). No
+  code change; the guide follows the code.
 
 ### 16.3 Gotchas
 
@@ -1682,3 +2201,18 @@ Rules every step must respect. The first entries come from the existing code.
 - **`renderNeelJs` takes `serve` explicitly.** It has no default; a new
   caller (or test) states the mode. The served shim's mode comes from
   `AppState.serve`.
+- **The docs quote texts verbatim.** `README.md`, `docs/GUIDE.md`, the
+  `examples/serve` header, and 13.8 quote the startup line, the
+  `checkServeParams` and `normalizeOrigin` `ValueError`s, the
+  `NeelServeModeError` from `openWindow`, the 403 texts, and the shim's
+  rejection messages (`connection lost`, `connection is closed`, `gave up
+  reconnecting`, the dormant one). Changing any of them means updating
+  those places too (and `shim_harness.js` for the shim's).
+- **The shim's wake listeners run before the page's.** The shim adds its
+  `visibilitychange` and `online` listeners when `/neel.js` runs, before the
+  page's scripts, so a page listener on the same event finds the shim
+  already reconnecting: a call it makes is queued, not rejected as dormant.
+  The guide states this. The recipe's flag does not depend on it (it reads
+  the page's own state, which changes only in `onclose`), but moving the
+  shim's listeners later (to `DOMContentLoaded`, say) changes what such
+  calls do.

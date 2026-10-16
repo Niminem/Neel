@@ -1,7 +1,7 @@
 ## window.nim - `Window` type, connection <-> window mapping, and app lifecycle.
 ##
-## A `Window` is a small copyable handle (`id` plus the `js*: JsProxy` field
-## Task 9 requires, so `win.js.foo(...)` works from any thread). The state
+## A `Window` is a small copyable handle (`id` plus a `js*: JsProxy` field,
+## so `win.js.foo(...)` works from any thread). The state
 ## behind it is a shared-allocated record kept in a module-level table: the
 ## browser handle from `browser.nim`, the current `ConnId` (if any), one
 ## `IdAllocator` for Nim -> JS call ids, and the launch parameters. Records are
@@ -39,7 +39,7 @@
 ## the main thread until the grace period expires (`erLastWindowClosed`),
 ## `quitApp()` is called from any thread (`erQuit`), or no window ever
 ## connected within the startup timeout (`erStartupTimeout`). It never calls
-## server `shutdown` itself: Task 13's `startApp` does `waitForAppExit` ->
+## server `shutdown` itself: `startApp` does `waitForAppExit` ->
 ## `shutdown` -> `resetJsBridge` -> `teardownWindows` on the main thread.
 ## While waiting, the main thread also retires windows whose connection has
 ## been gone for a grace period (the browser window was closed by the user),

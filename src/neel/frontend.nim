@@ -19,7 +19,7 @@
 ##
 ## This module also owns the names of the `/ws` query parameters the shim
 ## sends (`TokenQueryParam`, `WindowQueryParam`) and the `/ws` path, so that
-## Task 13's upgrade handler and `neel.js` share one definition; the `static:`
+## the upgrade handler in `neel.nim` and `neel.js` share one definition; the `static:`
 ## block verifies that the shim really uses them. The route the shim itself
 ## is served at (`NeelJsPath`) lives here too, and so does `CloseDisplaced`,
 ## the close code the shim must treat as final; the `static:` block checks
