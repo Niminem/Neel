@@ -1140,7 +1140,7 @@ They do not authenticate the user.
 
 ### Setups
 
-Two setups are documented so far. Other tunnels and reverse proxies should
+Three setups are documented so far. Other tunnels and reverse proxies should
 work the same way when they meet the requirements above; they will be
 documented here once verified.
 
@@ -1182,6 +1182,27 @@ for example with `examples/serve`:
 and open the URL on the phone. When cloudflared restarts, the hostname
 changes: restart the app with the new origin and open the new URL. A quick
 tunnel is public (see above), so use it only to try things out.
+
+**Cloudflare Tunnel with Access.** For reaching the app from anywhere with a
+login in front of it: a named tunnel gives the app a fixed hostname, and
+Cloudflare Access authenticates the user before any request reaches Neel. It
+needs a domain whose DNS Cloudflare runs and Zero Trust (both Free plans
+work). With an Access application for `notes.example.com` (an Allow policy on
+your e-mail address) and a tunnel whose `config.yml` sends that hostname to
+`http://127.0.0.1:8080`:
+
+```
+cloudflared tunnel run myapp
+./examples/serve/serve --port=8080 https://notes.example.com
+```
+
+The Access login redirects back from `<team>.cloudflareaccess.com`, which
+makes the first page load cross-site; serve mode accepts that for top-level
+navigations. With the reload recipe, a page whose login has expired reloads
+into the login page when the app comes back; a reload that signs in silently
+while the app is still down lands on Cloudflare's 502 page and needs a
+manual reload. Step by step, including the dashboard, costs, and removal:
+[Cloudflare Tunnel with Access](CLOUDFLARE_ACCESS.md).
 
 ## Caveats
 

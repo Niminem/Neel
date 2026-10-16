@@ -3,8 +3,8 @@
 Status: decisions settled (reviewed 2026-10-14); steps 1–7 done
 (2026-10-16); the final pass (13.8) is done on Windows, macOS, and Linux
 (2026-10-16), with nothing failed except the Windows debug-build Ctrl-C
-crash in Nim's own handler (documented, 16.1). Still open: the Cloudflare
-Tunnel with Access row, moved to a separate session on Windows (16.2).
+crash in Nim's own handler (documented, 16.1). The Cloudflare Tunnel with
+Access row passed in a separate session on Windows (2026-10-16, 16.1).
 Tailscale Serve, nginx, and Caddy remain unverified drafts.
 Progress is tracked per step in section 13; findings, deviations, and gotchas
 are logged in section 16.
@@ -1374,7 +1374,7 @@ the browsers anywhere):
 | Check | Result |
 |---|---|
 | cloudflared quick tunnel: the page works over `https` / `wss` | pass (cloudflared 2026.10.1 release binary; 502, then 200 and `/ws` 101, then 403 without the origin; "not yet verified" dropped from the guide and `examples/serve`) |
-| Behind Cloudflare Tunnel with Access: first load after login works (confirms 2.1) | pending: separate session, server on Windows, on a new domain moved to Cloudflare (16.2) |
+| Behind Cloudflare Tunnel with Access: first load after login works (confirms 2.1) | pass (run on Windows, 16.2; named tunnel, cloudflared 2026.10.1, Chrome 155 Incognito: the document after the Access redirect was `cross-site` / `navigate` / `document` and 200, `/ws` 101; idle 2 min by the user's choice, one WebSocket from `cloudflared` held over 4 min; optional `opaqueredirect` check passed on the second run, 16.1) |
 | Phone: open, lock for 5 minutes, unlock: the page reconnects by itself | pass (Android Chrome, quick tunnel; `reconnecting` briefly on unlock, then `connected`, `reconnects: 1`, no reload) |
 | Phone and laptop share the note; "Use it here" takes the session back | pass (Android Chrome and the Windows laptop, quick tunnel) |
 | Server restart: the documented reload recipe recovers the page | pass (quick tunnel; connected page on the laptop and on Android Chrome: 502 while down, reload after the restart; dormant page on the phone: the documented gap, reloaded after one switch away and back, 16.1) |
@@ -1586,7 +1586,7 @@ from the guide's and the example's cloudflared text.
 
 **Behind Cloudflare Tunnel with Access: first load after login works
 (confirms 2.1).** Needs a Cloudflare account with a domain and Zero Trust.
-Draft, not yet verified.
+Verified on Windows (2026-10-16, 16.1).
 
 Prerequisites (from the Linux pass, 16.2). A named tunnel and Access need
 the hostname's DNS on Cloudflare; on the Free plan that means the whole
@@ -1604,11 +1604,17 @@ on its DNS:
   `winget install --id Cloudflare.cloudflared`, the configuration lives in
   `%USERPROFILE%\.cloudflared\`, `credentials-file` is
   `C:\Users\<user>\.cloudflared\<tunnel-id>.json`, and the app is
-  `.\examples\serve\serve.exe`.
+  `.\examples\serve\serve.exe`. cloudflared 2026.10.1 on Windows did not
+  find `config.yml` there by itself (`tunnel ingress validate`: "No
+  configuration file was found"), so pass it explicitly:
+  `cloudflared --config $env:USERPROFILE\.cloudflared\config.yml tunnel run
+  neel-serve`. A new shell may be needed after the winget install before
+  `cloudflared` is on PATH.
 - These leave a tunnel, a DNS record, and an Access application in the
   account; delete them afterwards if unwanted
   (`cloudflared tunnel delete neel-serve`, then the DNS record and the
-  application in the dashboard).
+  application in the dashboard). After a killed `cloudflared`, run
+  `cloudflared tunnel cleanup neel-serve` before the delete (16.1).
 
 ```
 cloudflared tunnel login
@@ -1635,12 +1641,18 @@ https://notes.<domain>`. In a private browser window, with DevTools'
 (one-time PIN). Expect the redirect back to load the app (no 403); the
 document request to `notes.<domain>` after the redirect from
 `<team>.cloudflareaccess.com` shows `Sec-Fetch-Site: cross-site` and status
-200; `/ws` is 101. Then the idle row through this setup. Optional
+200; `/ws` is 101. Open DevTools and turn on "Preserve log" before
+opening the URL: a reload afterwards sends a same-origin request and loses
+the one that matters. Then the idle row through this setup. Optional
 (`opaqueredirect`): in a fresh private window, log in, let the page connect,
-then revoke the session in the dashboard (or wait out a short session
-duration set on the application), stop the server with Ctrl-C and start it
+then end the login: Zero Trust, Team & Resources, Users, the user, **Revoke
+session** (or wait out a short session duration set on the application).
+The application's "Revoke existing tokens" alone is not enough: the login
+on `<team>.cloudflareaccess.com` survives it and signs the reload back in
+silently (16.1). Stop the server ("Stop server" or Ctrl-C) and start it
 again: the page's poll gets the Access redirect and reloads into the login
-page instead of waiting forever.
+page instead of waiting forever. If the browser is still signed in to the
+identity provider (Google, say), that login page signs in with one click.
 
 **Phone: open, lock for 5 minutes, unlock: the page reconnects by itself.**
 Through the quick tunnel or the Access setup. Open the page on the phone,
@@ -1741,9 +1753,13 @@ reverse-proxy --from :8082 --to 127.0.0.1:5359` and the origin
   a real setup before publishing. As shipped in step 7 (agreed with the
   user): the SSH forward and the cloudflared quick tunnel, the latter marked
   "not yet verified" until the Linux final pass verified it (2026-10-16;
-  the mark is gone from the guide and `examples/serve`); Tailscale Serve, nginx, Caddy, and Cloudflare Tunnel
-  with Access exist only as drafts in 13.8 and move into the guide once
-  verified. The guide names no proxy in the section 12 header note; it says
+  the mark is gone from the guide and `examples/serve`); Tailscale Serve, nginx, and Caddy
+  exist only as drafts in 13.8 and move into the guide once
+  verified. Every verified setup gets an entry in the guide's "Setups"; one
+  that needs dashboard steps also gets its own walkthrough doc, linked from
+  that entry and from the README's "Serve mode" section. Cloudflare Tunnel
+  with Access was verified on 2026-10-16: its guide entry links
+  `docs/CLOUDFLARE_ACCESS.md` (16.2). The guide names no proxy in the section 12 header note; it says
   generically that some proxies need the `Upgrade` / `Connection` headers.
 - **Guide updates elsewhere:** `startApp` parameter table (two rows); the
   `neel.onclose` row (code 4000); the Caveats entry "Neither side closes an
@@ -2176,6 +2192,66 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
     now seen on a real phone. The laptop's dormant case could not be made
     through the tunnel (DevTools "Offline" keeps the WebSocket open) and
     is covered by the relay row.
+- 2026-10-16, final pass, Windows: the 13.8 row "Behind Cloudflare Tunnel
+  with Access" **passed**, which confirms 2.1 on a live setup. Server:
+  `examples/serve` (debug build, Nim 2.2.12) on Windows 11, run as
+  `serve https://notes.seoscience.tech` on port 5359; a new domain
+  (`seoscience.tech`, Namecheap, nameservers moved to Cloudflare, Free plan,
+  no other records), Zero Trust Free with the team domain
+  `seoscience.cloudflareaccess.com`, a named tunnel `neel-serve`
+  (cloudflared 2026.10.1, winget), and a self-hosted Access application for
+  `notes.seoscience.tech` with one Allow policy on the user's e-mail.
+  Browser: Chrome 155, Incognito, on the same machine. Notes:
+  - Without a login, `GET https://notes.seoscience.tech/` is a 302 to
+    `https://seoscience.cloudflareaccess.com/cdn-cgi/access/login/notes.seoscience.tech?...`
+    (curl), so Access sits in front of the tunnel.
+  - After the login, the document request to `notes.seoscience.tech/`
+    that follows `<team>.cloudflareaccess.com` and
+    `/cdn-cgi/access/authorized` carried `Sec-Fetch-Site: cross-site`,
+    `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document` and got 200;
+    `/ws` was 101; the page connected, saved, and reloaded. The first
+    attempt to read the headers was lost: DevTools was opened after the
+    login, and the reload it took to see the panel is same-origin. 13.8
+    now says to open DevTools first.
+  - Idle: 2 minutes by the user's choice (above Cloudflare's reported
+    100 s), not 5: no `onclose`, `connected`, `reconnects: 0`. The server
+    saw one connection from `cloudflared` (same local port) for over
+    4 minutes, sampled with `Get-NetTCPConnection`.
+  - cloudflared on Windows did not pick up
+    `%USERPROFILE%\.cloudflared\config.yml` by default (`tunnel ingress
+    validate`: "No configuration file was found"); with `--config` it
+    validated and `tunnel run` worked. The winget install also needed a
+    PATH refresh in the existing shell.
+  - Optional `opaqueredirect` check, first run: after the application's
+    "Revoke existing tokens" and "Stop server", the page ended on
+    Cloudflare's 502 page. The HAR showed the recipe working: the poll's
+    `fetch` (`redirect: "manual"`) got a 302 to the Access login, the page
+    reloaded, the login on the team domain was still valid and redirected
+    straight back through `/cdn-cgi/access/authorized` (no login screen),
+    and the final document request reached the tunnel while the server
+    was shutting down: 502 from cloudflared. Cloudflare's error page has no
+    poll, so it stayed after the server came back. Two consequences:
+    revoking the application's tokens does not end the Access login
+    (13.8 now uses the user's "Revoke session"), and a silent re-login
+    while the server is still down lands on the proxy's 502 page, which
+    needs a manual reload (for the guide).
+  - Second run, after the user's "Revoke session" (and the application's
+    tokens again) and "Stop server": the page reloaded into the Access
+    login page. It offered "Sign in with Google", and the window was still
+    signed in to Google, so one click signed in, without a PIN. After the
+    server's restart the app loaded and connected (new pid). Pass.
+  - Teardown, used to check `docs/CLOUDFLARE_ACCESS.md` "Removing it":
+    after `cloudflared` was force-killed, `cloudflared tunnel delete
+    neel-serve` failed with `code: 1022, reason: This tunnel has active
+    connections` (Cloudflare still listed four edge connections);
+    `cloudflared tunnel cleanup neel-serve` then a delete worked. The delete
+    also removed the tunnel's credentials file; `cert.pem`, `config.yml`,
+    and the proxied `CNAME` stayed. After the `CNAME` was deleted in the
+    dashboard, `notes.seoscience.tech` was NXDOMAIN at 1.1.1.1 and at the
+    zone's nameserver. The Access application, then its policy, were
+    deleted in the dashboard, and the local `cert.pem` and `config.yml`
+    removed. The user kept the domain on Cloudflare and the Zero Trust Free
+    subscription.
 
 ### 16.2 Deviations from the spec
 
@@ -2266,6 +2342,14 @@ Format: `YYYY-MM-DD, step N: what changed and why; spec sections updated`.
   Linux-specific parts of a tunnel deployment (epoll, the pings, signals)
   passed through the quick tunnel. Agreed with the user. 13.8 updated (the
   row's result and the procedure's prerequisites).
+- 2026-10-16, final pass: the verified Cloudflare Tunnel with Access setup
+  is documented in a new `docs/CLOUDFLARE_ACCESS.md` (a step-by-step
+  walkthrough: domain and nameservers, Zero Trust, the Access application,
+  the tunnel, how it behaves, costs, removal), with a short entry in the
+  guide's "Setups" that links it and a link from the README's "Serve mode"
+  section. Section 14 planned guide entries only; the dashboard steps are
+  too long for the guide and change with Cloudflare's dashboard. Agreed with
+  the user. Section 14 updated.
 
 ### 16.3 Gotchas
 

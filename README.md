@@ -340,7 +340,7 @@ startApp(serve = true, port = 8080,
 - Pages that lose the connection (a phone that slept, a tunnel that dropped) reconnect when they become visible again or the network comes back.
 - Neel authenticates no one: put a private tunnel or an authenticating proxy in front of it.
 
-Everything else (validation, stop signals, reconnecting, the reload recipe for server restarts, the security model, and setups): [Serve mode](docs/GUIDE.md#serve-mode). A runnable app: [`examples/serve`](examples/serve).
+Everything else (validation, stop signals, reconnecting, the reload recipe for server restarts, the security model, and setups): [Serve mode](docs/GUIDE.md#serve-mode). A runnable app: [`examples/serve`](examples/serve). Reaching it from anywhere behind a login: [Cloudflare Tunnel with Access](docs/CLOUDFLARE_ACCESS.md).
 
 ## Before You Start
 
