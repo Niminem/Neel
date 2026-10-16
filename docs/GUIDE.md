@@ -1163,9 +1163,9 @@ with a 403 (`neel: refused: the Host header must be 127.0.0.1:8080`), unless
 that origin is in `allowedOrigins` (`allowedOrigins =
 @["http://localhost:8080"]`).
 
-**cloudflared quick tunnel (not yet verified).** A way to try serve mode
-from a phone without an account or a domain. Start the tunnel first, since
-its hostname is new every run:
+**cloudflared quick tunnel.** A way to try serve mode from a phone without
+an account or a domain. Start the tunnel first, since its hostname is new
+every run:
 
 ```
 cloudflared tunnel --url http://127.0.0.1:8080

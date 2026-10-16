@@ -38,7 +38,7 @@
 ##   address 127.0.0.1: `http://localhost:5359`, or another local port, is
 ##   refused with a 403 unless that origin is passed as an argument
 ##   (`./examples/serve/serve http://localhost:5359`).
-## - cloudflared quick tunnel (not yet verified): first run
+## - cloudflared quick tunnel: first run
 ##   `cloudflared tunnel --url http://127.0.0.1:5359` and note the
 ##   https://<name>.trycloudflare.com URL it prints (it is new every time
 ##   cloudflared starts), then start the app with that URL as an argument

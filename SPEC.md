@@ -1,8 +1,11 @@
 # Serve mode: specification
 
 Status: decisions settled (reviewed 2026-10-14); steps 1–7 done
-(2026-10-16); the final pass (13.8) is done on Windows and macOS
-(2026-10-16) and pending on Linux.
+(2026-10-16); the final pass (13.8) is done on Windows, macOS, and Linux
+(2026-10-16), with nothing failed except the Windows debug-build Ctrl-C
+crash in Nim's own handler (documented, 16.1). Still open: the Cloudflare
+Tunnel with Access row, moved to a separate session on Windows (16.2).
+Tailscale Serve, nginx, and Caddy remain unverified drafts.
 Progress is tracked per step in section 13; findings, deviations, and gotchas
 are logged in section 16.
 
@@ -1344,40 +1347,40 @@ page becomes visible or goes online` while dormant, and
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` passes (node test `[OK]`, not `[SKIPPED]`) | pass | pass | pass (after step 6) |
-| Local: the three examples behave as before | pass (window 2 closed with X gives `NeelDisconnectedError`, 16.1) | pass | |
-| Local: fixed port, a browser tab displaces the app window (4000) | pass | pass | |
-| Local: Ctrl-C ends a local-mode app the old way | pass (debug build, exit status 130) | pass (release; debug crashes in Nim's handler, 16.1) | |
-| Local: the shim's give-up is still terminal | pass | pass | |
-| Serve: starts without a browser, prints the startup line | pass (stopped with `kill -INT`) | pass | |
-| Serve: page loads at `http://127.0.0.1:<port>`, the note round-trips | pass | pass | |
-| Serve: a second tab displaces the first (4000, no reconnect, no loop) | pass | pass | |
-| Serve: Ctrl-C exits cleanly | pass (`kill -INT`) | pass | pass (after step 5) |
-| Serve: `kill -TERM` exits cleanly | pass | n/a | pass (after step 5) |
-| Serve: a second signal exits at once (130 / 143) | pass (`kill -INT` / `kill -TERM` twice) | n/a | pass (after step 5) |
+| `nimble test` passes (node test `[OK]`, not `[SKIPPED]`) | pass | pass | pass |
+| Local: the three examples behave as before | pass (window 2 closed with X gives `NeelDisconnectedError`, 16.1) | pass | pass (X gives `PromptCancelled` as on Windows; a killed browser gives `NeelDisconnectedError`, 16.1) |
+| Local: fixed port, a browser tab displaces the app window (4000) | pass | pass | pass |
+| Local: Ctrl-C ends a local-mode app the old way | pass (debug build, exit status 130) | pass (release; debug crashes in Nim's handler, 16.1) | pass (debug build, no crash) |
+| Local: the shim's give-up is still terminal | pass | pass | pass (minimized with Super+H; GNOME shows no minimize button) |
+| Serve: starts without a browser, prints the startup line | pass (stopped with `kill -INT`) | pass | pass (stopped with `kill -INT`) |
+| Serve: page loads at `http://127.0.0.1:<port>`, the note round-trips | pass | pass | pass |
+| Serve: a second tab displaces the first (4000, no reconnect, no loop) | pass | pass | pass |
+| Serve: Ctrl-C exits cleanly | pass (`kill -INT`) | pass | pass (`kill -INT`) |
+| Serve: `kill -TERM` exits cleanly | pass | n/a | pass |
+| Serve: a second signal exits at once (130 / 143) | pass (`kill -INT` / `kill -TERM` twice) | n/a | pass (`kill -INT` / `kill -TERM` twice, 14 / 11 ms) |
 | Serve: Ctrl-Break exits cleanly | n/a | pass (`GenerateConsoleCtrlEvent`, 211 ms) | n/a |
 | Serve: closing the console window exits cleanly | n/a | pass | n/a |
-| Serve: a second app on the same fixed port fails at start; a restart right after Ctrl-C binds | pass (restart after `kill -INT`) | pass | pass (after step 5) |
-| Serve: "Stop server", then a restart: the page reloads by itself | pass (and with `kill -INT`) | pass | |
-| Serve: dormant shim wakes (DevTools offline toggle) | pass (outage via a TCP relay, 16.1) | pass (outage via a TCP relay, 16.1) | |
-| Serve: server restart while dormant: the failed wake reloads the page | pass (outage via a TCP relay, 16.1) | pass (outage via a TCP relay, 16.1) | |
-| Serve: SSH forward from another machine; `localhost` refused | pass (Mac server, Windows client; `ssh` killed and restarted woke the page) | n/a (no OpenSSH Server) | |
+| Serve: a second app on the same fixed port fails at start; a restart right after Ctrl-C binds | pass (restart after `kill -INT`) | pass | pass (restart after `kill -INT`) |
+| Serve: "Stop server", then a restart: the page reloads by itself | pass (and with `kill -INT`) | pass | pass (and with `kill -INT`) |
+| Serve: dormant shim wakes (DevTools offline toggle) | pass (outage via a TCP relay, 16.1) | pass (outage via a TCP relay, 16.1) | pass (outage via a TCP relay, 16.1) |
+| Serve: server restart while dormant: the failed wake reloads the page | pass (outage via a TCP relay, 16.1) | pass (outage via a TCP relay, 16.1) | pass (outage via a TCP relay, 16.1) |
+| Serve: SSH forward from another machine; `localhost` refused | pass (Mac server, Windows client; `ssh` killed and restarted woke the page) | n/a (no OpenSSH Server) | pass (Linux server, Windows client; `ssh` killed and restarted woke the page) |
 | Serve: an `--app:gui` build starts and serves | n/a | pass | n/a |
-| Serve: idle behind a proxy for 5 minutes without a reconnect | pass (cloudflared quick tunnel, Chrome, about 10 min) | pass (cloudflared quick tunnel, Edge, about 10 min) | |
+| Serve: idle behind a proxy for 5 minutes without a reconnect | pass (cloudflared quick tunnel, Chrome, about 10 min) | pass (cloudflared quick tunnel, Edge, about 10 min) | pass (cloudflared quick tunnel, browser on Windows, 5 min; one WebSocket from `cloudflared` held throughout) |
 
 Once, on Linux (the realistic deployment target; the server runs on Linux,
 the browsers anywhere):
 
 | Check | Result |
 |---|---|
-| cloudflared quick tunnel: the page works over `https` / `wss` | |
-| Behind Cloudflare Tunnel with Access: first load after login works (confirms 2.1) | |
-| Phone: open, lock for 5 minutes, unlock: the page reconnects by itself | |
-| Phone and laptop share the note; "Use it here" takes the session back | |
-| Server restart: the documented reload recipe recovers the page | |
-| Draft: Tailscale Serve | |
-| Draft: nginx (with the `Upgrade` / `Connection` headers) | |
-| Draft: Caddy | |
+| cloudflared quick tunnel: the page works over `https` / `wss` | pass (cloudflared 2026.10.1 release binary; 502, then 200 and `/ws` 101, then 403 without the origin; "not yet verified" dropped from the guide and `examples/serve`) |
+| Behind Cloudflare Tunnel with Access: first load after login works (confirms 2.1) | pending: separate session, server on Windows, on a new domain moved to Cloudflare (16.2) |
+| Phone: open, lock for 5 minutes, unlock: the page reconnects by itself | pass (Android Chrome, quick tunnel; `reconnecting` briefly on unlock, then `connected`, `reconnects: 1`, no reload) |
+| Phone and laptop share the note; "Use it here" takes the session back | pass (Android Chrome and the Windows laptop, quick tunnel) |
+| Server restart: the documented reload recipe recovers the page | pass (quick tunnel; connected page on the laptop and on Android Chrome: 502 while down, reload after the restart; dormant page on the phone: the documented gap, reloaded after one switch away and back, 16.1) |
+| Draft: Tailscale Serve | n/a (not run, user's choice; stays a draft) |
+| Draft: nginx (with the `Upgrade` / `Connection` headers) | n/a (not run, user's choice; stays a draft) |
+| Draft: Caddy | n/a (not run, user's choice; stays a draft) |
 
 #### Procedures
 
@@ -1397,8 +1400,9 @@ verbatim (the harness report is printed under the failed check).
   "askSecond": answer the prompt (the value comes back), Cancel
   (`PromptCancelled`), wait 5 s (`NeelTimeoutError`), end window 2 while
   the prompt is up (`NeelDisconnectedError`; kill its browser process,
-  since closing it with X lets Chrome dismiss the prompt first, which gives
-  `PromptCancelled`, 16.1), ask again
+  since closing it with X lets Chrome on Windows and Linux dismiss the
+  prompt first, which gives `PromptCancelled`; on macOS X gives
+  `NeelDisconnectedError` as well, 16.1), ask again
   (`NeelNoWindowError`). "listWindows" lists the open windows. Close
   window 1: `window 1 closed` and the process ends about 3 s later.
 - `./examples/stresstest/stresstest`: press every section's buttons; no
@@ -1582,7 +1586,29 @@ from the guide's and the example's cloudflared text.
 
 **Behind Cloudflare Tunnel with Access: first load after login works
 (confirms 2.1).** Needs a Cloudflare account with a domain and Zero Trust.
-Draft, not yet verified:
+Draft, not yet verified.
+
+Prerequisites (from the Linux pass, 16.2). A named tunnel and Access need
+the hostname's DNS on Cloudflare; on the Free plan that means the whole
+domain (partial, CNAME-only setups are Business plan). The user's plan is a
+new, otherwise unused domain bought at Namecheap, so nothing else depends
+on its DNS:
+- Cloudflare dashboard: add the domain, Free plan. Namecheap: Domain List,
+  Manage, Nameservers, "Custom DNS", the two Cloudflare nameservers. Wait
+  until Cloudflare shows the domain as active (usually minutes, up to 24 h).
+- Zero Trust: enable it in the dashboard and pick a team name
+  (`<team>.cloudflareaccess.com`); the Free plan may still ask for a
+  payment method.
+- The server can run on any OS (request filtering has no platform code;
+  the Linux-specific parts passed through the quick tunnel). On Windows:
+  `winget install --id Cloudflare.cloudflared`, the configuration lives in
+  `%USERPROFILE%\.cloudflared\`, `credentials-file` is
+  `C:\Users\<user>\.cloudflared\<tunnel-id>.json`, and the app is
+  `.\examples\serve\serve.exe`.
+- These leave a tunnel, a DNS record, and an Access application in the
+  account; delete them afterwards if unwanted
+  (`cloudflared tunnel delete neel-serve`, then the DNS record and the
+  application in the dashboard).
 
 ```
 cloudflared tunnel login
@@ -1714,7 +1740,8 @@ reverse-proxy --from :8082 --to 127.0.0.1:5359` and the origin
   (cloudflared, Tailscale Serve, nginx, Caddy, SSH forward), each verified on
   a real setup before publishing. As shipped in step 7 (agreed with the
   user): the SSH forward and the cloudflared quick tunnel, the latter marked
-  "not yet verified"; Tailscale Serve, nginx, Caddy, and Cloudflare Tunnel
+  "not yet verified" until the Linux final pass verified it (2026-10-16;
+  the mark is gone from the guide and `examples/serve`); Tailscale Serve, nginx, Caddy, and Cloudflare Tunnel
   with Access exist only as drafts in 13.8 and move into the guide once
   verified. The guide names no proxy in the section 12 header note; it says
   generically that some proxies need the `Upgrade` / `Connection` headers.
@@ -2094,6 +2121,61 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
     when the agent's command ends (the app window then shows "connection
     refused"); run them as a backgrounded tool command. Chrome inherits the
     app's stdout, so a pipe on it stays open until the app's windows close.
+- 2026-10-16, final pass, Linux (Ubuntu 26.04.1 in VirtualBox, 3 vCPUs,
+  GNOME on Wayland, Google Chrome 155.0.8059.79 from Google's `.deb`, not
+  a snap): run on `5a3c4f2`, the same commit as the Windows checkout. Nim
+  2.2.12 (`~/.nimble/bin/nim`, which Nimble also used), gcc 15.2.0, node
+  v22.22.1. Driven from the Windows session over SSH (a VirtualBox NAT rule
+  host `127.0.0.1:2222` to guest 22, key auth); the apps were started
+  detached with the desktop session's `DISPLAY` / `WAYLAND_DISPLAY` /
+  `XAUTHORITY`, so their windows opened on the VM's desktop. Every row run
+  passed; nothing failed. Not run: the Access row (moved to its own
+  session, 16.2) and the three drafts (n/a, the user's choice). Notes:
+  - `nimble test` passed (node shim test `[OK]`). Under the parallel test
+    compiles the VM's load average reached 19, and SSH connects with a 5 s
+    timeout failed until it dropped.
+  - `roundtrip`: closing window 2 with X while the "askSecond" prompt is up
+    gives `PromptCancelled`, as on Windows; killing window 2's browser
+    process gives `NeelDisconnectedError`. The kill was timed with the
+    prompt's wait raised to 20 s in the VM's copy only (reverted, not
+    committed): 5 s is shorter than a round trip between the user and the
+    session.
+  - Logging an app's output to a file: Chrome inherits the app's stdout and
+    stderr, and with a plain `>` redirect app lines were lost (the file was
+    truncated under the writers). Append mode (`>>`) kept every line.
+  - Local Ctrl-C on a **debug** `roundtrip` (the user's own terminal):
+    Nim's message and an immediate exit, no crash, as on macOS. So the
+    Windows debug-build crash (above) is Windows-only.
+  - GNOME shows no minimize button; the give-up row's minimize and
+    restore was Super+H and the dock.
+  - Serve signal rows were driven with `kill -INT` / `kill -TERM` with a
+    page connected (it got the 1001 each time); the second signal exited
+    130 / 143 within 15 ms, `closed.txt` written, no `returned` line.
+  - The two dormant rows used the relay outage of the Windows and macOS
+    passes (Node relay on `127.0.0.1:5360` in the VM, killed with
+    `kill -9`, which drops its connections); every wake was a tab switch.
+  - SSH forward: VM as server, Windows as client through the same NAT
+    rule (`ssh -N -L 5359:127.0.0.1:5359 -p 2222 ...`); killing and
+    restarting `ssh` was an outage the page woke from.
+  - cloudflared 2026.10.1, Cloudflare's `cloudflared-linux-amd64` release
+    binary under `/tmp` (no install). Quick tunnel: 502 before the app,
+    200 after, `/ws` 101 over `wss`, then a 403 (`neel: refused: the Host
+    header must be 127.0.0.1:5359`) once restarted without the origin, so
+    cloudflared forwards the public `Host` on Linux too (2.3). The guide's
+    and `examples/serve`'s "not yet verified" are removed. Idle: one
+    WebSocket from `cloudflared` stayed open for the whole 5½ min sampled
+    with `ss` (the pings hold Cloudflare open on epoll as well).
+  - Phone (Android Chrome) through the quick tunnel: after a 5 min lock
+    the page showed `reconnecting` briefly and reconnected without a
+    reload (`reconnects: 1`). For the restart recipe's dormant case the
+    phone was locked 2 min (the server already had no connection, so no
+    1001 reached it), the server restarted, the phone unlocked: the page
+    settled on `not connected; reconnects when ...` and reloaded after one
+    switch away and back. That is the gap documented for step 7 (the
+    first round after unlocking is an ordinary reconnect, not a wake),
+    now seen on a real phone. The laptop's dormant case could not be made
+    through the tunnel (DevTools "Offline" keeps the WebSocket open) and
+    is covered by the relay row.
 
 ### 16.2 Deviations from the spec
 
@@ -2175,6 +2257,15 @@ Format: `YYYY-MM-DD, step N: what changed and why; spec sections updated`.
 - 2026-10-16, step 7: section 10.1's description of the final-close
   rejection texts corrected to what the shim has always done (16.1). No
   code change; the guide follows the code.
+- 2026-10-16, final pass: the "Once, on Linux" row "Behind Cloudflare
+  Tunnel with Access" runs in a separate session with the server on
+  Windows, not on Linux. It needs a domain whose DNS Cloudflare manages,
+  and the user will buy a new domain at Namecheap for it rather than move
+  an existing one. What it checks (2.1, the cross-site navigation after the
+  Access login) is request filtering, which has no platform code, and the
+  Linux-specific parts of a tunnel deployment (epoll, the pings, signals)
+  passed through the quick tunnel. Agreed with the user. 13.8 updated (the
+  row's result and the procedure's prerequisites).
 
 ### 16.3 Gotchas
 
