@@ -1,7 +1,8 @@
 # Serve mode: specification
 
 Status: decisions settled (reviewed 2026-10-14); steps 1–7 done
-(2026-10-16); the final pass on all three OSes (13.8) is pending.
+(2026-10-16); the final pass (13.8) is done on Windows and macOS
+(2026-10-16) and pending on Linux.
 Progress is tracked per step in section 13; findings, deviations, and gotchas
 are logged in section 16.
 
@@ -1343,26 +1344,26 @@ page becomes visible or goes online` while dormant, and
 
 | Check | macOS | Windows | Linux |
 |---|---|---|---|
-| `nimble test` passes (node test `[OK]`, not `[SKIPPED]`) | pass (after step 6) | pass | pass (after step 6) |
-| Local: the three examples behave as before | | pass | |
-| Local: fixed port, a browser tab displaces the app window (4000) | | pass | |
-| Local: Ctrl-C ends a local-mode app the old way | | pass (release; debug crashes in Nim's handler, 16.1) | |
-| Local: the shim's give-up is still terminal | | pass | |
-| Serve: starts without a browser, prints the startup line | | pass | |
-| Serve: page loads at `http://127.0.0.1:<port>`, the note round-trips | | pass | |
-| Serve: a second tab displaces the first (4000, no reconnect, no loop) | | pass | |
-| Serve: Ctrl-C exits cleanly | pass (after step 4) | pass | pass (after step 5) |
-| Serve: `kill -TERM` exits cleanly | pass (after step 4) | n/a | pass (after step 5) |
-| Serve: a second signal exits at once (130 / 143) | pass (after step 4) | n/a | pass (after step 5) |
+| `nimble test` passes (node test `[OK]`, not `[SKIPPED]`) | pass | pass | pass (after step 6) |
+| Local: the three examples behave as before | pass (window 2 closed with X gives `NeelDisconnectedError`, 16.1) | pass | |
+| Local: fixed port, a browser tab displaces the app window (4000) | pass | pass | |
+| Local: Ctrl-C ends a local-mode app the old way | pass (debug build, exit status 130) | pass (release; debug crashes in Nim's handler, 16.1) | |
+| Local: the shim's give-up is still terminal | pass | pass | |
+| Serve: starts without a browser, prints the startup line | pass (stopped with `kill -INT`) | pass | |
+| Serve: page loads at `http://127.0.0.1:<port>`, the note round-trips | pass | pass | |
+| Serve: a second tab displaces the first (4000, no reconnect, no loop) | pass | pass | |
+| Serve: Ctrl-C exits cleanly | pass (`kill -INT`) | pass | pass (after step 5) |
+| Serve: `kill -TERM` exits cleanly | pass | n/a | pass (after step 5) |
+| Serve: a second signal exits at once (130 / 143) | pass (`kill -INT` / `kill -TERM` twice) | n/a | pass (after step 5) |
 | Serve: Ctrl-Break exits cleanly | n/a | pass (`GenerateConsoleCtrlEvent`, 211 ms) | n/a |
 | Serve: closing the console window exits cleanly | n/a | pass | n/a |
-| Serve: a second app on the same fixed port fails at start; a restart right after Ctrl-C binds | pass (after step 5) | pass | pass (after step 5) |
-| Serve: "Stop server", then a restart: the page reloads by itself | | pass | |
-| Serve: dormant shim wakes (DevTools offline toggle) | | pass (outage via a TCP relay, 16.1) | |
-| Serve: server restart while dormant: the failed wake reloads the page | | pass (outage via a TCP relay, 16.1) | |
-| Serve: SSH forward from another machine; `localhost` refused | | n/a (no OpenSSH Server) | |
+| Serve: a second app on the same fixed port fails at start; a restart right after Ctrl-C binds | pass (restart after `kill -INT`) | pass | pass (after step 5) |
+| Serve: "Stop server", then a restart: the page reloads by itself | pass (and with `kill -INT`) | pass | |
+| Serve: dormant shim wakes (DevTools offline toggle) | pass (outage via a TCP relay, 16.1) | pass (outage via a TCP relay, 16.1) | |
+| Serve: server restart while dormant: the failed wake reloads the page | pass (outage via a TCP relay, 16.1) | pass (outage via a TCP relay, 16.1) | |
+| Serve: SSH forward from another machine; `localhost` refused | pass (Mac server, Windows client; `ssh` killed and restarted woke the page) | n/a (no OpenSSH Server) | |
 | Serve: an `--app:gui` build starts and serves | n/a | pass | n/a |
-| Serve: idle behind a proxy for 5 minutes without a reconnect | | pass (cloudflared quick tunnel, Edge, about 10 min) | |
+| Serve: idle behind a proxy for 5 minutes without a reconnect | pass (cloudflared quick tunnel, Chrome, about 10 min) | pass (cloudflared quick tunnel, Edge, about 10 min) | |
 
 Once, on Linux (the realistic deployment target; the server runs on Linux,
 the browsers anywhere):
@@ -2059,6 +2060,40 @@ Format: `YYYY-MM-DD, step N, platform: what was found; what it means`.
   refused: the Host header must be 127.0.0.1:5359`, so cloudflared forwards
   the public `Host` (2.3). Not yet run on Linux, where the quick-tunnel row
   of 13.8 belongs; the guide still says "not yet verified".
+- 2026-10-16, final pass, macOS 13.7.8 (Intel, Chrome 155): every 13.8 row
+  passed on `69ff8a1`; nothing failed. Debug builds of all four examples
+  with Nim 2.2.12 (`~/.nimble/bin/nim`). Notes for the record:
+  - Unlike Windows, closing `roundtrip`'s window 2 with its close button
+    while the "askSecond" prompt is up gives `NeelDisconnectedError`, not
+    `PromptCancelled` (Chrome on macOS does not dismiss the dialog first),
+    so no process kill is needed there. Either path is local-mode behavior
+    unchanged since 2.0.
+  - Local Ctrl-C on a **debug** `roundtrip` printed `SIGINT: Interrupted by
+    Ctrl-C.` and exited 130: the Windows debug-build crash (above) does not
+    occur on macOS.
+  - The serve signal rows were driven with `kill -INT` / `kill -TERM` from
+    another shell instead of Ctrl-C (same signal; a page connected each
+    time received the 1001). Second signal: 130 and 143 at once, with
+    `closed.txt` written and no `returned` line.
+  - The two dormant rows used the Windows relay outage (a Node TCP relay on
+    `127.0.0.1:5360`, server started with that origin). Stopping the relay
+    must also destroy the connections it carries, or the open WebSocket
+    survives. With no `online` event in that setup, every wake was a tab
+    switch.
+  - SSH forward: Mac as server (Remote Login on), Windows as client;
+    `http://localhost:5359` got the 403 until the app allowed that origin,
+    and killing and restarting `ssh` was an outage the page woke from.
+  - The Homebrew `cloudflared` formula has bottles only for Apple Silicon
+    (and Linux), so on Intel macOS it builds from source. Cloudflare's
+    release binary `cloudflared-darwin-amd64.tgz` (2026.10.1), unpacked
+    under `/tmp`, was used instead. Quick tunnel: 502 before the app, 200
+    after; the page stayed connected about 10 min untouched, and the
+    server held one WebSocket from `cloudflared` throughout (checked with
+    `lsof`), so the pings hold Cloudflare open on kqueue too.
+  - Running the examples from an agent shell: a plain `&` job is killed
+    when the agent's command ends (the app window then shows "connection
+    refused"); run them as a backgrounded tool command. Chrome inherits the
+    app's stdout, so a pipe on it stays open until the app's windows close.
 
 ### 16.2 Deviations from the spec
 
