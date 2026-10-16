@@ -36,12 +36,13 @@ let fakeSearch = BrowserSearch(
 
 type
   Launch = tuple[url, userDataDir: string; opts: LaunchOptions]
+  Closed = tuple[conn: ConnId; code: int; reason: string]
 
   Fake = object
     ## Shared between the test thread, the injected procs, and script
     ## threads; `lock` guards everything below it.
     lock: Lock
-    closes: seq[tuple[conn: ConnId; code: int]]
+    closes: seq[Closed]
     launches: seq[Launch]
     sent: seq[tuple[conn: ConnId; text: string]]
     opened: seq[int]   # window ids passed to onWindowOpen
@@ -53,10 +54,10 @@ type
 var fake: Fake
 initLock fake.lock
 
-proc fakeClose(conn: ConnId; code: int): bool {.gcsafe.} =
+proc fakeClose(conn: ConnId; code: int; reason: string): bool {.gcsafe.} =
   {.cast(gcsafe).}: # test global, guarded by its lock
     acquire fake.lock
-    fake.closes.add((conn, code))
+    fake.closes.add((conn, code, reason))
     release fake.lock
   true
 
@@ -111,7 +112,7 @@ proc launches(): seq[Launch] =
   result = fake.launches
   release fake.lock
 
-proc closes(): seq[tuple[conn: ConnId; code: int]] =
+proc closes(): seq[Closed] =
   acquire fake.lock
   result = fake.closes
   release fake.lock
@@ -173,6 +174,7 @@ type
     skQuit        ## sleep `delayMs`, then `quitApp()`
     skReconnect   ## sleep `delayMs`, bind + open `conn`, sleep `delayMs2`, close it
     skWaiter      ## `w.js.wait(2000).foo()` and record the exception kind
+    skStop        ## sleep `delayMs`, then `requestStop()` twice, as a signal handler would
 
   Script = object
     kind: ScriptKind
@@ -181,12 +183,17 @@ type
     conn: ConnId
     w: Window
     disconnected: bool
+    firstStop, secondStop: bool   # what each `requestStop()` returned
 
 proc runScript(s: ptr Script) {.thread.} =
   case s.kind
   of skQuit:
     sleep(s.delayMs)
     quitApp()
+  of skStop:
+    sleep(s.delayMs)
+    s.firstStop = requestStop()
+    s.secondStop = requestStop()
   of skReconnect:
     sleep(s.delayMs)
     connect(s.windowId, s.conn)
@@ -350,8 +357,10 @@ suite "window: connection mapping":
     check windowIdOf(ConnB) == 1
     check connectionCount() == 2
     # The displaced connection is told to go (a no-op when it already has),
-    # so it cannot linger counted but unmapped.
-    check closes() == @[(ConnA, CloseNormal)]
+    # so it cannot linger counted but unmapped, with the code the shim
+    # treats as final.
+    check closes() == @[(ConnA, CloseDisplaced, "displaced by another connection")]
+    check CloseDisplaced == 4000
     # Re-binding the same connection displaces nothing.
     check bindConnection(1, ConnB)
     check closes().len == 1
@@ -437,7 +446,7 @@ suite "window: closing":
     let dir = launches()[0].userDataDir
     check dirExists(dir)
     closeWindow(w)
-    check closes() == @[(ConnA, CloseNormal)]
+    check closes() == @[(ConnA, CloseNormal, "")]
     check not dirExists(dir)
     check not w.isOpen
     check not w.isConnected
@@ -453,6 +462,17 @@ suite "window: closing":
     connectionClosed(ConnA)
     check connectionCount() == 0
     check windowIdOf(ConnA) == NoWindow
+
+  winTest "a displaced connection gets 4000; closeWindow still sends 1000 to the new one":
+    let w = openWindow()
+    connect(1, ConnA)
+    connect(1, ConnB)
+    connectionClosed(ConnA)
+    closeWindow(w)
+    check closes() == @[(ConnA, CloseDisplaced, "displaced by another connection"),
+                        (ConnB, CloseNormal, "")]
+    connectionClosed(ConnB)
+    check connectionCount() == 0
 
   winTest "closeWindow of a window that never connected sends nothing":
     let w = openWindow()
@@ -591,6 +611,221 @@ suite "window: lifecycle":
     check windows().len == 0   # nothing was initialised
     check DefaultGracePeriodMs >= MinGracePeriodMs
 
+# --- serve mode ------------------------------------------------------------------
+
+proc recordNoLaunch(url, userDataDir: string; opts: LaunchOptions): BrowserHandle
+    {.gcsafe.} =
+  ## `noLaunch` that also records what the serve path hands a launcher.
+  {.cast(gcsafe).}:
+    acquire fake.lock
+    fake.launches.add((url, userDataDir, opts))
+    release fake.lock
+  noLaunch(url, userDataDir, opts)
+
+template serveTest(name: string; body: untyped) =
+  ## Serve mode as `startApp` sets it up: `noLaunch`, then window 1 at
+  ## `/app.html`.
+  test name:
+    resetFake()
+    initWindows(fakeClose, fake.table, Base, fakeSearch, launcher = noLaunch,
+                gracePeriodMs = Grace, startupTimeoutMs = Startup,
+                onWindowOpen = hookOpen, onWindowClose = hookClose, serve = true)
+    initJsBridge(fakeSend, resolveWindow, fake.table)
+    try:
+      let w1 {.inject.} = openVirtualWindow("/app.html")
+      body
+    finally:
+      clearCurrentWindow()
+      resetJsBridge()
+      teardownWindows()
+
+suite "window: serve mode":
+  test "window 1 is created without a browser and without touching profiles":
+    resetFake()
+    # A leftover profile dir that the local-mode path would delete.
+    let stale = userDataDirFor(1)
+    createDir(stale)
+    initWindows(fakeClose, fake.table, Base, fakeSearch, launcher = recordNoLaunch,
+                gracePeriodMs = Grace, startupTimeoutMs = Startup,
+                onWindowOpen = hookOpen, onWindowClose = hookClose, serve = true)
+    try:
+      let w = openVirtualWindow("/app.html")
+      check w.id == 1
+      check w.js.windowId == 1
+      check w.isOpen
+      check not w.isConnected
+      check windows().ids == @[1]
+      let l = launches()
+      check l.len == 1
+      check l[0].url == Base & "/app.html?window=1"
+      check l[0].userDataDir == ""
+      check dirExists(stale)
+      check bindConnection(1, ConnA)
+      check windowIdOf(ConnA) == 1
+      teardownWindows()
+      check closedIds() == @[1]
+      check dirExists(stale)
+    finally:
+      teardownWindows()
+      removeDir(stale)
+
+  serveTest "window 1 outlives startupTimeoutMs and gracePeriodMs; only quitApp ends the wait":
+    # Never connected, well past the startup timeout.
+    var s1 = Script(kind: skQuit, delayMs: Startup + 300)
+    var t0 = getMonoTime()
+    var reason: ExitReason
+    withScript(s1):
+      reason = waitForAppExit()
+    check reason == erQuit
+    check elapsedMs(t0) >= Startup + 300 - 50
+    check w1.isOpen
+    check windows() == @[w1]
+    # Connected, then disconnected, well past the grace period.
+    connect(1, ConnA)
+    connectionClosed(ConnA)
+    check connectionCount() == 0
+    var s2 = Script(kind: skQuit, delayMs: Grace + 300)
+    t0 = getMonoTime()
+    withScript(s2):
+      reason = waitForAppExit()
+    check reason == erQuit
+    check elapsedMs(t0) >= Grace + 300 - 50
+    check w1.isOpen
+    check not w1.isConnected
+    check closedIds().len == 0
+    # The window is still bindable after all that.
+    connect(1, ConnB)
+    check w1.isConnected
+
+  serveTest "quitApp before the wait returns erQuit at once":
+    quitApp()
+    let t0 = getMonoTime()
+    check waitForAppExit() == erQuit
+    check elapsedMs(t0) < 200
+    check w1.isOpen
+
+  serveTest "openWindow and closeWindow raise NeelServeModeError":
+    expect NeelServeModeError:
+      discard openWindow()
+    expect NeelServeModeError:
+      discard openWindow("/other", size = some((800, 600)))
+    connect(1, ConnA)
+    expect NeelServeModeError:
+      closeWindow(w1)
+    expect NeelServeModeError:
+      closeWindow(Window(id: 42, js: initJsProxy(42)))
+    try:
+      discard openWindow()
+      check false
+    except NeelServeModeError as e:
+      check "serve mode" in e.msg
+    # Nothing changed: window 1 is open and connected, nothing was closed.
+    check windows().ids == @[1]
+    check w1.isConnected
+    check closes().len == 0
+    check closedIds().len == 0
+    check NeelServeModeError is CatchableError
+
+  serveTest "onWindowOpen fires once across devices and reconnects; onWindowClose once at teardown":
+    connect(1, ConnA)
+    check openedIds() == @[1]
+    # A second device displaces the first.
+    connect(1, ConnB)
+    check closes() == @[(ConnA, CloseDisplaced, "displaced by another connection")]
+    connectionClosed(ConnA)
+    check windowIdOf(ConnB) == 1
+    # It drops, then reconnects.
+    connectionClosed(ConnB)
+    connect(1, ConnC)
+    check openedIds() == @[1]
+    check closedIds().len == 0
+    connectionClosed(ConnC)
+    teardownWindows()
+    check openedIds() == @[1]
+    check closedIds() == @[1]
+
+  serveTest "requestStop from another thread ends the wait with erQuit within IdleTickMs":
+    connect(1, ConnA)
+    var s = Script(kind: skStop, delayMs: 100)
+    let t0 = getMonoTime()
+    var reason: ExitReason
+    withScript(s):
+      reason = waitForAppExit()
+    let took = elapsedMs(t0)
+    check reason == erQuit
+    check took >= 100 - 20
+    check took < 100 + 1000 + 500   # IdleTickMs, since nothing signals the wait
+    check not s.firstStop
+    check s.secondStop
+    # Nothing was retired or closed; teardown does that as for quitApp.
+    check w1.isOpen
+    check w1.isConnected
+    check closes().len == 0
+    check closedIds().len == 0
+
+  serveTest "a stop requested before the wait returns erQuit at once":
+    check not requestStop()
+    let t0 = getMonoTime()
+    check waitForAppExit() == erQuit
+    check elapsedMs(t0) < 200
+
+  test "initWindows clears a stop request left by an earlier run":
+    resetFake()
+    initWindows(fakeClose, fake.table, Base, fakeSearch, launcher = noLaunch,
+                serve = true)
+    try:
+      discard requestStop()
+      check waitForAppExit() == erQuit
+    finally:
+      teardownWindows()
+    # A request after teardown (a late signal) does not leak into the next run.
+    discard requestStop()
+    initWindows(fakeClose, fake.table, Base, fakeSearch, launcher = noLaunch,
+                serve = true)
+    try:
+      var s = Script(kind: skQuit, delayMs: 300)
+      let t0 = getMonoTime()
+      var reason: ExitReason
+      withScript(s):
+        reason = waitForAppExit()
+      check reason == erQuit
+      check elapsedMs(t0) >= 300 - 50
+      check not requestStop()
+    finally:
+      teardownWindows()
+
+  winTest "local mode: requestStop does not end the wait":
+    let w = openWindow()
+    connect(1, ConnA)
+    check not requestStop()
+    # Past IdleTickMs (1 s): the serve wait would have returned by now.
+    var s = Script(kind: skQuit, delayMs: 1300)
+    let t0 = getMonoTime()
+    var reason: ExitReason
+    withScript(s):
+      reason = waitForAppExit()
+    check reason == erQuit
+    check elapsedMs(t0) >= 1300 - 50
+    check w.isOpen
+    check closedIds().len == 0
+
+  test "serve mode ignores gracePeriodMs and startupTimeoutMs":
+    resetFake()
+    initWindows(fakeClose, fake.table, Base, fakeSearch, launcher = noLaunch,
+                gracePeriodMs = 0, startupTimeoutMs = 0, serve = true)
+    try:
+      check openVirtualWindow("/").id == 1
+    finally:
+      teardownWindows()
+
+  winTest "local mode: openVirtualWindow is refused, openWindow still launches":
+    expect AssertionDefect:
+      discard openVirtualWindow("/")
+    check windows().len == 0
+    check openWindow().id == 1
+    check launches().len == 1
+    check launches()[0].userDataDir == userDataDirFor(1)
+
 # --- integration -----------------------------------------------------------------
 
 type
@@ -609,9 +844,9 @@ proc integSend(conn: ConnId; text: string): bool {.gcsafe.} =
   {.cast(gcsafe).}: # the Server ref is written once before listen
     integ.srv.send(conn, text)
 
-proc integClose(conn: ConnId; code: int): bool {.gcsafe.} =
+proc integClose(conn: ConnId; code: int; reason: string): bool {.gcsafe.} =
   {.cast(gcsafe).}:
-    integ.srv.close(conn, code)
+    integ.srv.close(conn, code, reason)
 
 proc integDispatch(name: string; args: seq[JsonNode]): JsonNode {.gcsafe.} =
   ## Stands in for the generated dispatcher.
@@ -758,7 +993,7 @@ suite "window: integration with the server":
       check c2a.readMsg() == retMsg(3, %1)
       check waitUntil(IoTimeout, proc(): bool = connectionCount() == 1)
       # A second live connection for window 1 (a duplicated tab): the newest
-      # binding wins and the displaced one is closed with 1000 rather than
+      # binding wins and the displaced one is closed with 4000 rather than
       # lingering counted but mapped to no window.
       var (c2, st2) = handshake(integ.srv.port, 1)
       check st2.startsWith("HTTP/1.1 101")
@@ -766,7 +1001,9 @@ suite "window: integration with the server":
       for _ in 0 .. 1:
         let f = c2a.readFrame()
         if f.opcode == opClose:
-          check decodeClose(f).code == CloseNormal
+          let info = decodeClose(f)
+          check info.code == CloseDisplaced
+          check info.reason == "displaced by another connection"
           dupClosed = true
           break
       check dupClosed
@@ -792,7 +1029,9 @@ suite "window: integration with the server":
       for _ in 0 .. 1:
         let f = c2.readFrame()
         if f.opcode == opClose:
-          check decodeClose(f).code == CloseNormal
+          let info = decodeClose(f)
+          check info.code == CloseNormal
+          check info.reason == ""
           sawClose = true
           break
       check sawClose

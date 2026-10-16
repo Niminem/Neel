@@ -20,7 +20,32 @@ import std/[unittest, locks, os, monotimes, times, typedthreads, net,
 # file uses `%`, `getInt`, `some`, `isNone`, ... through `import neel`'s
 # re-export, so the whole suite checks that applications get them for free.
 import neel
-import neel/[protocol, websocket, frontend, browser, testhooks]
+import neel/[protocol, websocket, frontend, browser, testhooks, signals]
+
+when defined(posix):
+  from std/posix import Sigaction, SIGINT, SIGTERM, kill, getpid
+
+  proc sigactionQuery(sig: cint; act, old: ptr Sigaction): cint
+    {.importc: "sigaction", header: "<signal.h>".}
+
+  proc actionOf(sig: cint): tuple[handler: pointer; flags: cint] =
+    var old: Sigaction
+    doAssert sigactionQuery(sig, nil, addr old) == 0
+    var flags = old.sa_flags
+    when defined(linux):
+      # glibc adds SA_RESTORER to every action it installs, so a restored
+      # SIG_DFL reads back with it set; the bit is not part of the action.
+      const SaRestorer = cint(0x04000000)
+      flags = flags and not SaRestorer
+    (cast[pointer](old.sa_handler), flags)
+
+  proc stopActions(): auto =
+    ## The current `SIGINT` and `SIGTERM` actions.
+    (actionOf(SIGINT), actionOf(SIGTERM))
+else:
+  proc stopActions(): int =
+    ## Stand-in: Windows has no way to list console control handlers.
+    0
 
 const
   IoTimeout = 3000
@@ -67,6 +92,9 @@ type
     sweepDirsLeft: int      # launched profile dirs still on disk when it ran
     sweepExited: int        # `workersExited` when it ran
     sweepAfterReturn: bool  # `startApp` had already returned when it ran
+    windowOpens: int        # `countOpen` calls
+    windowCloses: int       # `countClose` calls
+    pingIntervals: seq[int] # what `recordPingInterval` was told, per run
 
 var shared: Shared
 initLock shared.lock
@@ -102,6 +130,18 @@ proc recordWindowClose(w: Window) {.gcsafe.} =
     shared.exitedAtWindowClose = shared.workersExited
     release shared.lock
 
+proc countOpen(w: Window) {.gcsafe.} =
+  {.cast(gcsafe).}:
+    acquire shared.lock
+    inc shared.windowOpens
+    release shared.lock
+
+proc countClose(w: Window) {.gcsafe.} =
+  {.cast(gcsafe).}:
+    acquire shared.lock
+    inc shared.windowCloses
+    release shared.lock
+
 proc recordSweep() {.gcsafe.} =
   ## The test profile sweep: must run once, last, with every window, profile dir, and
   ## worker of the run already gone, and before `startApp` returns.
@@ -117,6 +157,18 @@ proc recordSweep() {.gcsafe.} =
     shared.sweepExited = shared.workersExited
     shared.sweepAfterReturn = shared.done
     release shared.lock
+
+proc recordPingInterval(ms: int) {.gcsafe.} =
+  ## The test ping observer: the interval `runApp` gave its server.
+  {.cast(gcsafe).}:
+    acquire shared.lock
+    shared.pingIntervals.add ms
+    release shared.lock
+
+proc pingIntervals(): seq[int] =
+  acquire shared.lock
+  result = shared.pingIntervals
+  release shared.lock
 
 proc fakeLaunch(url, userDataDir: string; opts: LaunchOptions): BrowserHandle
     {.gcsafe.} =
@@ -146,6 +198,7 @@ proc appThread(run: int) {.thread.} =
   {.cast(gcsafe).}:
     setTestLauncher(fakeLaunch)
     setTestProfileSweep(recordSweep)
+    setTestPingObserver(recordPingInterval)
     try:
       case run
       of 1:
@@ -155,17 +208,59 @@ proc appThread(run: int) {.thread.} =
                               workers = 4, queueCapacity = 32,
                               onWindowClose = recordWindowClose)
         finish(reason)
-      else:
+      of 2:
         let reason = startApp("fixtures/web", embedAssets = true,
                               browsers = @[], gracePeriodMs = Grace,
                               startupTimeoutMs = 2000, callTimeoutMs = 2000,
                               workers = 4, queueCapacity = 32)
+        finish(reason)
+      else:
+        let reason = startApp(webDir = "fixtures/web", embedAssets = false,
+                              serve = false, startPath = "/sub/page.html",
+                              browsers = @[], gracePeriodMs = Grace,
+                              startupTimeoutMs = 2000, callTimeoutMs = 2000,
+                              workers = 4, queueCapacity = 32,
+                              onWindowOpen = countOpen, onWindowClose = countClose)
         finish(reason)
     except CatchableError as e:
       finish(erStartupTimeout, "startApp raised " & $e.name & ": " & e.msg)
     finally:
       setTestLauncher(nil)
       setTestProfileSweep(nil)
+      setTestPingObserver(nil)
+
+const
+  ServeOrigins = @["https://MyApp.Example.com:443", "http://tunnel.example:8080"]
+    ## `allowedOrigins` of the serve-mode run (normalized by Neel).
+  ServeStartupTimeout = 300
+    ## Passed to the serve-mode run, which must ignore it.
+
+proc serveThread(args: (int, string)) {.thread.} =
+  ## `startApp` in serve mode on port `args[0]` with `startPath = args[1]`.
+  ## The fake launcher and the recording sweep are
+  ## installed so the test can check that neither runs; the nonexistent
+  ## `browserPath` would raise `NeelBrowserError` if `findBrowser` ran.
+  {.cast(gcsafe).}:
+    setTestLauncher(fakeLaunch)
+    setTestProfileSweep(recordSweep)
+    setTestPingObserver(recordPingInterval)
+    try:
+      let reason = startApp(webDir = "fixtures/web", embedAssets = false,
+                            serve = true, port = args[0],
+                            allowedOrigins = ServeOrigins,
+                            startPath = args[1],
+                            browsers = @[Chrome], browserPath = "/no/such/browser",
+                            gracePeriodMs = Grace,
+                            startupTimeoutMs = ServeStartupTimeout,
+                            callTimeoutMs = 2000, workers = 4, queueCapacity = 32,
+                            onWindowOpen = countOpen, onWindowClose = countClose)
+      finish(reason)
+    except CatchableError as e:
+      finish(erStartupTimeout, "startApp raised " & $e.name & ": " & e.msg)
+    finally:
+      setTestLauncher(nil)
+      setTestProfileSweep(nil)
+      setTestPingObserver(nil)
 
 proc resetShared() =
   acquire shared.lock
@@ -182,6 +277,9 @@ proc resetShared() =
   shared.sweepDirsLeft = -1
   shared.sweepExited = -1
   shared.sweepAfterReturn = false
+  shared.windowOpens = 0
+  shared.windowCloses = 0
+  shared.pingIntervals = @[]
   release shared.lock
 
 proc sharedPort(): int =
@@ -225,6 +323,31 @@ proc recvSome(sock: Socket; maxLen = 65536): string =
   if n < 0:
     raiseOSError(osLastError())
   result.setLen(n)
+
+proc freePort(): int =
+  ## A port that was free a moment ago: bind an ephemeral one, read it,
+  ## release it. Serve mode refuses `port = 0`.
+  let s = newSocket()
+  defer: s.close()
+  s.bindAddr(Port(0), "127.0.0.1")
+  int(s.getLocalAddr()[1])
+
+proc occupyPort(port: int): Socket =
+  ## A plain listener on `127.0.0.1:port` that Neel's own bind must fail
+  ## against.
+  result = newSocket()
+  result.bindAddr(Port(port), "127.0.0.1")
+  result.listen()
+
+proc canConnect(port: int): bool =
+  ## Whether something accepts TCP connections on `127.0.0.1:port`.
+  let s = newSocket(buffered = false)
+  defer: s.close()
+  try:
+    s.connect("127.0.0.1", Port(port), timeout = 500)
+    true
+  except OSError, TimeoutError:
+    false
 
 proc header(r: HttpReply; name: string): string =
   for (k, v) in r.headers:
@@ -314,6 +437,10 @@ proc readMsg(c: var WsClient): Msg =
 proc sendMsg(c: WsClient; m: Msg) =
   c.sock.send(encodeText(encode(m), Key))
 
+const ExposedNames = @["add", "askJs", "whichWindow", "stop", "markWorker",
+                       "openSecond", "closeSecond"]
+  ## Every proc this test binary exposes, in registration order.
+
 proc tokenIn(shim: string): string =
   ## The launch token rendered into `const TOKEN = "...";`.
   const marker = "const TOKEN = \""
@@ -348,6 +475,95 @@ template appRun(run: int; body: untyped) =
   release shared.lock
   check failure == ""
 
+template serveRun(port: int; startPath: string; body: untyped) =
+  ## `appRun` for serve mode: nothing is launched, so the test waits for
+  ## window 1 to exist instead of a launch URL.
+  resetShared()
+  var th: Thread[(int, string)]
+  createThread(th, serveThread, (port, startPath))
+  try:
+    check waitUntil(IoTimeout, proc(): bool = isDone() or windows().len == 1)
+    acquire shared.lock
+    let early = shared.failure
+    release shared.lock
+    doAssert not isDone(), "serve-mode startApp ended early: " & early
+    body
+  finally:
+    if not waitUntil(IoTimeout, isDone):
+      quitApp()
+    joinThread(th)
+  acquire shared.lock
+  let failure = shared.failure
+  release shared.lock
+  check failure == ""
+
+type
+  Attempt = object
+    ## A `startApp` call that is expected to raise before starting.
+    serve: bool
+    port: int
+    origins: seq[string]
+    error: string   # "<exception name>: <message>", or "" if it returned
+
+proc attemptThread(a: ptr Attempt) {.thread.} =
+  {.cast(gcsafe).}:
+    setTestLauncher(fakeLaunch)
+    setTestProfileSweep(recordSweep)
+    setTestPingObserver(recordPingInterval)
+    try:
+      startApp(webDir = "fixtures/web", embedAssets = false, serve = a.serve,
+               port = a.port, allowedOrigins = a.origins, browsers = @[],
+               gracePeriodMs = Grace, startupTimeoutMs = 300)
+    except CatchableError as e:
+      a.error = $e.name & ": " & e.msg
+    finally:
+      setTestLauncher(nil)
+      setTestProfileSweep(nil)
+      setTestPingObserver(nil)
+      finish(erQuit)
+
+proc attemptStart(serve: bool; port: int; origins: seq[string]): string =
+  ## Runs `startApp` on a thread (so a missing refusal cannot hang the
+  ## suite) and returns what it raised.
+  resetShared()
+  var a = Attempt(serve: serve, port: port, origins: origins)
+  var th: Thread[ptr Attempt]
+  createThread(th, attemptThread, addr a)
+  if not waitUntil(IoTimeout, isDone):
+    quitApp()
+  joinThread(th)
+  a.error
+
+proc nothingStarted(): bool =
+  ## No launch, no sweep, no hook since the last `resetShared`.
+  acquire shared.lock
+  result = shared.launches.len == 0 and shared.sweeps == 0 and
+           shared.windowOpens == 0 and shared.windowCloses == 0
+  release shared.lock
+
+proc readClose(c: var WsClient; maxFrames = 3): CloseInfo =
+  ## The first close frame among the next `maxFrames` frames, or code -1.
+  for _ in 1 .. maxFrames:
+    let f = c.readFrame()
+    if f.opcode == opClose:
+      return decodeClose(f)
+  CloseInfo(code: -1)
+
+proc readUntilClose(c: var WsClient; maxFrames = 3): int =
+  ## The close code of the first close frame among the next `maxFrames`
+  ## frames, or -1.
+  c.readClose(maxFrames).code
+
+proc opens(): int =
+  acquire shared.lock
+  result = shared.windowOpens
+  release shared.lock
+
+proc closes(): int =
+  acquire shared.lock
+  result = shared.windowCloses
+  release shared.lock
+
 # --- tests -----------------------------------------------------------------------
 
 var firstToken = ""
@@ -374,10 +590,9 @@ suite "neel: startApp end to end":
       check token.len == 32
       check token.allCharsInSet({'0' .. '9', 'a' .. 'f'})
       check ("const WINDOW_ID = 1;") in shim.body
-      const exposedNames = @["add", "askJs", "whichWindow", "stop", "markWorker",
-                             "openSecond", "closeSecond"]
-      check ("const EXPOSED = " & jsStringArrayLiteral(exposedNames) & ";") in shim.body
-      check shim.body == renderNeelJs(token, 1, exposedNames)
+      check ("const EXPOSED = " & jsStringArrayLiteral(ExposedNames) & ";") in shim.body
+      check "const SERVE = false;" in shim.body
+      check shim.body == renderNeelJs(token, 1, ExposedNames, serve = false)
       # A page that names no window (no Referer, an unparsable one, no
       # `window=`) gets the single open window.
       check http(port, NeelJsPath).body == shim.body
@@ -448,6 +663,11 @@ suite "neel: startApp end to end":
         check crossSite.status == 403
         check crossSite.body == "neel: refused: cross-site request"
         check token notin crossSite.body
+        # Even a top-level navigation (a link on another site) is refused.
+        let crossNav = http(port, target, headers = @[("Sec-Fetch-Site", "cross-site"),
+            ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Dest", "document")])
+        check crossNav.status == 403
+        check crossNav.body == "neel: refused: cross-site request"
       check http(port, NeelJsPath, headers = @[("Sec-Fetch-Site", "same-origin")]).body ==
         shim.body
       check http(port, "/", headers = @[("Sec-Fetch-Site", "none")]).status == 200
@@ -562,6 +782,8 @@ suite "neel: startApp end to end":
     let sweepExited = shared.sweepExited
     let sweepLate = shared.sweepAfterReturn
     release shared.lock
+    # Local mode creates its server without keep-alive pings.
+    check pingIntervals() == @[0]
     # The exit sweep ran once, after teardown and the joins, before returning.
     check sweeps == 1
     check sweepOpen == 0
@@ -607,15 +829,84 @@ suite "neel: startApp end to end":
     let sweeps = shared.sweeps
     let sweepDirs = shared.sweepDirsLeft
     release shared.lock
+    check pingIntervals() == @[0]
     check sweeps == 1
     check sweepDirs == 0
     check dirs.len == 1
     check not dirExists(dirs[0])
 
+  test "local mode: a non-root startPath leaves / alone; displaced 4000, closeWindow 1000, quit 1001":
+    let actionsBefore = stopActions()
+    appRun(3):
+      # Local mode installs no stop handler: Ctrl-C behaves as before.
+      check not stopHandlersInstalled()
+      check stopActions() == actionsBefore
+      let base = "http://127.0.0.1:" & $port
+      acquire shared.lock
+      check shared.launches == @[base & "/sub/page.html?window=1"]
+      release shared.lock
+      # `/` serves index.html as always; only serve mode redirects it.
+      let index = http(port, "/")
+      check index.status == 200
+      check index.header("Location") == ""
+      check index.body == readFile(FixtureDir / "index.html")
+      check http(port, NoBrowserPath).status == 200
+      let shim = http(port, NeelJsPath,
+                      headers = @[("Referer", base & "/sub/page.html?window=1")])
+      check shim.status == 200
+      let token = tokenIn(shim.body)
+      var (c, status) = handshake(port, token, 1)
+      check status.startsWith("HTTP/1.1 101")
+      check waitUntil(IoTimeout, proc(): bool = opens() == 1)
+      # A duplicated tab of window 1: the first connection is displaced with
+      # 4000, the one close code that differs from earlier releases.
+      var (d, stD) = handshake(port, token, 1)
+      check stD.startsWith("HTTP/1.1 101")
+      let displaced = c.readClose()
+      check displaced.code == CloseDisplaced
+      check displaced.reason == "displaced by another connection"
+      c.sock.close()
+      check waitUntil(IoTimeout, proc(): bool = connectionCount() == 1)
+      d.sendMsg(callMsg("whichWindow", @[], id = 1))
+      check d.readMsg() == retMsg(1, %1)
+      check opens() == 1
+      # A second window connects; closeWindow sends it 1000 as before.
+      d.sendMsg(callMsg("openSecond", @[], id = 2))
+      check d.readMsg() == retMsg(2, %2)
+      var (e, stE) = handshake(port, token, 2)
+      check stE.startsWith("HTTP/1.1 101")
+      check waitUntil(IoTimeout, proc(): bool = opens() == 2)
+      d.sendMsg(callMsg("closeSecond", @[%2], id = 3))
+      check d.readMsg() == retMsg(3, newJNull())
+      let closedByApp = e.readClose()
+      check closedByApp.code == CloseNormal
+      check closedByApp.reason == ""
+      e.sock.close()
+      check closes() == 1
+      # quitApp: shutdown sends 1001 as before.
+      d.sendMsg(callMsg("stop", @[], id = 4))
+      check d.readUntilClose() == CloseGoingAway
+      d.sock.close()
+      check waitUntil(IoTimeout, isDone)
+    check shared.reason == erQuit
+    check not stopHandlersInstalled()
+    check stopActions() == actionsBefore
+    acquire shared.lock
+    let sweeps = shared.sweeps
+    let dirs = shared.userDataDirs
+    release shared.lock
+    check pingIntervals() == @[0] # local mode sends no pings
+    check sweeps == 1
+    check closes() == 2
+    check dirs.len == 2
+    check not dirExists(dirs[0])
+    check not dirExists(dirs[1])
+
   test "a missing web directory fails before anything starts":
     resetShared()
     setTestLauncher(fakeLaunch)
     setTestProfileSweep(recordSweep)
+    setTestPingObserver(recordPingInterval)
     var msg = ""
     try:
       startApp(webDir = "fixtures/no-such-web", embedAssets = false,
@@ -625,6 +916,7 @@ suite "neel: startApp end to end":
     finally:
       setTestLauncher(nil)
       setTestProfileSweep(nil)
+      setTestPingObserver(nil)
     check "web directory not found" in msg
     check "no-such-web" in msg
     acquire shared.lock
@@ -633,7 +925,7 @@ suite "neel: startApp end to end":
     release shared.lock
 
   test "the public surface re-exports what applications need":
-    check NeelVersion == "2.0.0"
+    check NeelVersion == "2.1.0"
     check DefaultGracePeriodMs >= MinGracePeriodMs
     check DefaultMaxMessageSize == 16 * 1024 * 1024
     check currentWindowId() == NoWindow
@@ -663,6 +955,9 @@ suite "neel: startApp end to end":
     check NeelDisconnectedError is CatchableError
     check NeelRemoteError is CatchableError
     check NeelBrowserError is CatchableError
+    check NeelServeModeError is CatchableError
+    # Qualified, so the `neel/frontend` import above cannot satisfy it.
+    check neel.CloseDisplaced == 4000
     # Internal wiring stays internal. (`NeelProtocolError`, `NeelFrameError`,
     # `LaunchOptions`, `NeelJsPath`, and the test hooks are reachable here
     # only through this file's `neel/*` imports.)
@@ -677,6 +972,13 @@ suite "neel: startApp end to end":
     check not compiles(connectionOpened(1))
     check not compiles(resetJsBridge())
     check not compiles(waitForAppExit())
+    check not declared(noLaunch)
+    check not compiles(openVirtualWindow("/"))
+    # Qualified, so this file's `neel/signals` import cannot satisfy them.
+    check not compiles(neel.requestStop())
+    check not compiles(neel.installStopHandlers())
+    check not compiles(neel.removeStopHandlers())
+    check not compiles(neel.stopHandlersInstalled())
 
   test "js.<name> reaches the page unless a Nim proc accepts the proxy":
     # What docs/GUIDE.md "Calling the page from Nim" promises, checked with the
@@ -691,3 +993,279 @@ suite "neel: startApp end to end":
     # The documented collisions: Nim's own procs win.
     check typeof(js.wait.echo()) is void
     check typeof(js.wait.repr()) is string
+
+suite "neel: serve mode":
+  test "serve mode refuses port = 0 before anything starts":
+    let actionsBefore = stopActions()
+    let err = attemptStart(serve = true, port = 0, origins = @[])
+    check err.startsWith("ValueError: ")
+    check "port" in err
+    check nothingStarted()
+    check pingIntervals().len == 0 # no server was created
+    check not stopHandlersInstalled()
+    check stopActions() == actionsBefore
+
+  test "allowedOrigins without serve is refused before anything starts":
+    let actionsBefore = stopActions()
+    for port in [0, freePort()]:
+      let err = attemptStart(serve = false, port = port,
+                             origins = @["https://myapp.example.com"])
+      check err == "ValueError: neel: allowedOrigins requires serve = true"
+      check nothingStarted()
+      check pingIntervals().len == 0
+      check not stopHandlersInstalled()
+      check stopActions() == actionsBefore
+
+  test "a malformed allowedOrigins entry is refused before the port is bound":
+    let actionsBefore = stopActions()
+    let port = freePort()
+    let err = attemptStart(serve = true, port = port,
+                           origins = @["https://myapp.example.com",
+                                       "https://myapp.example.com/"])
+    check err.startsWith("ValueError: neel: allowedOrigins entry ")
+    check "path" in err
+    check nothingStarted()
+    check pingIntervals().len == 0
+    check not canConnect(port)
+    check not stopHandlersInstalled()
+    check stopActions() == actionsBefore
+
+  test "a port that is taken fails the start and leaves the signal handlers alone":
+    let actionsBefore = stopActions()
+    let port = freePort()
+    let blocker = occupyPort(port)
+    defer: blocker.close()
+    let err = attemptStart(serve = true, port = port, origins = @[])
+    check err.startsWith("OSError: ")
+    check nothingStarted()
+    check not stopHandlersInstalled()
+    check stopActions() == actionsBefore
+    # The next start on a free port installs and removes them as usual.
+    let next = freePort()
+    serveRun(next, "/"):
+      check waitUntil(IoTimeout, stopHandlersInstalled)
+      quitApp()
+      check waitUntil(IoTimeout, isDone)
+    check shared.reason == erQuit
+    check not stopHandlersInstalled()
+    check stopActions() == actionsBefore
+
+  test "no browser, / redirects, public origins, one window for every device, only quitApp ends it":
+    let port = freePort()
+    serveRun(port, "/sub/page.html"):
+      # Nothing was launched or probed (the browserPath does not exist).
+      acquire shared.lock
+      check shared.launches.len == 0
+      check shared.userDataDirs.len == 0
+      release shared.lock
+      check windows().len == 1
+      check windows()[0].id == 1
+
+      # Routing.
+      let root = http(port, "/")
+      check root.status == 302
+      check root.header("Location") == "/sub/page.html"
+      check root.body == ""
+      check http(port, "/", "HEAD").status == 302
+      check http(port, "/?window=1").header("Location") == "/sub/page.html"
+      let page = http(port, "/sub/page.html")
+      check page.status == 200
+      check page.body == readFile(FixtureDir / "sub" / "page.html")
+      check http(port, "/index.html").body == readFile(FixtureDir / "index.html")
+      check http(port, "/", "POST").status == 405
+      let noBrowser = http(port, NoBrowserPath)
+      check noBrowser.status == 404
+      check "fallback" notin noBrowser.body
+
+      # The shim: a page loaded through a proxy names no window.
+      let shim = http(port, NeelJsPath, host = "myapp.example.com",
+                      headers = @[("Referer", "https://myapp.example.com/sub/page.html")])
+      check shim.status == 200
+      check "const WINDOW_ID = 1;" in shim.body
+      let token = tokenIn(shim.body)
+      # The serve-mode shim: dormant instead of terminated after giving up.
+      check "const SERVE = true;" in shim.body
+      check shim.body == renderNeelJs(token, 1, ExposedNames, serve = true)
+
+      # Request filtering with the configured (normalized) origins.
+      let login = http(port, "/sub/page.html", host = "myapp.example.com",
+                       headers = @[("Sec-Fetch-Site", "cross-site"),
+                                   ("Sec-Fetch-Mode", "navigate"),
+                                   ("Sec-Fetch-Dest", "document")])
+      check login.status == 200
+      check http(port, "/", host = "tunnel.example:8080").status == 302
+      let foreign = http(port, "/", host = "attacker.example")
+      check foreign.status == 403
+      check foreign.body == "neel: refused: the Host header must be 127.0.0.1:" &
+        $port & " or the host of an allowed origin"
+      let framed = http(port, "/sub/page.html", headers = @[
+        ("Sec-Fetch-Site", "cross-site"), ("Sec-Fetch-Mode", "navigate"),
+        ("Sec-Fetch-Dest", "iframe")])
+      check framed.status == 403
+
+      # Well past startupTimeoutMs without a connection: still running.
+      sleep(ServeStartupTimeout + 400)
+      check not isDone()
+      check windows().len == 1
+      check opens() == 0
+
+      # Device A, through the proxy.
+      var (a, stA) = handshake(port, token, 1, host = "myapp.example.com",
+                               origin = "https://myapp.example.com")
+      check stA.startsWith("HTTP/1.1 101")
+      a.sendMsg(callMsg("add", @[%2, %3], id = 1))
+      check a.readMsg() == retMsg(1, %5)
+      a.sendMsg(callMsg("whichWindow", @[], id = 2))
+      check a.readMsg() == retMsg(2, %1)
+      check opens() == 1
+      # The window API that serve mode does not support answers structurally.
+      a.sendMsg(callMsg("openSecond", @[], id = 3))
+      let opened = a.readMsg()
+      check opened.kind == msgErr
+      check opened.id == 3
+      check opened.error.kind == "NeelServeModeError"
+      a.sendMsg(callMsg("closeSecond", @[%1], id = 4))
+      let closed = a.readMsg()
+      check closed.kind == msgErr
+      check closed.error.kind == "NeelServeModeError"
+      check windows().len == 1
+
+      # Device B, on the machine itself, displaces A.
+      var (b, stB) = handshake(port, token, 1)
+      check stB.startsWith("HTTP/1.1 101")
+      let displaced = a.readClose()
+      check displaced.code == CloseDisplaced
+      check displaced.reason == "displaced by another connection"
+      a.sock.close()
+      b.sendMsg(callMsg("whichWindow", @[], id = 1))
+      check b.readMsg() == retMsg(1, %1)
+      check opens() == 1
+
+      # B goes away; well past gracePeriodMs the app is still up.
+      b.sock.close()
+      check waitUntil(IoTimeout, proc(): bool = connectionCount() == 0)
+      sleep(Grace + 400)
+      check not isDone()
+      check windows().len == 1
+      check closes() == 0
+
+      # Device C, behind a proxy that rewrites Host, reconnects to window 1.
+      var (c, stC) = handshake(port, token, 1, origin = "http://tunnel.example:8080")
+      check stC.startsWith("HTTP/1.1 101")
+      c.sendMsg(callMsg("whichWindow", @[], id = 1))
+      check c.readMsg() == retMsg(1, %1)
+      check opens() == 1
+
+      # quitApp ends the run.
+      c.sendMsg(callMsg("stop", @[], id = 2))
+      check c.readUntilClose() == CloseGoingAway
+      c.sock.close()
+      check waitUntil(IoTimeout, isDone)
+    check shared.reason == erQuit
+    check opens() == 1
+    check closes() == 1
+    check pingIntervals() == @[30_000] # serve mode pings idle connections
+    acquire shared.lock
+    check shared.sweeps == 0
+    check shared.launches.len == 0
+    release shared.lock
+
+  test "a startPath whose path is / (query or fragment only) is not redirected to":
+    # Redirecting `/` to `/?tab=2` or `/#x` would land on `/` again forever.
+    for startPath in ["/?tab=2", "/#settings", "", "/"]:
+      let port = freePort()
+      serveRun(port, startPath):
+        let root = http(port, "/")
+        check root.status == 200
+        check root.header("Location") == ""
+        check root.body == readFile(FixtureDir / "index.html")
+        quitApp()
+        check waitUntil(IoTimeout, isDone)
+      check shared.reason == erQuit
+    # A startPath without a leading slash is redirected to its absolute form.
+    let port = freePort()
+    serveRun(port, "sub/page.html"):
+      check http(port, "/").header("Location") == "/sub/page.html"
+      quitApp()
+      check waitUntil(IoTimeout, isDone)
+
+template serveRunStoppedBy(stopAction: untyped) =
+  ## A serve run with one connected device, ended by `stopAction` (with
+  ## `port` bound) instead of `quitApp`. It must end exactly like a
+  ## `quitApp` run, and leave the previous signal handlers in place.
+  let actionsBefore = stopActions()
+  let port {.inject.} = freePort()
+  serveRun(port, "/"):
+    # Window 1 exists before the handlers go in; a signal before then would
+    # reach the previous handler.
+    check waitUntil(IoTimeout, stopHandlersInstalled)
+    when defined(posix):
+      check stopActions() != actionsBefore
+    let token = tokenIn(http(port, NeelJsPath).body)
+    var (c, st) = handshake(port, token, 1)
+    check st.startsWith("HTTP/1.1 101")
+    c.sendMsg(callMsg("add", @[%1, %2], id = 1))
+    check c.readMsg() == retMsg(1, %3)
+    check opens() == 1
+    let t0 = getMonoTime()
+    stopAction
+    check waitUntil(IoTimeout, isDone)
+    # Noticed within IdleTickMs (1 s), then the usual shutdown.
+    check int((getMonoTime() - t0).inMilliseconds) < 1000 + 1000
+    # Read only now: the signal has been handled, so no read is interrupted.
+    check c.readUntilClose() == CloseGoingAway
+    c.sock.close()
+  check shared.reason == erQuit
+  check opens() == 1
+  check closes() == 1 # onWindowClose, once, at teardown
+  acquire shared.lock
+  check shared.sweeps == 0
+  release shared.lock
+  check not stopHandlersInstalled()
+  check stopActions() == actionsBefore
+
+when defined(windows):
+  type CloseCall = object
+    port: int
+    returned: int32
+    tookMs: int
+    portOpenAfter: bool   # whether the server still listened when it returned
+
+  proc consoleClose(c: ptr CloseCall) {.thread.} =
+    ## What Windows does when the console window is closed: run the handler
+    ## on a thread of its own, then end the process once it returns.
+    let t0 = getMonoTime()
+    c.returned = onConsoleCtrl(CtrlCloseEvent)
+    c.tookMs = int((getMonoTime() - t0).inMilliseconds)
+    c.portOpenAfter = canConnect(c.port)
+
+suite "neel: serve mode stop signals":
+  when defined(posix):
+    test "SIGTERM sent to the process ends the run like quitApp; handlers restored":
+      serveRunStoppedBy:
+        check kill(getpid(), SIGTERM) == 0
+
+    test "SIGINT sent to the process ends the run like quitApp; Nim's handler restored":
+      # Without Neel's handler, Nim's own SIGINT handler would end this process.
+      serveRunStoppedBy:
+        check kill(getpid(), SIGINT) == 0
+
+  when defined(windows):
+    test "Ctrl-C (handler called directly) ends the run like quitApp":
+      serveRunStoppedBy:
+        check onConsoleCtrl(CtrlCEvent) == 1
+
+    test "Ctrl-Break (handler called directly) ends the run like quitApp":
+      serveRunStoppedBy:
+        check onConsoleCtrl(CtrlBreakEvent) == 1
+
+    test "closing the console: the handler returns once startApp has shut down":
+      var call: CloseCall
+      var th: Thread[ptr CloseCall]
+      serveRunStoppedBy:
+        call.port = port
+        createThread(th, consoleClose, addr call)
+      joinThread(th)
+      check call.returned == 1
+      check call.tookMs < ShutdownWaitMs   # released by the report, not the timeout
+      check not call.portOpenAfter

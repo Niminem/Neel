@@ -43,7 +43,7 @@
       </li>
       <li>
         <strong>Reconnect and give up</strong>: the shim reconnects only after
-        an abnormal close (any code but 1000/1001), which Neel never sends on
+        an abnormal close (any code but 1000/1001/4000), which Neel never sends on
         purpose, so kill the process instead: <code>kill -9 &lt;pid&gt;</code>
         (the pid is in the asJson() output). The status above switches to
         "reconnecting (close code 1006 ...)" at once. Press "whoAmI()" right
@@ -63,8 +63,8 @@
         browser window at the same URL. Now refresh <em>this</em> (old)
         window: it loads a fresh /neel.js with the new token, binds as window
         1 and works again (press "whoAmI()"), while the window the restart
-        opened is displaced and goes dead ("server closed the connection
-        (close code 1000)": both pages carry <code>?window=1</code>, and the
+        opened is displaced and goes dead (status "closed (close code 4000
+        ...)": both pages carry <code>?window=1</code>, and the
         most recent connection wins). Before refreshing, the old page cannot
         reconnect on its own because its token is stale.
       </li>

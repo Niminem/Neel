@@ -6,7 +6,7 @@ Write the user interface in HTML, CSS, and JavaScript and everything else in Nim
 
 > Neel runs its own thread-based HTTP/WebSocket server on `127.0.0.1`, in the spirit of [Mummy](https://github.com/guzba/mummy): one IO thread owns the sockets, a pool of worker threads runs your procs, and there is no async anywhere. It opens Chrome, Chromium, or Edge in app mode on that server, so your app gets its own window without tabs or an address bar. When none of them is installed, or when you ask for it, the app opens in a tab of your default browser instead.
 
-**This README gets you started and very well may be all you need. Every detail (the full type list, error messages, browser discovery, lifecycle, threading, and caveats) is in the [Neel 2.0 guide](docs/GUIDE.md).**
+**This README gets you started and very well may be all you need. Every detail (the full type list, error messages, browser discovery, lifecycle, threading, and caveats) is in the [Neel 2.1 guide](docs/GUIDE.md).**
 
 Features:
 
@@ -17,6 +17,7 @@ Features:
 - Structured errors across the bridge: a Nim exception reaches JS as `e.name` / `e.message`, a JS error reaches Nim as `NeelRemoteError`
 - Multiple windows, each addressable from Nim
 - Browser discovery (Chrome, Chromium, Edge) with a default-browser fallback
+- Serve mode: the same app as a persistent server without a browser, opened from any of your devices through an SSH forward, a tunnel, or a reverse proxy
 - Frontend assets embedded into the binary in `release` builds
 - Zero dependencies: the Nim standard library only
 - Hardened against other websites open in the same browser
@@ -39,7 +40,7 @@ The best visualization libraries that exist are in JavaScript, and the most powe
 - No Nimble dependencies, only the standard library.
 - Google Chrome, Chromium, or Microsoft Edge for app-mode windows; without one of them, any default browser, in a tab.
 
-Neel 2.0 is verified on macOS, Windows, and Linux (Ubuntu). Edge is verified on Windows only (as Edge is just edge-case browser on other OSs).
+Neel 2.1 is verified on macOS, Windows, and Linux (Ubuntu). Edge is verified on Windows only (as Edge is just edge-case browser on other OSs).
 
 ## Installation
 
@@ -324,15 +325,50 @@ on Windows this suppresses the console window; on macOS it produces an
 `.app` bundle that launches without a Terminal session. On Linux most
 window managers already hide the terminal of a backgrounded process.
 
+## Serve mode
+
+Serve mode runs the same app as a persistent server for one user: no browser is launched, and you open the app yourself, from this machine or from any of your devices through an SSH port forward, a tunnel, or a reverse proxy.
+
+```nim
+startApp(serve = true, port = 8080,
+         allowedOrigins = @["https://myapp.example.com"])
+```
+
+- The app prints `neel: serving http://127.0.0.1:8080 (allowed origins: https://myapp.example.com)` and runs until `quitApp()` or a stop signal (Ctrl-C, `SIGTERM`, closing the console window on Windows); `startApp` then returns `erQuit`.
+- The server still binds `127.0.0.1` only. `allowedOrigins` lists the public origins your tunnel or proxy serves the app at; an SSH forward to `http://127.0.0.1:8080` needs none. Serve mode needs a fixed `port`.
+- There is one window, used by whichever device connected last. Opening the app on another device displaces the previous page, whose `neel.onclose` reports `4000` (`CloseDisplaced`).
+- Pages that lose the connection (a phone that slept, a tunnel that dropped) reconnect when they become visible again or the network comes back.
+- Neel authenticates no one: put a private tunnel or an authenticating proxy in front of it.
+
+Everything else (validation, stop signals, reconnecting, the reload recipe for server restarts, the security model, and setups): [Serve mode](docs/GUIDE.md#serve-mode). A runnable app: [`examples/serve`](examples/serve). Reaching it from anywhere behind a login: [Cloudflare Tunnel with Access](docs/CLOUDFLARE_ACCESS.md).
+
 ## Before You Start
 
 Keep the following in mind when developing your Neel app:
 
-- Exposed procs run concurrently on worker threads, even two calls from the same page issued back to back. Guard shared state with a `Lock`, an `Atomic`, or a channel.
+- Exposed procs run concurrently on worker threads, even two calls from the same page issued back to back. Guard shared state with a `Lock`, an `Atomic`, or a channel. A global of a GC'd type (`seq`, `string`, `Table`, ...) also needs `{.cast(gcsafe).}` around the locked access, or the compiler rejects it:
+
+  ```nim
+  import std/locks
+
+  var
+    historyLock: Lock
+    history: seq[string] # guarded by historyLock
+
+  initLock historyLock
+
+  proc remember(item: string): int {.expose.} =
+    withLock historyLock:
+      {.cast(gcsafe).}: # sound only because every access holds the lock
+        history.add item
+        result = history.len
+  ```
+
+  More in [Shared state](docs/GUIDE.md#shared-state).
 - There is no ordering guarantee between messages on one connection: if one call must finish before the next starts, `await` it first.
 - A Defect (`IndexDefect`, `AssertionDefect`, ...) raised in an exposed proc terminates the app; only `CatchableError`s become errors in the page.
 - The grace period (3 s in debug builds, 10 s in release builds, `gracePeriodMs`) exists because a page refresh or a dropped connection looks like a closed window for a moment; the app exits only when no window comes back within it.
-- Security: the server binds `127.0.0.1` only, and a per-launch token plus `Host` and `Origin` checks keep other websites in the user's browser out. The local machine is trusted, so treat the arguments of an exposed proc as untrusted input.
+- Security: the server binds `127.0.0.1` only, and a per-launch token plus `Host` and `Origin` checks keep other websites in the user's browser out. The local machine is trusted, so treat the arguments of an exposed proc as untrusted input. In serve mode Neel trusts whoever can reach the server through your tunnel or proxy: see [Security in serve mode](docs/GUIDE.md#security-in-serve-mode).
 
 More in [Threading model](docs/GUIDE.md#threading-model), [Security](docs/GUIDE.md#security), and [Caveats](docs/GUIDE.md#caveats).
 
@@ -341,6 +377,7 @@ More in [Threading model](docs/GUIDE.md#threading-model), [Security](docs/GUIDE.
 Run them from the repository root with `nim c -r examples/<name>/<name>.nim`:
 
 - [File picker](examples/filepicker): the example above, and the one to start with; one exposed proc with a return value and two structured errors.
+- [Serve mode](examples/serve): a shared note served without a browser on port 5359, opened from your other devices through an SSH forward or a tunnel; shows every connection state a serve-mode page handles (displaced, dormant, server restarted).
 
 The other two exist mostly for manual (and stress) testing of Neel itself, but they are interesting to read to see how Neel does things:
 
@@ -348,6 +385,12 @@ The other two exist mostly for manual (and stress) testing of Neel itself, but t
 - [Stress test](examples/stresstest): exercises every feature in one page, under load and in edge cases (every supported type, every error kind, hundreds of concurrent calls, large payloads, pushes from a plain thread).
 
 
+
+## What's New in 2.1
+
+- [Serve mode](#serve-mode): `startApp(serve = true, port = ..., allowedOrigins = ...)` runs the app as a persistent server without a browser, reached through an SSH forward, a tunnel, or a reverse proxy.
+- A displaced connection (another tab or device taking a window over) now closes with code `4000` (`CloseDisplaced`) instead of `1000`.
+- On Windows, starting a second app on a fixed port that is already in use now fails with `OSError`, as it already did on macOS and Linux.
 
 ## What's New in 2.0 / Migrating from 1.x
 

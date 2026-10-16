@@ -1,11 +1,13 @@
-## neel.nim - public surface of Neel 2.0.
+## neel.nim - public surface of Neel 2.1.
 ##
 ## This is the only module an application imports. It provides `startApp`
 ## and re-exports the user-facing pieces of the internal modules under
 ## `neel/`: the `expose` pragma, the `js` proxy, the window API (`openWindow`,
 ## `closeWindow`, `windows`, `window`, `requireWindow`, `currentWindow`), the
-## `Browser` enum and window size / position types, `quitApp`, and the
-## `Neel*Error` exception types an application can see. It also re-exports `std/json` and `std/options`, because
+## `Browser` enum and window size / position types, `quitApp`, the
+## `CloseDisplaced` close code (what `neel.onclose` reports when another tab
+## or device takes a window over), and the `Neel*Error` exception types an
+## application can see. It also re-exports `std/json` and `std/options`, because
 ## the API hands out `JsonNode` (`js.wait.foo(...)`) and `Option` (`window(id)`,
 ## `size = some((800, 600))`) values that an application needs to unpack.
 ##
@@ -16,27 +18,33 @@
 ## keyword argument verbatim to `runApp`, the private proc that wires the
 ## server, protocol, window, and browser modules together and blocks the
 ## calling thread until the last window closes (plus the grace period),
-## `quitApp()` is called, or no window ever connects. All IO and all exposed
-## procs run on Neel's own threads: the IO thread owns the sockets, a pool of
-## workers runs the hooks and the exposed procs, and `js.wait.*` may be used
-## from any thread that knows a window.
+## `quitApp()` is called, or no window ever connects (in serve mode, until
+## `quitApp()` or a stop signal: `SIGINT` / `SIGTERM`, or Ctrl-C, Ctrl-Break,
+## and closing the console on Windows; no browser is launched). All IO and
+## all exposed procs run on Neel's own threads: the IO thread owns the
+## sockets, a pool of workers runs the hooks and the exposed procs, and
+## `js.wait.*` may be used from any thread that knows a window.
 ##
 ## Routes served by `runApp`'s request handler (all on `127.0.0.1`). Every
 ## request first passes `frontend.requestRefusal` (`Host` must be
 ## `127.0.0.1:<port>`, no `Sec-Fetch-Site: cross-site`, and for `/ws` an
-## `Origin` of `http://127.0.0.1:<port>`), otherwise 403:
+## `Origin` of `http://127.0.0.1:<port>`; in serve mode the hosts and
+## origins of `allowedOrigins` are accepted too, and cross-site top-level
+## navigations pass), otherwise 403:
 ## - `/ws`: the WebSocket upgrade; requires the launch token and a known
 ##   window id in the query, otherwise 403.
 ## - `/neel.js`: the browser shim rendered for one window (token, window id,
-##   exposed names), `Cache-Control: no-store`. The window is the `window=`
-##   of the page URL in `Referer`; 404 when it names a window that is not
-##   open, or when it names none and more than one window is open.
+##   exposed names, serve flag), `Cache-Control: no-store`. The window is the
+##   `window=` of the page URL in `Referer`; 404 when it names a window that
+##   is not open, or when it names none and more than one window is open.
 ## - `/neel/no-browser`: the page shown when no browser was found and
-##   `fallback = false`.
+##   `fallback = false`; 404 in serve mode.
+## - `/` in serve mode, when `startPath` names another page: a 302 to it.
 ## - everything else: the web directory through `neel/assets`.
 ##
-## Tests replace the browser launch and the exit-time profile sweep through
-## `neel/testhooks`, which is not re-exported.
+## Tests replace the browser launch and the exit-time profile sweep, and
+## observe the server's ping interval, through `neel/testhooks`, which is
+## not re-exported.
 ##
 ## Everything else lives in `neel/*.nim`; each module's header comment states
 ## its single responsibility.
@@ -50,7 +58,7 @@ when (NimMajor, NimMinor, NimPatch) < (2, 2, 12):
 
 import std/[json, options, strutils, sysrand, uri, macros, os]
 import neel/[http, server, pool, protocol, expose, jsproxy, frontend, browser,
-             window, assets, testhooks]
+             window, assets, testhooks, signals]
 from neel/websocket import DefaultMaxMessageSize
 
 # --- re-exports ------------------------------------------------------------------
@@ -70,17 +78,22 @@ export jsproxy except initJsBridge, resetJsBridge, SendProc, WindowResolver,
 export window.Window, ExitReason, WindowHook, openWindow, closeWindow,
        windows, window.window, requireWindow, currentWindow, isOpen,
        isConnected, quitApp, connectionCount, DefaultGracePeriodMs,
-       MinGracePeriodMs, DefaultStartupTimeoutMs
+       MinGracePeriodMs, DefaultStartupTimeoutMs, NeelServeModeError
 export Browser, NeelBrowserError, WindowSize, WindowPosition
+export CloseDisplaced
 export NeelTimeoutError, NeelDisconnectedError, NeelRemoteError
 export DefaultWorkers, DefaultQueueCapacity, DefaultMaxMessageSize
 
 const
-  NeelVersion* = "2.0.0"
+  NeelVersion* = "2.1.0"
     ## Library version string, kept in sync with `neel.nimble`.
   TokenBytes = 16
     ## Random bytes in the launch token (rendered as 32 lowercase hex chars,
     ## so the `/ws` query needs no percent-decoding).
+  PingIntervalMs = 30_000
+    ## Serve mode's keep-alive ping interval: below nginx's 60 s
+    ## `proxy_read_timeout` and the ~100 s after which Cloudflare closes an
+    ## idle WebSocket. Local mode sends no pings.
 
 type
   AppState = object
@@ -97,6 +110,9 @@ type
     assets: AssetSource
     dispatch: DispatchProc
     exposed: seq[string]
+    filter: RequestFilter
+    serve: bool
+    rootRedirect: string   # `Location` for `GET /`; "" serves `/` as usual
 
 var app: AppState
   ## Module global behind `startApp`; see `AppState`.
@@ -118,6 +134,39 @@ proc debugLog(msg: string) =
       stderr.writeLine(msg)
     except IOError:
       discard
+
+proc printLine(msg: string) =
+  ## Writes `msg` to stdout in every build. An app built without a console
+  ## (`--app:gui`) has no usable stdout, so a failed write is ignored.
+  try:
+    stdout.writeLine(msg)
+    stdout.flushFile()
+  except IOError:
+    discard
+
+proc checkServeParams(serve: bool; port: int; allowedOrigins: seq[string]) =
+  ## The parameter combinations serve mode forbids, checked before anything
+  ## is bound. The entries themselves are checked by `initRequestFilter`,
+  ## which accepts origins without `serve` and would ignore them silently.
+  if serve and port == 0:
+    raise newException(ValueError, "neel: serve mode needs a fixed port " &
+      "(port = 0 picks a random one, which a tunnel or proxy cannot reach)")
+  if not serve and allowedOrigins.len > 0:
+    raise newException(ValueError, "neel: allowedOrigins requires serve = true")
+
+proc rootRedirectFor(startPath: string): string =
+  ## Where serve mode sends `GET /`: `startPath` with a leading `/`, or `""`
+  ## when its path (before any `?` or `#`) is `/` itself, which a redirect
+  ## would send back to `/` forever.
+  var p = startPath
+  if p.len == 0 or p[0] != '/':
+    p = "/" & p
+  let pathEnd = p.find({'?', '#'})
+  if (if pathEnd < 0: p else: p[0 ..< pathEnd]) == "/": "" else: p
+
+proc serveStartupLine(port: int; origins: seq[string]): string =
+  "neel: serving http://" & LoopbackHost & ":" & $port & " (allowed origins: " &
+    (if origins.len == 0: "none" else: origins.join(", ")) & ")"
 
 proc newToken(): string =
   ## `TokenBytes` bytes from the OS random source as lowercase hex.
@@ -193,9 +242,9 @@ proc appSend(conn: ConnId; text: string): bool {.gcsafe.} =
   ## `SendProc` for the js bridge.
   appPtr().srv.send(conn, text)
 
-proc appClose(conn: ConnId; code: int): bool {.gcsafe.} =
+proc appClose(conn: ConnId; code: int; reason: string): bool {.gcsafe.} =
   ## `CloseProc` for the window manager.
-  appPtr().srv.close(conn, code)
+  appPtr().srv.close(conn, code, reason)
 
 proc handleWs(a: ptr AppState; conn: ConnId; req: HttpRequest): RequestAction =
   ## `/ws`: a valid upgrade with the launch token and a known window id is
@@ -241,13 +290,17 @@ proc neelJsWindowId(req: HttpRequest): tuple[id, named: int] =
 proc handleRequest(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
   ## The route table (see the module header), behind `requestRefusal`.
   let a = appPtr()
-  let refusal = requestRefusal(req, a.srv.port)
+  let refusal = requestRefusal(req, a.srv.port, a.filter)
   if refusal.len > 0:
     return respond(initResponse(403, refusal, "text/plain"))
   if req.path == WsPath:
     return handleWs(a, conn, req)
   if req.httpMethod notin {hmGet, hmHead}:
     return respond(methodNotAllowed())
+  if req.path == "/" and a.rootRedirect.len > 0:
+    var r = initResponse(302)
+    r.addHeader("Location", a.rootRedirect)
+    return respond(r)
   case req.path
   of NeelJsPath:
     let (id, named) = neelJsWindowId(req)
@@ -260,10 +313,13 @@ proc handleRequest(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
           "neel.js: cannot tell which window this page belongs to; open the " &
           "page through Neel (its URL carries ?window=<id>)"
       return respond(initResponse(404, reason, "text/plain"))
-    var r = okResponse(renderNeelJs(a.token, id, a.exposed), "application/javascript")
+    var r = okResponse(renderNeelJs(a.token, id, a.exposed, a.serve),
+                       "application/javascript")
     r.addHeader("Cache-Control", "no-store")
     respond(r)
   of NoBrowserPath:
+    if a.serve:
+      return respond(notFound())
     var r = okResponse(noBrowserPage(a.search, a.fallback), "text/html; charset=utf-8")
     r.addHeader("Cache-Control", "no-store")
     respond(r)
@@ -316,7 +372,8 @@ proc sweepAbandonedProfiles(sweep: ProfileSweep) =
     discard
 
 proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
-             startPath = "/"; port = 0; workers = DefaultWorkers;
+             startPath = "/"; port = 0; serve = false;
+             allowedOrigins: seq[string] = @[]; workers = DefaultWorkers;
              queueCapacity = DefaultQueueCapacity;
              callTimeoutMs = DefaultCallTimeoutMs;
              maxMessageSize = DefaultMaxMessageSize;
@@ -336,49 +393,81 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   ## `teardownWindows`, the table is dropped), and last the profile sweep
   ## (`sweepProfiles()`: delete profile dirs abandoned by killed or crashed
   ## apps, within `SweepBudgetMs`). `testhooks` may replace the browser
-  ## launch and the sweep (tests inject fakes); both are read once here.
+  ## launch and the sweep (tests inject fakes) and observe the server's ping
+  ## interval; all three are read once here.
   ## When no browser is found and `fallback` is `false`, the error page has
   ## been opened in the default browser: it is served for `gracePeriodMs`,
   ## then the `NeelBrowserError` propagates after teardown. A disk-mode web
   ## directory that does not exist raises `OSError` before anything starts
   ## (embedding already fails at compile time).
+  ##
+  ## Serve mode (`serve = true`) first rejects `port = 0` and a malformed
+  ## `allowedOrigins` entry (`ValueError`; `allowedOrigins` without `serve`
+  ## is rejected too), skips `findBrowser` and the test launcher, creates
+  ## window 1 with `openVirtualWindow` (nothing is launched), installs the
+  ## stop-signal handlers (`neel/signals`), pings WebSocket connections idle
+  ## for 30 s, so proxies keep them open (local mode sends no pings), prints
+  ## `neel: serving http://127.0.0.1:<port> (allowed origins: ...)` to stdout,
+  ## waits for `quitApp()` or a stop signal (both `erQuit`), and skips the
+  ## profile sweep. After `shutdown` it reports shutdown finished (a Windows
+  ## console-close handler waits for that) and restores the previous signal
+  ## handlers, also when the run raised. The browser parameters,
+  ## `gracePeriodMs`, and `startupTimeoutMs` are ignored.
   doAssert not dispatch.isNil, "runApp: dispatch is nil"
   doAssert not app.running, "startApp is already running in this process"
+  checkServeParams(serve, port, allowedOrigins)
+  let filter = initRequestFilter(serve, allowedOrigins)
   if assets.mode == amDisk and not dirExists(assets.root):
     raise newException(OSError, "neel: web directory not found: " & assets.root)
-  let launcher = testLauncher()
+  let launcher = if serve: Launcher(noLaunch) else: testLauncher()
   let profileSweep = testProfileSweep()
-  let search = findBrowser(browsers, browserPath)
+  let pingObserver = testPingObserver()
+  let search = if serve: BrowserSearch() else: findBrowser(browsers, browserPath)
   app = AppState(running: true, token: newToken(), search: search,
                  fallback: fallback, assets: assets, dispatch: dispatch,
-                 exposed: exposed)
+                 exposed: exposed, filter: filter, serve: serve,
+                 rootRedirect: if serve: rootRedirectFor(startPath) else: "")
   app.tbl = newPendingTable()
   app.srv = newServer(onRequest = handleRequest, onMessage = handleMessage,
                       onOpen = connectionOpened, onClose = connectionClosed,
                       workers = workers, queueCapacity = queueCapacity,
-                      maxMessageSize = maxMessageSize)
+                      maxMessageSize = maxMessageSize,
+                      pingIntervalMs = if serve: PingIntervalMs else: 0)
   try:
+    if not pingObserver.isNil:
+      pingObserver(app.srv.pingIntervalMs)
     initJsBridge(appSend, resolveWindow, app.tbl, callTimeoutMs)
     app.srv.listen(port)
     let base = "http://" & LoopbackHost & ":" & $app.srv.port
     initWindows(appClose, app.tbl, base, search, fallback,
                 LaunchOptions(size: size, position: position, extraFlags: extraFlags),
                 gracePeriodMs, startupTimeoutMs, launcher, onWindowOpen,
-                onWindowClose)
-    try:
-      discard openWindow(startPath)
-    except NeelBrowserError as e:
+                onWindowClose, serve)
+    if serve:
+      discard openVirtualWindow(startPath)
+      installStopHandlers()
+      printLine(serveStartupLine(app.srv.port, filter.origins))
+    else:
       try:
-        stderr.writeLine("neel: " & e.msg)
-      except IOError:
-        discard
-      sleep(gracePeriodMs) # let the default browser fetch the error page
-      raise
+        discard openWindow(startPath)
+      except NeelBrowserError as e:
+        try:
+          stderr.writeLine("neel: " & e.msg)
+        except IOError:
+          discard
+        sleep(gracePeriodMs) # let the default browser fetch the error page
+        raise
     result = waitForAppExit()
   finally:
-    app.srv.shutdown(beforeJoin = releaseSharedState)
-    app = AppState()
-    sweepAbandonedProfiles(profileSweep)
+    try:
+      app.srv.shutdown(beforeJoin = releaseSharedState)
+      app = AppState()
+    finally:
+      if serve:
+        reportShutdownFinished()
+        removeStopHandlers()
+    if not serve:
+      sweepAbandonedProfiles(profileSweep)
 
 proc stampCallSite(n, site: NimNode) =
   ## Gives every node the macro created (recognisable by carrying this
@@ -414,6 +503,14 @@ macro startApp*(args: varargs[untyped]): untyped =
   ##   `gracePeriodMs = DefaultGracePeriodMs` (exit this long after the last
   ##   window closes; at least `MinGracePeriodMs`),
   ##   `startupTimeoutMs = DefaultStartupTimeoutMs`.
+  ## - `serve = false`: serve mode. No browser is launched and the app runs
+  ##   until `quitApp()`, with one window shared by whichever device
+  ##   connected last. Needs a fixed `port`; ignores the browser parameters,
+  ##   `gracePeriodMs`, and `startupTimeoutMs`.
+  ## - `allowedOrigins: seq[string] = @[]`: serve mode only. Extra origins
+  ##   (`https://host[:port]` or `http://host[:port]`) the app may be loaded
+  ##   from, e.g. through a tunnel or reverse proxy. Raises `ValueError` for
+  ##   a malformed entry.
   ## - `browsers = @[Chrome, Chromium, Edge]`, `fallback = true`, `browserPath = ""`,
   ##   `size = none(WindowSize)`, `position = none(WindowPosition)`,
   ##   `extraFlags: seq[string] = @[]`.

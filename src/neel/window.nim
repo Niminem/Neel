@@ -1,7 +1,7 @@
 ## window.nim - `Window` type, connection <-> window mapping, and app lifecycle.
 ##
-## A `Window` is a small copyable handle (`id` plus the `js*: JsProxy` field
-## Task 9 requires, so `win.js.foo(...)` works from any thread). The state
+## A `Window` is a small copyable handle (`id` plus a `js*: JsProxy` field,
+## so `win.js.foo(...)` works from any thread). The state
 ## behind it is a shared-allocated record kept in a module-level table: the
 ## browser handle from `browser.nim`, the current `ConnId` (if any), one
 ## `IdAllocator` for Nim -> JS call ids, and the launch parameters. Records are
@@ -16,9 +16,10 @@
 ## (they drive the connection count); `windowIdOf(conn)` is what `onMessage`
 ## wraps `handleCall` with (`withCurrentWindow`). A page refresh or a shim
 ## reconnect presents the same window id on a new `ConnId`: `bindConnection`
-## re-associates (and closes the displaced connection, should it still be
-## alive), and `connectionClosed` clears a window's connection only if it
-## still points at the closing `ConnId`.
+## re-associates (and closes the displaced connection with
+## `frontend.CloseDisplaced`, should it still be alive), and
+## `connectionClosed` clears a window's connection only if it still points at
+## the closing `ConnId`.
 ##
 ## API: `openWindow(path, size, position, extraFlags)` allocates an id (1, 2,
 ## 3, ...), builds `<base><path>?window=<id>` (`frontend.WindowQueryParam`),
@@ -38,17 +39,27 @@
 ## the main thread until the grace period expires (`erLastWindowClosed`),
 ## `quitApp()` is called from any thread (`erQuit`), or no window ever
 ## connected within the startup timeout (`erStartupTimeout`). It never calls
-## server `shutdown` itself: Task 13's `startApp` does `waitForAppExit` ->
+## server `shutdown` itself: `startApp` does `waitForAppExit` ->
 ## `shutdown` -> `resetJsBridge` -> `teardownWindows` on the main thread.
 ## While waiting, the main thread also retires windows whose connection has
 ## been gone for a grace period (the browser window was closed by the user),
 ## so `windows()` stays truthful in multi-window apps. Every wait is bounded.
 ##
+## Serve mode (`initWindows(serve = true)`): `startApp` creates window 1 with
+## `openVirtualWindow` through a launcher that launches nothing (`noLaunch`),
+## and that window is never retired: `waitForAppExit` returns only `erQuit`
+## (after `quitApp()`, or after `requestStop()` from a stop-signal handler),
+## `onWindowOpen` fires on the first connection ever, `onWindowClose` only in
+## `teardownWindows`. `openWindow` and `closeWindow` raise
+## `NeelServeModeError`. No profile directory is created or cleared.
+##
 ## Threading: everything callable from hooks or exposed procs is
 ## `{.gcsafe.}`. One `Lock` guards the table, every record's mutable fields,
 ## and the lifecycle state; `initWindows` / `teardownWindows` run on the main
 ## thread while no worker can touch the module. The manager is reached through
-## a module-level `ptr` written only by those two procs.
+## a module-level `ptr` written only by those two procs. The stop request is
+## a module-level atomic outside the manager, since a signal handler may set
+## it while `teardownWindows` frees the manager.
 
 import std/[locks, tables, options, strutils, monotimes, times, algorithm]
 import ./pool
@@ -57,7 +68,7 @@ import ./jsproxy
 import ./browser
 from ./server import ConnId, `==`, hash, `$`
 from ./websocket import CloseNormal
-from ./frontend import WindowQueryParam
+from ./frontend import WindowQueryParam, CloseDisplaced
 
 const
   DefaultGracePeriodMs* = when defined(release): 10_000 else: 3_000
@@ -76,6 +87,8 @@ const
     ## browser that never connects does not hang the app.
   IdleTickMs = 1000
     ## Upper bound on one wait inside `waitForAppExit` when nothing is due.
+  DisplacedReason = "displaced by another connection"
+    ## Close reason sent with `CloseDisplaced`.
 
 type
   Window* = object
@@ -96,9 +109,14 @@ type
     erStartupTimeout
       ## No window ever connected within `startupTimeoutMs`.
 
-  CloseProc* = proc(conn: ConnId; code: int): bool {.gcsafe.}
-    ## Starts closing a WebSocket connection with a close code
-    ## (`Server.close` in production).
+  NeelServeModeError* = object of CatchableError
+    ## Raised by `openWindow` and `closeWindow` in serve mode, where the app
+    ## has exactly one window for its whole run. Raised in an exposed proc,
+    ## it reaches the page as a structured error.
+
+  CloseProc* = proc(conn: ConnId; code: int; reason: string): bool {.gcsafe.}
+    ## Starts closing a WebSocket connection with a close code and reason
+    ## (`""` for none; `Server.close` in production).
 
   Launcher* = proc(url, userDataDir: string; opts: LaunchOptions): BrowserHandle
     {.gcsafe.}
@@ -133,6 +151,7 @@ type
     lock: Lock
     cond: Cond                 # signalled on every lifecycle-relevant change
     # Immutable after `initWindows`:
+    serve: bool
     closeConn: CloseProc
     pending: PendingTable
     baseUrl: string
@@ -159,6 +178,31 @@ var mgr: ptr WindowManager
   ## Written only by `initWindows` / `teardownWindows` on the main thread
   ## while no other thread uses this module; read from any thread. A `ptr`
   ## global holds no GC'd memory, so `{.gcsafe.}` procs may read it.
+
+# The stop request (`stopFlag`) is set by `requestStop` from a signal handler
+# on any thread, cleared by `initWindows`, and read by the serve-mode wait. It
+# lives in static storage, so a handler may set it at any time. With GCC and
+# Clang it goes through the compiler's lock-free builtins directly, because
+# `std/atomics` wraps them in Nim procs that carry stack-trace frames
+# (thread-local state) in debug builds.
+when defined(gcc) or defined(clang) or defined(llvm_gcc):
+  var stopFlag: bool
+  proc atomicExchangeN(p: ptr bool; v: bool; order: cint): bool
+    {.importc: "__atomic_exchange_n", nodecl.}
+  proc atomicStoreN(p: ptr bool; v: bool; order: cint)
+    {.importc: "__atomic_store_n", nodecl.}
+  proc atomicLoadN(p: ptr bool; order: cint): bool
+    {.importc: "__atomic_load_n", nodecl.}
+  const SeqCst = cint(5) # __ATOMIC_SEQ_CST
+  template exchangeStop(v: bool): bool = atomicExchangeN(addr stopFlag, v, SeqCst)
+  template storeStop(v: bool) = atomicStoreN(addr stopFlag, v, SeqCst)
+  template loadStop(): bool = atomicLoadN(addr stopFlag, SeqCst)
+else:
+  import std/atomics
+  var stopFlag: Atomic[bool]
+  template exchangeStop(v: bool): bool = stopFlag.exchange(v)
+  template storeStop(v: bool) = stopFlag.store(v)
+  template loadStop(): bool = stopFlag.load
 
 # --- helpers ---------------------------------------------------------------------
 
@@ -210,6 +254,12 @@ proc realLauncher(url, userDataDir: string; opts: LaunchOptions): BrowserHandle
   launchWithFallback(m.search, url, noBrowserPageUrl(m.baseUrl, m.search),
                      m.fallback, userDataDir, opts)
 
+proc noLaunch*(url, userDataDir: string; opts: LaunchOptions): BrowserHandle
+    {.gcsafe.} =
+  ## The serve-mode launcher: opens nothing. The `nil` handle is the
+  ## "not launched" state every teardown path already accepts.
+  nil
+
 proc initWindows*(closeConn: CloseProc; pending: PendingTable; baseUrl: string;
                   search: BrowserSearch; fallback = true;
                   defaultOpts = LaunchOptions();
@@ -217,7 +267,8 @@ proc initWindows*(closeConn: CloseProc; pending: PendingTable; baseUrl: string;
                   startupTimeoutMs = DefaultStartupTimeoutMs;
                   launcher: Launcher = nil;
                   onWindowOpen: WindowHook = nil;
-                  onWindowClose: WindowHook = nil) =
+                  onWindowClose: WindowHook = nil;
+                  serve = false) =
   ## Creates the window table and lifecycle state. Call on the main thread
   ## after `listen` (the port is part of `baseUrl`) and before the first
   ## `openWindow`; `teardownWindows` undoes it. `closeConn` is `Server.close`
@@ -225,18 +276,23 @@ proc initWindows*(closeConn: CloseProc; pending: PendingTable; baseUrl: string;
   ## failed in `connectionClosed`, `search` the resolved `findBrowser` result,
   ## `fallback` / `defaultOpts` the `startApp` browser parameters, `launcher`
   ## an override for tests (`nil` = `launchWithFallback`). `gracePeriodMs`
-  ## must be at least `MinGracePeriodMs`.
+  ## must be at least `MinGracePeriodMs`. `serve` selects serve mode (see the
+  ## module header), which ignores `gracePeriodMs` and `startupTimeoutMs`;
+  ## pass `noLaunch` as its `launcher`. Clears a stop request left by an
+  ## earlier run (`requestStop`).
   doAssert mgr == nil, "initWindows called twice; call teardownWindows first"
   doAssert not closeConn.isNil, "initWindows: closeConn is nil"
   doAssert not pending.isNil, "initWindows: pending is nil"
   doAssert baseUrl.len > 0, "initWindows: baseUrl is empty"
-  doAssert gracePeriodMs >= MinGracePeriodMs,
-    "initWindows: gracePeriodMs must be at least " & $MinGracePeriodMs &
-    " ms (neel.js retries 250 ms after an abnormal close)"
-  doAssert startupTimeoutMs > 0, "initWindows: startupTimeoutMs must be positive"
+  if not serve:
+    doAssert gracePeriodMs >= MinGracePeriodMs,
+      "initWindows: gracePeriodMs must be at least " & $MinGracePeriodMs &
+      " ms (neel.js retries 250 ms after an abnormal close)"
+    doAssert startupTimeoutMs > 0, "initWindows: startupTimeoutMs must be positive"
   let m = cast[ptr WindowManager](allocShared0(sizeof(WindowManager)))
   initLock m.lock
   initCond m.cond
+  m.serve = serve
   m.closeConn = closeConn
   m.pending = pending
   m.baseUrl = baseUrl
@@ -252,6 +308,7 @@ proc initWindows*(closeConn: CloseProc; pending: PendingTable; baseUrl: string;
   m.nextWindowId = 1
   m.windows = initTable[int, ptr WindowRecord]()
   m.connToWindow = initTable[ConnId, int]()
+  storeStop(false)
   mgr = m
 
 proc teardownWindows*() =
@@ -293,11 +350,13 @@ proc bindConnection*(windowId: int; conn: ConnId): bool {.gcsafe.} =
   ## to another connection is re-associated (page refresh or shim reconnect):
   ## the new `ConnId` replaces the old one, and the old connection's
   ## `connectionClosed` will not disturb the new binding. The displaced
-  ## connection is also closed with 1000: normally it is already gone (the
-  ## browser dropped it when the page unloaded, which is why the shim is
-  ## reconnecting), but if it is still alive (a duplicated tab) it would
-  ## otherwise linger counted but mapped to no window, so its calls would
-  ## run without a current window and it would keep the app from exiting.
+  ## connection is also closed with `CloseDisplaced` (4000, reason
+  ## `"displaced by another connection"`), which `neel.js` treats as final:
+  ## normally it is already gone (the browser dropped it when the page
+  ## unloaded, which is why the shim is reconnecting), but if it is still
+  ## alive (a duplicated tab, another device) it would otherwise linger
+  ## counted but mapped to no window, so its calls would run without a
+  ## current window and it would keep the app from exiting.
   let m = mgr
   if m == nil:
     return false
@@ -318,7 +377,7 @@ proc bindConnection*(windowId: int; conn: ConnId): bool {.gcsafe.} =
   m.connToWindow[conn] = windowId
   release m.lock
   if hasDisplaced:
-    discard m.closeConn(displaced, CloseNormal)
+    discard m.closeConn(displaced, CloseDisplaced, DisplacedReason)
   true
 
 proc connectionOpened*(conn: ConnId) {.gcsafe.} =
@@ -416,20 +475,12 @@ proc connectionCount*(): int {.gcsafe.} =
 
 # --- window API ------------------------------------------------------------------
 
-proc openWindow*(path = "/"; size = none(WindowSize);
-                 position = none(WindowPosition);
-                 extraFlags: seq[string] = @[]): Window {.gcsafe.} =
-  ## Opens a new browser window at `path` (relative to the server root) and
-  ## returns its handle. `size` / `position` override the `startApp`
-  ## defaults when given; `extraFlags` are appended to the default extra
-  ## flags. The window id is allocated first (monotonic from 1), the record
-  ## is registered before the launch so a fast page load can already bind,
-  ## a leftover profile dir with this pid and id is deleted
-  ## (`clearStaleUserDataDir`), then the launcher runs (`launchWithFallback`: a `NeelBrowserError` or a
-  ## `ValueError` for a bad size propagates and the record is dropped).
-  ## Callable from an exposed proc on a pool worker; blocks only for the
-  ## launch itself.
-  let m = requireManager()
+proc createWindow(m: ptr WindowManager; path: string; size: Option[WindowSize];
+                  position: Option[WindowPosition];
+                  extraFlags: seq[string]): Window {.gcsafe.} =
+  ## The body of `openWindow` and `openVirtualWindow`. In serve mode no
+  ## profile directory is named or cleared (the record's `userDataDir` stays
+  ## empty), since nothing is ever launched.
   acquire m.lock
   let id = m.nextWindowId
   inc m.nextWindowId
@@ -442,8 +493,10 @@ proc openWindow*(path = "/"; size = none(WindowSize);
   for f in extraFlags:
     opts.extraFlags.add f
   let url = launchUrl(m.baseUrl, path, id)
-  let dir = userDataDirFor(id)
-  clearStaleUserDataDir(dir)
+  var dir = ""
+  if not m.serve:
+    dir = userDataDirFor(id)
+    clearStaleUserDataDir(dir)
   let rec = cast[ptr WindowRecord](allocShared0(sizeof(WindowRecord)))
   rec.id = id
   rec.path = path
@@ -476,14 +529,47 @@ proc openWindow*(path = "/"; size = none(WindowSize);
   finishHandle(stray)
   Window(id: id, js: initJsProxy(id))
 
+proc openWindow*(path = "/"; size = none(WindowSize);
+                 position = none(WindowPosition);
+                 extraFlags: seq[string] = @[]): Window {.gcsafe.} =
+  ## Opens a new browser window at `path` (relative to the server root) and
+  ## returns its handle. `size` / `position` override the `startApp`
+  ## defaults when given; `extraFlags` are appended to the default extra
+  ## flags. The window id is allocated first (monotonic from 1), the record
+  ## is registered before the launch so a fast page load can already bind,
+  ## a leftover profile dir with this pid and id is deleted
+  ## (`clearStaleUserDataDir`), then the launcher runs (`launchWithFallback`: a `NeelBrowserError` or a
+  ## `ValueError` for a bad size propagates and the record is dropped).
+  ## Callable from an exposed proc on a pool worker; blocks only for the
+  ## launch itself. Raises `NeelServeModeError` in serve mode.
+  let m = requireManager()
+  if m.serve:
+    raise newException(NeelServeModeError, "openWindow is not available in " &
+      "serve mode: the app has one window, created by startApp")
+  createWindow(m, path, size, position, extraFlags)
+
+proc openVirtualWindow*(path: string): Window {.gcsafe.} =
+  ## Serve mode's window 1, created by `startApp` right after `initWindows`.
+  ## The record is registered like any window's and handed to the launcher
+  ## (`noLaunch`), so the window is open and bindable without a browser or
+  ## a profile directory. Serve mode only; not re-exported by `neel`.
+  let m = requireManager()
+  doAssert m.serve, "openVirtualWindow: serve mode only"
+  createWindow(m, path, none(WindowSize), none(WindowPosition), @[])
+
 proc closeWindow*(w: Window) {.gcsafe.} =
   ## Closes `w`: sends a 1000 close to its connection (so `neel.js` does not
   ## reconnect), terminates the browser process, releases the handle, deletes
   ## the profile directory, and fires `onWindowClose`. The id is refused by
   ## `bindConnection` from now on. The record is freed right away when the
   ## window has no connection, otherwise when that connection's
-  ## `connectionClosed` runs. Idempotent; a no-op for an unknown id.
+  ## `connectionClosed` runs. Idempotent; a no-op for an unknown id. Raises
+  ## `NeelServeModeError` in serve mode, whatever the id.
   let m = requireManager()
+  if m.serve:
+    raise newException(NeelServeModeError, "closeWindow is not available in " &
+      "serve mode: the app's only window stays open until the app stops " &
+      "(quitApp)")
   var toFree: ptr WindowRecord
   acquire m.lock
   let rec = m.windows.getOrDefault(w.id)
@@ -499,7 +585,7 @@ proc closeWindow*(w: Window) {.gcsafe.} =
     toFree = rec
   release m.lock
   if hasConn:
-    discard m.closeConn(conn, CloseNormal)
+    discard m.closeConn(conn, CloseNormal, "")
   finishHandle(handle)
   if toFree != nil:
     freeRecord(toFree)
@@ -578,9 +664,29 @@ proc quitApp*() {.gcsafe.} =
   signal m.cond
   release m.lock
 
+{.push stackTrace: off.}
+proc requestStop*(): bool {.gcsafe, raises: [].} =
+  ## Asks a serve-mode app to exit: `waitForAppExit` returns `erQuit` within
+  ## `IdleTickMs`. Returns whether a stop was already requested. Safe in a
+  ## signal handler, unlike `quitApp`: one lock-free atomic exchange, no
+  ## lock, no allocation, no condition variable (so it cannot wake the wait
+  ## early), no stack-trace frame. Local mode ignores it.
+  exchangeStop(true)
+{.pop.}
+
 proc minOpt(a: var Option[MonoTime]; b: MonoTime) {.inline.} =
   if a.isNone or b < a.get:
     a = some b
+
+proc waitForQuit(m: ptr WindowManager): ExitReason =
+  ## Serve mode's `waitForAppExit`: no retirement and no idle exit, only
+  ## `quitApp()` or `requestStop()`. Wakes every `IdleTickMs`, since
+  ## `requestStop` cannot signal the condition variable.
+  acquire m.lock
+  while not m.quitRequested and not loadStop():
+    discard waitTimeout(m.cond, m.lock, IdleTickMs)
+  release m.lock
+  erQuit
 
 proc waitForAppExit*(): ExitReason =
   ## Blocks the calling (main) thread until the app should exit and returns
@@ -592,9 +698,13 @@ proc waitForAppExit*(): ExitReason =
   ## has been gone for a grace period or that never connected within the
   ## startup timeout: their browser is terminated, their profile directory
   ## removed, `onWindowClose` fired (on this thread), and their record freed.
-  ## Does not call server `shutdown`; the caller does, then `resetJsBridge`
-  ## and `teardownWindows`. Every internal wait is bounded by `IdleTickMs`.
+  ## In serve mode it only waits for `quitApp()` or `requestStop()` (both
+  ## `erQuit`) and retires nothing. Does not call server `shutdown`; the
+  ## caller does, then `resetJsBridge` and `teardownWindows`. Every internal
+  ## wait is bounded by `IdleTickMs`.
   let m = requireManager()
+  if m.serve:
+    return waitForQuit(m)
   let grace = initDuration(milliseconds = m.gracePeriodMs)
   let startup = initDuration(milliseconds = m.startupTimeoutMs)
   acquire m.lock

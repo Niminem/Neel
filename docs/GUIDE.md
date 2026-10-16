@@ -1,4 +1,4 @@
-# Neel 2.0 guide
+# Neel 2.1 guide
 
 The complete reference. For an introduction and a first app, start with the
 [README](../README.md).
@@ -9,7 +9,10 @@ CSS, and JavaScript. The Nim program runs a small HTTP/WebSocket server on
 sides: a Nim proc marked `{.expose.}` becomes `neel.<name>(...)` in the page
 and returns a Promise; a JS function registered with `neel.expose` becomes
 `js.<name>(...)` in Nim, with `js.wait.<name>(...)` when a return value is
-needed. Neel 2.0 is inspired by Python's [Eel](https://github.com/python-eel/Eel).
+needed. Neel is inspired by Python's [Eel](https://github.com/python-eel/Eel).
+In [serve mode](#serve-mode) the same app runs as a persistent server for one
+user instead: no browser is launched, and the app is opened from any of the
+user's devices through an SSH port forward, a tunnel, or a reverse proxy.
 
 Requirements: Nim >= 2.2.12, no external packages. Supported browsers in this
 release: Google Chrome, Chromium, and Microsoft Edge (app mode), or a tab in
@@ -32,8 +35,10 @@ Contents
 - [Threading model](#threading-model)
 - [`startApp` parameters](#startapp-parameters)
 - [Security](#security)
+- [Serve mode](#serve-mode)
 - [Caveats](#caveats)
 - [The examples](#the-examples)
+- [What's new in 2.1](#whats-new-in-21)
 - [Migrating from Neel 1.x](#migrating-from-neel-1x)
 - [License](#license)
 
@@ -70,7 +75,14 @@ Then, from the repository root:
 nim c -r examples/filepicker/filepicker.nim
 nim c -r examples/roundtrip/roundtrip.nim
 nim c -r examples/stresstest/stresstest.nim
+nim c -r examples/serve/serve.nim
 ```
+
+`serve` is a [serve-mode](#serve-mode) app: it opens no browser, prints
+`neel: serving http://127.0.0.1:5359 (allowed origins: none)`, and runs
+until you stop it (its page has a "Stop server" button, or press Ctrl-C);
+open that URL yourself. Its header comment shows how to reach it from
+another device. The rest of this section is about the other three.
 
 These are debug builds: the example's `web/` directory is served from disk,
 so edits to the page show up on refresh, and the app exits 3 s after its last
@@ -396,11 +408,11 @@ which exists once the classic script has run.
 | `neel.expose(fn)` | registers `fn` under `fn.name` as a target for Nim's `js.<name>`; `TypeError` for an anonymous function |
 | `neel.expose(name, fn)` | registers `fn` under `name` |
 | `neel.expose({name: fn, ...})` | registers every entry; `TypeError` if a value is not a function |
-| `neel.ready` | Promise resolved on the first successful connection; rejected with `NeelDisconnectedError` if the shim gives up or is closed before ever connecting (nobody has to await it) |
+| `neel.ready` | Promise resolved on the first successful connection; rejected with `NeelDisconnectedError` if the shim gives up or is closed before ever connecting (nobody has to await it). In serve mode a rejected `ready` does not mean the shim has stopped: it may still connect later (see `neel.onreconnect`) |
 | `neel.windowId` | the window's id (a positive number) |
 | `neel.connected` | `true` while the WebSocket is open |
-| `neel.onclose(fn)` | `fn(code, reconnecting)` is called after every close, including each failed reconnect attempt: `code` is the WebSocket close code (1006 lost, 1000 `neel.close()` / `closeWindow`, 1001 shutdown), `reconnecting` is `true` when another attempt follows and `false` on the last call |
-| `neel.onreconnect(fn)` | `fn()` is called after every successful connection except the first (which resolves `neel.ready`) |
+| `neel.onclose(fn)` | `fn(code, reconnecting)` is called after every close, including each failed reconnect attempt: `code` is the WebSocket close code (1006 lost, 1000 `neel.close()` / `closeWindow`, 1001 shutdown, 4000 `CloseDisplaced`: another tab or device took this window over), `reconnecting` is `true` when another attempt follows and `false` on the last call |
+| `neel.onreconnect(fn)` | `fn()` is called after every successful connection except the one that resolves `neel.ready` (in local mode: every one but the first; in serve mode it also fires when a shim that never connected wakes up and connects) |
 | `neel.close()` | closes the connection with code 1000 and makes every later call reject; the shim does not reconnect |
 
 `Object.keys(neel)` is exactly this list plus the exposed names. Loading
@@ -412,9 +424,14 @@ whose `message` is the wire message, so `catch (e) { if (e.name ===
 [Exposing Nim procs](#exposing-nim-procs-to-the-page), the shim itself rejects
 with `NeelDisconnectedError` when a pending call's connection closes for any
 reason (`neel: connection lost (close code 1006)`), when a call is made after
-the shim has terminated (`neel: connection is closed`), and when queued calls
+the shim has terminated (`neel: connection is closed`), when queued calls
 are dropped because the retries ran out (`neel: gave up reconnecting after 5
-attempts`).
+attempts`), and, in serve mode only, when a call is made while the shim is
+dormant (`neel: not connected; reconnects when the page becomes visible or
+goes online`, see [Reconnecting](#reconnecting-dormant-pages-and-server-restarts)).
+A call in flight when the server closes the connection for good (1000,
+1001, or 4000) rejects like any other lost call (`neel: connection lost
+(close code 4000)`), and every later call with `neel: connection is closed`.
 
 Nim -> JS calls: `js.foo(1, "x")` arrives as a call of `foo(1, "x")`. The shim
 looks the name up in the `neel.expose` registry first, then as a function on
@@ -430,16 +447,19 @@ Queueing: calls (both forms) made before the socket is open, or while it
 reconnects, are queued and flushed in order on open. Replies to Nim are never
 queued; they go only to the socket the call arrived on.
 
-Reconnect: on a close with any code other than 1000 or 1001 that was not
-caused by `neel.close()`, in-flight Promises are rejected with
+Reconnect: on a close with any code other than 1000, 1001, or 4000 that was
+not caused by `neel.close()`, in-flight Promises are rejected with
 `NeelDisconnectedError` and the shim reconnects up to 5 times with delays of
 250, 500, 1000, 2000, and 4000 ms (7.75 s in total), presenting the same token
 and window id. A successful open resets the counter and flushes the queue.
 After the fifth failure the shim terminates: queued Promises are rejected,
 every later call rejects at once, and `neel.ready` is rejected if it never
-resolved. A close with 1000 or 1001 (Neel's `closeWindow` and shutdown) is
-final immediately. Terminated is permanent for the page; a refresh loads a
-fresh shim.
+resolved. (In serve mode it goes dormant instead and tries again when the
+page becomes visible or the browser goes back online; see
+[Reconnecting](#reconnecting-dormant-pages-and-server-restarts).) A close
+with 1000, 1001, or 4000 (Neel's `closeWindow`, shutdown, and a displaced
+connection) is final immediately, in both modes. Terminated is permanent for
+the page; a refresh loads a fresh shim.
 
 Wire format, for reference (JSON text frames, identical in both directions;
 a `call` without an `id` is fire-and-forget):
@@ -462,8 +482,8 @@ Each browser window is a `Window` handle: a copyable object with an `id`
 
 | Proc | Description |
 |---|---|
-| `openWindow(path = "/", size = none(WindowSize), position = none(WindowPosition), extraFlags: seq[string] = @[]): Window` | opens a new browser window at `path` (relative to the web root; a query or fragment is kept) and returns its handle; `size` / `position` override the `startApp` defaults, `extraFlags` are appended. Raises `NeelBrowserError` if no browser can be launched, `ValueError` for a non-positive size. Blocks only for the process launch itself. |
-| `closeWindow(w)` | sends a 1000 close to the page (the shim does not reconnect), terminates the browser process, removes its profile directory, fires `onWindowClose`. Idempotent; a no-op for an unknown id. Blocks for the process to exit (about 100 ms, up to 3 s if the browser does not exit when asked). |
+| `openWindow(path = "/", size = none(WindowSize), position = none(WindowPosition), extraFlags: seq[string] = @[]): Window` | opens a new browser window at `path` (relative to the web root; a query or fragment is kept) and returns its handle; `size` / `position` override the `startApp` defaults, `extraFlags` are appended. Raises `NeelBrowserError` if no browser can be launched, `ValueError` for a non-positive size. Blocks only for the process launch itself. In serve mode it raises `NeelServeModeError` (`openWindow is not available in serve mode: the app has one window, created by startApp`). |
+| `closeWindow(w)` | sends a 1000 close to the page (the shim does not reconnect), terminates the browser process, removes its profile directory, fires `onWindowClose`. Idempotent; a no-op for an unknown id. Blocks for the process to exit (about 100 ms, up to 3 s if the browser does not exit when asked). In serve mode it raises `NeelServeModeError` for any id. |
 | `windows(): seq[Window]` | every window not yet closed, in id order, including windows still loading and windows whose connection dropped less than a grace period ago |
 | `window(id): Option[Window]` | the open window with this id, or `none` |
 | `requireWindow(id): Window` | the same, but raises `NeelNoWindowError` (`window 7 is not open`) for an unknown or closed id; use this in exposed procs so a stale id answers the page with a structured error instead of the `UnpackDefect` of `window(id).get` |
@@ -505,7 +525,10 @@ during teardown sees an empty `windows()` and `w.js` raises
 `onWindowOpen` fires as soon as the shim connects, which can be before the
 page's own scripts have registered their `neel.expose` functions; a page
 that needs initial data should ask for it with a `neel.<name>()` call
-rather than wait for a push from the hook.
+rather than wait for a push from the hook. In serve mode the single window
+is never closed or retired, so `onWindowOpen` fires once ever (the first
+connection to window 1, not for later devices, refreshes, or reconnects)
+and `onWindowClose` once, at teardown (see [Serve mode](#serve-mode)).
 
 How a page learns its window: the launch URL is
 `http://127.0.0.1:<port><path>?window=<id>`. The page's `<script
@@ -609,9 +632,9 @@ is discardable):
 
 | `ExitReason` | When |
 |---|---|
-| `erLastWindowClosed` | the WebSocket connection count stayed at 0 for `gracePeriodMs` |
-| `erQuit` | `quitApp()` was called (from any thread, including inside an exposed proc; it only signals) |
-| `erStartupTimeout` | no window ever connected within `startupTimeoutMs` (30 s) of starting, e.g. the browser never loaded the page |
+| `erLastWindowClosed` | the WebSocket connection count stayed at 0 for `gracePeriodMs` (local mode only) |
+| `erQuit` | `quitApp()` was called (from any thread, including inside an exposed proc; it only signals); in serve mode also a stop signal such as Ctrl-C or `SIGTERM` (see [Stopping a server](#stopping-a-server)) |
+| `erStartupTimeout` | no window ever connected within `startupTimeoutMs` (30 s) of starting, e.g. the browser never loaded the page (local mode only) |
 
 Before returning, `startApp` sends a 1001 close to every window, waits for
 every in-flight hook, terminates the browser processes it started, removes the
@@ -621,6 +644,9 @@ only `neel-<pid>-<id>` directories whose app is no longer running and that no
 browser still uses, never anything else, and for at most about 2 seconds
 (whatever is left waits for the next exit). Usually there is nothing to
 delete. A `startApp` can be called again afterwards in the same process.
+In serve mode there are no browser processes and no profile directories, so
+teardown is the 1001 close, the hooks, and the threads, and the sweep of
+abandoned profiles is skipped.
 
 The grace period defaults to `DefaultGracePeriodMs`: 3 s in debug builds, 10 s
 with `-d:release`. It exists because a page refresh, Chromium reloading a
@@ -640,7 +666,9 @@ echo "exited: ", reason
 ```
 
 A page can close its own connection with `neel.close()`; the server treats
-that like a closed window (retired after the grace period).
+that like a closed window (retired after the grace period). In serve mode
+nothing is retired and there is no grace period: the window stays open for
+the next connection, and only `quitApp()` or a stop signal ends the app.
 
 ## Assets and build modes
 
@@ -671,6 +699,12 @@ decoded (`/data%20file.json`). Single-range `Range` requests are honoured with
 unknown extensions as `application/octet-stream`; no `charset` is appended.
 The reserved routes are `/neel.js`, `/ws`, and `/neel/no-browser`.
 
+In serve mode two routes differ. `GET` and `HEAD /` answer `302` with
+`Location: <startPath>` when the path part of `startPath` (before any `?`
+or `#`) is not `/`; a `startPath` such as `/?tab=2` is not redirected to
+(the browser would land on `/` again), so `/` serves `index.html` then.
+`/neel/no-browser` is a 404.
+
 Add `--app:gui` to release builds to avoid a visible terminal window:
 on Windows this suppresses the console window; on macOS it produces an
 `.app` bundle that launches without a Terminal session. On Linux most
@@ -686,7 +720,8 @@ window managers already hide the terminal of a backgrounded process.
   including two calls from the same page issued back to back, so they must be
   `{.gcsafe.}` (the compiler enforces this; the error points at the proc) and
   must protect shared mutable state with a `Lock`, `Atomic`, or a channel.
-  Module-level `var`s of GC'd types are not GC-safe to touch.
+  Module-level `var`s of GC'd types are not GC-safe to touch (see
+  [Shared state](#shared-state) below).
 - There is no ordering guarantee between messages on one connection: a
   `neel.count()` issued right after `neel.increment.send()` may run before the
   increment. If order matters, await the first call or let the proc return
@@ -713,6 +748,43 @@ window managers already hide the terminal of a backgrounded process.
   connections whose messages it cannot queue (TCP back-pressure); nothing is
   dropped.
 
+### Shared state
+
+State that several exposed procs read and write (a list, a table, a
+settings object) lives in a module-level `var` guarded by a `Lock`. The
+compiler rejects a GC'd global inside an exposed proc even under a lock, so
+the access is wrapped in `{.cast(gcsafe).}`, which is sound only because
+every access goes through the lock:
+
+```nim
+import std/locks
+import neel
+
+var
+  historyLock: Lock
+  history: seq[string] # guarded by historyLock
+
+initLock historyLock
+
+proc remember(item: string): int {.expose.} =
+  withLock historyLock:
+    {.cast(gcsafe).}: # `history` is only touched under `historyLock`
+      history.add item
+      result = history.len
+
+proc recall(): seq[string] {.expose.} =
+  withLock historyLock:
+    {.cast(gcsafe).}:
+      result = history # a copy; safe to use after the lock is released
+```
+
+Keep the locked section short and never call `js.wait.*` inside it: every
+other proc that needs the lock waits for the page, and a JS function that
+calls back into such a proc deadlocks until the wait times out. For
+a single counter or flag, an `Atomic[int]` / `Atomic[bool]` from
+`std/atomics` needs no lock and no cast. `examples/serve` uses this pattern
+for its shared note.
+
 ## `startApp` parameters
 
 `startApp` is a macro. All arguments are keyword arguments; the one exception
@@ -722,27 +794,32 @@ is that `webDir` may be given positionally (`startApp("web", port = 8000)`).
 |---|---|---|
 | `webDir` | `"web"` | web directory, relative to the calling source file unless absolute; a constant when embedding |
 | `embedAssets` | `defined(release)` | compile-time constant: embed `webDir` into the binary (`true`) or serve from disk (`false`) |
-| `startPath` | `"/"` | the page the first window opens (an `openWindow` path) |
-| `port` | `0` | TCP port on `127.0.0.1`; 0 picks an ephemeral port |
+| `startPath` | `"/"` | the page the first window opens (an `openWindow` path); in serve mode, where `/` redirects |
+| `port` | `0` | TCP port on `127.0.0.1`; 0 picks an ephemeral port (serve mode needs a fixed one) |
+| `serve` | `false` | [serve mode](#serve-mode): no browser, no idle exit, one window shared by whichever device connected last; runs until `quitApp()` or a stop signal |
+| `allowedOrigins` | `@[]` | serve mode only: extra origins the app may be loaded from, each `http://host[:port]` or `https://host[:port]` (e.g. `"https://myapp.example.com"`) |
 | `workers` | `DefaultWorkers` (64) | pool threads running exposed procs and hooks |
 | `queueCapacity` | `DefaultQueueCapacity` (1024) | bounded task queue in front of the pool |
 | `callTimeoutMs` | `DefaultCallTimeoutMs` (10 000) | default timeout of `js.wait.*` |
 | `maxMessageSize` | `DefaultMaxMessageSize` (16 777 216 = 16 MiB) | largest single WebSocket message the server will accept; the peer receives a 1009 close for anything larger |
-| `gracePeriodMs` | `DefaultGracePeriodMs` (3 000 debug / 10 000 release) | exit this long after the last connection closes; at least `MinGracePeriodMs` (250) |
-| `startupTimeoutMs` | `DefaultStartupTimeoutMs` (30 000) | how long a window may take to connect before it is given up |
-| `browsers` | `@[Chrome, Chromium, Edge]` | preference list |
-| `fallback` | `true` | open the app in a default-browser tab when nothing is found (`false`: show `/neel/no-browser` and raise) |
-| `browserPath` | `""` | explicit browser executable; must exist |
-| `size` | `none(WindowSize)` | `some((width, height))` for app-mode windows |
-| `position` | `none(WindowPosition)` | `some((x, y))` for app-mode windows |
-| `extraFlags` | `@[]` | extra command-line flags for app-mode windows |
-| `onWindowOpen` | `nil` | `WindowHook` fired when a window's page first connects |
-| `onWindowClose` | `nil` | `WindowHook` fired when a window is closed or retired |
+| `gracePeriodMs` | `DefaultGracePeriodMs` (3 000 debug / 10 000 release) | exit this long after the last connection closes; at least `MinGracePeriodMs` (250) (ignored in serve mode) |
+| `startupTimeoutMs` | `DefaultStartupTimeoutMs` (30 000) | how long a window may take to connect before it is given up (ignored in serve mode) |
+| `browsers` | `@[Chrome, Chromium, Edge]` | preference list (ignored in serve mode) |
+| `fallback` | `true` | open the app in a default-browser tab when nothing is found (`false`: show `/neel/no-browser` and raise) (ignored in serve mode) |
+| `browserPath` | `""` | explicit browser executable; must exist (ignored in serve mode) |
+| `size` | `none(WindowSize)` | `some((width, height))` for app-mode windows (ignored in serve mode) |
+| `position` | `none(WindowPosition)` | `some((x, y))` for app-mode windows (ignored in serve mode) |
+| `extraFlags` | `@[]` | extra command-line flags for app-mode windows (ignored in serve mode) |
+| `onWindowOpen` | `nil` | `WindowHook` fired when a window's page first connects (serve mode: once, on the first connection ever) |
+| `onWindowClose` | `nil` | `WindowHook` fired when a window is closed or retired (serve mode: once, at teardown) |
 
 `startApp` raises `NeelBrowserError` (no browser and `fallback = false`, or a
 bad `browserPath`), `OSError` (the port is taken, or the web directory does
 not exist in a debug build), or `ValueError` (a
-non-positive size); everything has been torn down when the exception leaves.
+non-positive size; and, before anything is bound, `serve = true` with
+`port = 0`, `allowedOrigins` without `serve = true`, or a malformed
+`allowedOrigins` entry, see [Starting a server](#starting-a-server));
+everything has been torn down when the exception leaves.
 
 Compile-time errors from the macro point at your `startApp(...)` line: a
 non-constant `embedAssets`, a positional argument other than `webDir`, or a
@@ -750,25 +827,421 @@ missing web directory when embedding.
 
 ## Security
 
-The server listens on `127.0.0.1` only, so other machines cannot reach it.
+The server listens on `127.0.0.1` only, so other machines cannot reach it
+(unless you put a tunnel or proxy in front of it in serve mode, which has
+its own [security model](#security-in-serve-mode)).
 Each start generates a random token that a page must present to open its
 WebSocket, and every request is checked before it is served:
 
-- the `Host` header must be `127.0.0.1:<port>`, which defeats DNS rebinding;
+- the `Host` header must be `127.0.0.1:<port>`, which defeats DNS rebinding
+  (in serve mode the host of an allowed origin is accepted too);
 - a request marked `Sec-Fetch-Site: cross-site` is refused, so another
-  website cannot load `/neel.js` (which carries the token);
+  website cannot load `/neel.js` (which carries the token) (in serve mode
+  top-level page loads pass, so that links and login redirects work);
 - the WebSocket upgrade must come from a page at `http://127.0.0.1:<port>`
-  (its `Origin`), so the token is useless to any other website.
+  (its `Origin`), so the token is useless to any other website (in serve
+  mode an allowed origin is accepted too).
 
 A refused request gets a 403. This keeps other websites open in the user's
 browser away from your app. It also means the app works only at the URL Neel
-opens: `http://localhost:<port>` typed by hand is refused.
+opens: `http://localhost:<port>` typed by hand is refused. (In serve mode it
+also works at the origins in `allowedOrigins`; see
+[Security in serve mode](#security-in-serve-mode).)
 
 Neel trusts the local machine. Other programs and users on the same computer
 can send any headers, fetch `/neel.js`, and read the browser's command line,
 so they can reach your exposed procs. An exposed proc can do anything your
 app can: treat its arguments as untrusted input, and do not expose procs that
 run arbitrary commands or touch arbitrary paths without checking them.
+
+## Serve mode
+
+Serve mode runs an app as a persistent server for one user. No browser is
+launched and the app does not exit when its page closes; the user opens it
+from whichever device they are on, through an SSH port forward, a tunnel,
+or a reverse proxy in front of `127.0.0.1`. It suits a tool that lives on a
+home server or a VM and is used from a laptop one day and a phone the next.
+The programming model does not change: `{.expose.}`, `neel.foo()`,
+`js.foo()`, and `js.wait.foo()` work as in local mode.
+
+```nim
+startApp(serve = true, port = 8080,
+         allowedOrigins = @["https://myapp.example.com"])
+```
+
+Not part of serve mode: users, sessions, or authentication (that is the job
+of the tunnel or proxy, see [Security in serve mode](#security-in-serve-mode)),
+TLS (the proxy terminates it; the shim connects with `wss:` by itself when
+its page was served over `https:`), listening on anything but `127.0.0.1`,
+and more than one window.
+
+[`examples/serve`](../examples/serve) is a complete serve-mode app.
+
+### Starting a server
+
+- `serve = true` needs a fixed `port`; `port = 0` raises `ValueError`
+  (`neel: serve mode needs a fixed port (port = 0 picks a random one, which
+  a tunnel or proxy cannot reach)`).
+- `allowedOrigins` lists the origins the page may be loaded from besides
+  `http://127.0.0.1:<port>`: the public URL of your tunnel or proxy, as the
+  browser's address bar shows it, without a path. An SSH forward to
+  `http://127.0.0.1:<port>` needs none. Passing `allowedOrigins` without
+  `serve = true` raises `ValueError` (`neel: allowedOrigins requires serve =
+  true`).
+- Each entry must be `http://host[:port]` or `https://host[:port]`. A host is
+  ASCII letters, digits, `-`, `.`, and `_`, or a bracketed IPv6 literal
+  (`[::1]`); a port is 1-65535. Anything else raises `ValueError` naming the
+  entry and the reason: a path (a trailing `/` counts as one), a query, a
+  fragment, user info, a wildcard, another scheme, an empty host or port,
+  surrounding whitespace (entries are not trimmed), or non-ASCII (write an
+  internationalized host in its punycode `xn--` form, which is what browsers
+  send). For example: `neel: allowedOrigins entry "https://myapp.example.com/"
+  has a path (a trailing / counts as one); expected http://host[:port] or
+  https://host[:port]`.
+- Entries are normalized the way browsers send them: scheme and host
+  lowercased, the port as a plain number, a default port (`:80` for `http`,
+  `:443` for `https`) removed. `HTTPS://MyApp.Example.com:443` becomes
+  `https://myapp.example.com`. Duplicates are kept once.
+- All of this is checked before anything is bound, so a refused start
+  leaves nothing running.
+
+`browsers`, `fallback`, `browserPath`, `size`, `position`, `extraFlags`,
+`gracePeriodMs`, and `startupTimeoutMs` are accepted and ignored: no browser
+is discovered (so a stale `browserPath` raises nothing), and there is no
+grace period and no startup timeout.
+
+Once the server listens, its window exists, and the stop-signal handlers are
+in place, `startApp` prints one line to stdout, in debug and release builds:
+
+```
+neel: serving http://127.0.0.1:8080 (allowed origins: https://myapp.example.com)
+```
+
+The origins are listed normalized and comma-separated, or as `(allowed
+origins: none)`. A script or a service manager can wait for this line. When
+there is no stdout to write to (`--app:gui` on Windows), the line is
+dropped without an error.
+
+Two routes differ from local mode (see [Assets](#assets-and-build-modes)):
+`/` redirects to `startPath` when that names another page, and
+`/neel/no-browser` is a 404. Pages need no `?window=` query: every page of
+the web folder gets the shim of the single window, so plain links between
+pages work.
+
+### One window, many devices
+
+A serve-mode app has exactly one window, window 1, created by `startApp` at
+`startPath` without launching anything. It exists from the start and is
+never retired: `windows()` always lists it, `isConnected` tells whether a
+page is connected right now, and `requireWindow(1).js.foo(...)` reaches
+whichever page is connected (`NeelNoWindowError` while none is). Inside an
+exposed proc, `js` targets it as usual. `openWindow` and `closeWindow` raise
+`NeelServeModeError`, a `CatchableError`, so an exposed proc that lets it
+escape answers the page with `e.name === "NeelServeModeError"`.
+
+Every new connection binds to window 1, whether it comes from another
+device, another tab, a refresh, or the shim reconnecting, and the newest one
+wins. The previous connection, if it is still open, is closed with code 4000
+(`CloseDisplaced`, reason `displaced by another connection`). The shim
+treats 4000 as final, like 1000 and 1001: `neel.onclose` reports `(4000,
+false)`, later calls reject, and the page never reconnects on its own. Show
+something like "Opened on another device" with a button that reloads the
+page to take the session back. Never reload on 4000 automatically: two open
+devices would then take the session from each other forever.
+
+`js` resolves the window to its connection when the call is made, so an
+exposed proc started by the displaced device that calls `js.foo(...)`
+afterwards reaches the new device.
+
+Hooks: `onWindowOpen` fires once, when the first connection ever binds to
+window 1. Later devices, refreshes, and reconnects do not fire it; the
+server cannot tell them apart. `onWindowClose` fires once, during teardown.
+A page should therefore request its initial state with a `neel.<name>()`
+call when it loads and again in `neel.onreconnect`, not wait for a push from
+a hook; that is also how a change made on another device shows up.
+
+### Stopping a server
+
+A serve-mode app ends when an exposed proc (or any thread) calls
+`quitApp()`, or when the process receives a stop signal. Both make
+`startApp` return `erQuit`; `ExitReason` has no separate member for signals.
+Shutdown is the same either way: the connected page receives a 1001 close,
+`onWindowClose` runs, and Neel's threads are joined. A signal is noticed
+within about a second.
+
+The signal handlers are installed only while a serve-mode `startApp` runs,
+and the previous handlers are back in place when it returns. Local mode
+installs none: Ctrl-C ends a local-mode app the default way, without
+Neel's shutdown (on Windows, a debug build crashes there; see
+[Caveats](#caveats)).
+
+- Linux and macOS: `SIGINT` (Ctrl-C) and `SIGTERM` (`kill`, `systemctl
+  stop`, `docker stop`). A second signal while the shutdown is still running
+  exits at once, with status 130 for `SIGINT` and 143 for `SIGTERM`, so a
+  hung shutdown can always be interrupted. The `SIGINT` handler that was in
+  place before (Nim's own, or one installed with `setControlCHook`) is
+  restored afterwards.
+- Windows: Ctrl-C, Ctrl-Break, closing the console window, logoff, and
+  shutdown.
+  - Ctrl-C and Ctrl-Break stop the app cleanly. There is no second-signal
+    exit; to end a hung shutdown, close the console window.
+  - Closing the console window, logoff, and shutdown: Windows ends the
+    process as soon as Neel's handler returns. The handler waits, at most
+    4 s, for the shutdown to finish, so the page gets its 1001 and
+    `onWindowClose` runs, but code after `startApp` may not run.
+  - Windows delivers logoff and shutdown events only to console programs
+    that have not loaded `user32.dll` or `gdi32.dll`. Neel loads neither; an
+    app that does (through a GUI library, for example) is killed at logoff
+    or shutdown without a clean stop.
+  - Windows disables Ctrl-C for a process started with
+    `CREATE_NEW_PROCESS_GROUP`; such a process only receives Ctrl-Break. A
+    launcher that stops the app with Ctrl-C must not use that flag.
+  - Running as a Windows service is not supported.
+
+### Keep-alive pings
+
+Proxies and tunnels close WebSockets that carry no data for a while (nginx
+after 60 s by default, Cloudflare after about 100 s). In serve mode Neel
+sends a WebSocket ping on every connection that has neither sent nor
+received anything for 30 s. The browser answers with a pong by itself; no
+page code is involved, and any traffic restarts the 30 s. A connection that
+never answers is not closed for it; the next connection replaces it. A
+proxy whose idle timeout is shorter than 30 s still closes idle
+connections, and the shim then reconnects. Local mode sends no pings.
+
+### Reconnecting: dormant pages and server restarts
+
+The shim reconnects in serve mode exactly as in local mode (see "Reconnect"
+in [The `neel.js` API](#the-neeljs-api)): after an unexpected close, up to 5
+attempts over 7.75 s, with calls queued meanwhile. What differs is what
+happens when the attempts run out, which in serve mode is routine: a phone
+locks its screen, a laptop sleeps, a tunnel restarts.
+
+- **Dormant, not terminated.** Pending and queued calls reject (`neel: gave
+  up reconnecting after 5 attempts`) and `neel.onclose(code, false)` fires,
+  as in local mode, but the shim does not stop for good: it goes dormant.
+  A call made while dormant rejects at once with `NeelDisconnectedError`
+  and `neel: not connected; reconnects when the page becomes visible or goes
+  online`. A call does not wake the shim.
+- **Waking up.** A dormant shim wakes when the page becomes visible
+  (`visibilitychange` to `"visible"`: the user returns to the tab or unlocks
+  the phone) or the browser fires `online`. A wake starts a new round of
+  attempts: the first at once, then the usual backoff (6 attempts, about
+  7.75 s). Calls made during the round are queued. On success the page goes
+  on as after any reconnect: `neel.onreconnect` fires and calls work again.
+  If the round fails, it ends like the first give-up (each failed attempt
+  fires `onclose(code, true)`, the last one `onclose(code, false)`, queued
+  calls reject), and the shim is dormant again until the next event.
+- Wake events matter only while the shim is dormant. While it is connected,
+  reconnecting, or terminated they do nothing, so a burst of events starts
+  one round, and a page becoming hidden never does anything.
+- A page that goes dormant while it is visible and online (the tunnel was
+  down for more than about 8 s while the user watched) stays dormant until
+  a tab switch, a network change, or a reload.
+- Deliberate closes end the shim for good, as in local mode: 1000
+  (`neel.close()`), 1001 (the server stopped), and 4000 (displaced).
+  `neel.close()` while dormant also ends it and fires `onclose(1000,
+  false)`.
+- `neel.ready` is a Promise and cannot settle twice: once rejected (the
+  server was unreachable when the page loaded), it stays rejected, even
+  though the shim may connect later. Use `neel.onreconnect` to learn that
+  the page is connected again: it fires after every successful connection
+  except the one that resolves `neel.ready`, so also when a shim that never
+  connected wakes up and connects.
+
+In page code: an `onclose(code, false)` whose code is not 1000, 1001, or
+4000 means the shim went dormant.
+
+A server restart is different. Every start generates a new launch token,
+and the token is baked into the page's `/neel.js`. A connected page receives
+1001 when the server stops, which ends its shim; a dormant page's wake
+attempts are refused by the new server (403) and fail. Either way only a
+reload, which fetches a fresh `/neel.js`, connects again.
+
+### Reloading after a server restart
+
+Reload the page when:
+
+- the connection closed with 1001 (the server stopped), or
+- the shim gave up right after a wake event (a failed wake): the server is
+  reachable but no longer accepts the page's token, or is still down.
+
+Never reload on 4000, for the reason given in
+[One window, many devices](#one-window-many-devices).
+
+Do not reload at once either: the server may not be back yet, and a reload
+would leave the user on the browser's error page or the proxy's 502, from
+which nothing recovers. Poll the page's own URL every 2 s instead and reload
+once it answers with a 2xx or with a redirect (an authenticating proxy
+sending the browser to its login page, which `redirect: "manual"` reports as
+`type === "opaqueredirect"`). Network errors and 5xx (a tunnel or proxy
+answers 502 while the app is down) mean keep waiting.
+
+```js
+const CLOSE_DISPLACED = 4000;
+let dormant = false;          // the shim gave up and waits for a wake event
+let wokeWhileDormant = false; // a wake event arrived while it was dormant
+let waiting = false;          // polling, to reload once the server answers
+
+function noteWake() {
+  if (dormant) wokeWhileDormant = true;
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") noteWake();
+});
+window.addEventListener("online", noteWake);
+
+neel.onreconnect(() => {
+  dormant = false;
+  wokeWhileDormant = false;
+  waiting = false;
+});
+
+neel.onclose((code, reconnecting) => {
+  dormant = false;
+  if (reconnecting || code === CLOSE_DISPLACED || code === 1000) return;
+  if (code === 1001 || wokeWhileDormant) reloadWhenServerIsBack();
+  else dormant = true;
+});
+
+async function reloadWhenServerIsBack() {
+  if (waiting) return;
+  waiting = true; // show "waiting for the server" here
+  while (waiting) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    try {
+      const r = await fetch(location.href, { cache: "no-store", redirect: "manual" });
+      if (waiting && (r.ok || r.type === "opaqueredirect")) {
+        location.reload();
+        return;
+      }
+    } catch (e) {
+      // network error: the server or the tunnel is still down
+    }
+  }
+}
+```
+
+- The flag marks the round of attempts that follows a wake event. The shim
+  adds its own `visibilitychange` and `online` listeners when `/neel.js`
+  runs, before the page's scripts, so on the same event the shim's wake has
+  already started when the page's listener runs; a call made there is
+  queued, not rejected as dormant.
+- The first poll comes after 2 s, not at once: right after a 1001 the old
+  server may still be answering for a moment.
+- `cache: "no-store"` makes every poll reach the server, not the browser's
+  cache.
+- A wake can also fail because the network is still down (a phone in a
+  tunnel). The poll then reloads as soon as the server is reachable, which
+  does no harm, and stops if the shim reconnects first.
+- A restart that the page first notices through an ordinary reconnect
+  round, not a wake (a phone whose connection died unnoticed while it was
+  locked, so it never saw the 1001), ends that round dormant; the next wake
+  event then fails and reloads.
+- A reload loses whatever lives only in the page (an unsaved draft); keep
+  such state in `sessionStorage`, or on the server, if it matters.
+
+`examples/serve` uses this recipe and shows the state on the page.
+
+### Security in serve mode
+
+In serve mode, Neel trusts whoever can reach the server. Put it behind a
+private tunnel (Tailscale, WireGuard, an SSH port forward) or an
+authenticating proxy (Cloudflare Access, Authelia, oauth2-proxy). Neel's own
+checks keep other websites in the user's browser out: the WebSocket only
+accepts the exact origins you list, `/neel.js` (which carries the token) is
+not served to other sites, and the app cannot be framed by another site.
+They do not authenticate the user.
+
+- Only list origins you control; never a shared or wildcard domain.
+- Cross-site top-level navigations are allowed so that links and login
+  redirects work (an auth proxy's login page redirects back from another
+  site, which makes the browser mark the request cross-site). Pages should
+  therefore not perform actions based on URL parameters alone
+  (`/?action=delete`) without user confirmation. Frames, scripts, and
+  fetches from other sites are still refused.
+- Another site can open the app in a new tab, which displaces the user's
+  current page. It cannot read or control that tab. This is accepted as low
+  risk.
+- The HTTP server has request size limits (16 KiB of headers, 1 MiB of
+  body) but no idle timeout for plain HTTP connections. Always put a real
+  proxy or tunnel in front; never expose the port directly, for example
+  with a plain TCP forward open to the network.
+- The proxy must forward WebSocket upgrades on `/ws` (some proxies need
+  explicit configuration for that, such as passing the `Upgrade` and
+  `Connection` headers) and pass the browser's `Origin` through. `Host` may
+  be rewritten to `127.0.0.1:<port>` or forwarded as the public host; both
+  are accepted.
+- Cloudflare quick tunnels (`trycloudflare.com`) get a new hostname every
+  run, so they need a matching `allowedOrigins` entry each time. A quick
+  tunnel is public and has no authentication: anyone who learns the URL can
+  use the app.
+
+### Setups
+
+Three setups are documented so far. Other tunnels and reverse proxies should
+work the same way when they meet the requirements above; they will be
+documented here once verified.
+
+**SSH port forward.** The simplest private setup, and it needs no allowed
+origins: SSH authenticates the user, and the browser loads the app at Neel's
+own origin.
+
+```
+# on the server
+./myapp                                   # startApp(serve = true, port = 8080)
+
+# on the laptop
+ssh -N -L 8080:127.0.0.1:8080 user@server
+```
+
+Then open `http://127.0.0.1:8080` on the laptop. The local port must equal
+the server's port, and the address must be `127.0.0.1`: `http://localhost:8080`,
+or a different local port, sends another `Host` and `Origin` and is refused
+with a 403 (`neel: refused: the Host header must be 127.0.0.1:8080`), unless
+that origin is in `allowedOrigins` (`allowedOrigins =
+@["http://localhost:8080"]`).
+
+**cloudflared quick tunnel.** A way to try serve mode from a phone without
+an account or a domain. Start the tunnel first, since its hostname is new
+every run:
+
+```
+cloudflared tunnel --url http://127.0.0.1:8080
+```
+
+It prints a `https://<name>.trycloudflare.com` URL. Then start the app with
+that URL as an allowed origin (cloudflared answers 502 until the app is up),
+for example with `examples/serve`:
+
+```
+./examples/serve/serve --port=8080 https://<name>.trycloudflare.com
+```
+
+and open the URL on the phone. When cloudflared restarts, the hostname
+changes: restart the app with the new origin and open the new URL. A quick
+tunnel is public (see above), so use it only to try things out.
+
+**Cloudflare Tunnel with Access.** For reaching the app from anywhere with a
+login in front of it: a named tunnel gives the app a fixed hostname, and
+Cloudflare Access authenticates the user before any request reaches Neel. It
+needs a domain whose DNS Cloudflare runs and Zero Trust (both Free plans
+work). With an Access application for `notes.example.com` (an Allow policy on
+your e-mail address) and a tunnel whose `config.yml` sends that hostname to
+`http://127.0.0.1:8080`:
+
+```
+cloudflared tunnel run myapp
+./examples/serve/serve --port=8080 https://notes.example.com
+```
+
+The Access login redirects back from `<team>.cloudflareaccess.com`, which
+makes the first page load cross-site; serve mode accepts that for top-level
+navigations. With the reload recipe, a page whose login has expired reloads
+into the login page when the app comes back; a reload that signs in silently
+while the app is still down lands on Cloudflare's 502 page and needs a
+manual reload. Step by step, including the dashboard, costs, and removal:
+[Cloudflare Tunnel with Access](CLOUDFLARE_ACCESS.md).
 
 ## Caveats
 
@@ -794,8 +1267,10 @@ run arbitrary commands or touch arbitrary paths without checking them.
   does not fire again, page-side state is gone); if it happens later the window
   has been retired and, if it was the last one, the app has exited. An app
   meant to sit in a background tab should raise `gracePeriodMs` (minutes rather
-  than seconds). Neither side closes an idle connection on its own, so there is
-  no need for a keep-alive.
+  than seconds). On `127.0.0.1` neither side closes an idle connection on its
+  own, so local mode sends no keep-alive. Behind a proxy or tunnel that is no
+  longer true; serve mode pings every connection that has been silent for
+  30 s (see [Keep-alive pings](#keep-alive-pings)).
 - `onWindowClose` fired during teardown (after `quitApp()`, for windows still
   open) runs with the window table already empty: `windows()` is `@[]` and
   `js` raises `NeelNoWindowError`. An exception escaping a hook is swallowed
@@ -822,11 +1297,25 @@ run arbitrary commands or touch arbitrary paths without checking them.
   ephemeral port the new run listens elsewhere, so refreshing the old page
   fails too. With a fixed `port`, refreshing it fetches a fresh shim and the
   page binds as the window its URL names, displacing the window the new run
-  opened under that id (which then closes with 1000).
+  opened under that id (which then closes with 4000, `CloseDisplaced`, and
+  does not reconnect). A second app started on a fixed port that another
+  app already listens on fails at start with `OSError`, on every OS.
 - `openWindow`, `closeWindow`, and `quitApp` require a running `startApp`;
   called before it starts or after it returns they fail an assertion.
   `windows()` is then empty, `window(id)` is `none`, and `js` raises
   `NeelNoWindowError`. Only one `startApp` may run at a time per process.
+- On Windows, Ctrl-C crashes a debug build (one without `-d:release`)
+  wherever Nim's own Ctrl-C handler runs, which includes every local-mode
+  app. After a short pause the process ends with an access violation
+  (`$LASTEXITCODE` is `-1073741819`, `0xC0000005`) instead of printing
+  `SIGINT: Interrupted by Ctrl-C.` and exiting with 1. Windows runs the
+  handler on a thread of its own, and in a debug build the handler
+  allocates there to build a stack trace. Any Nim program built this way
+  does it, with or without Neel. Nothing else is lost, since Ctrl-C ends
+  a local-mode app without Neel's shutdown anyway, but expect the crash.
+  To stop a local-mode app cleanly, close its windows or call `quitApp()`.
+  Release builds are not affected, and neither is serve mode, which
+  handles Ctrl-C itself.
 
 ## The examples
 
@@ -846,6 +1335,28 @@ run arbitrary commands or touch arbitrary paths without checking them.
   500 concurrent calls, 2 MB payloads, pushes from a plain thread, multi-window
   broadcasts, lifecycle events, and more. Mainly for verifying Neel itself, but
   useful as a reference for how each API behaves under load and in edge cases.
+- [`examples/serve`](../examples/serve) - [serve mode](#serve-mode): a
+  shared note held in Nim memory under a `Lock`, served on port 5359 without
+  a browser, `neel.getNote()` on load and after every reconnect, the
+  server's pid and start time, and a "Stop server" button (`quitApp()`).
+  The page handles every serve-mode connection state: connected,
+  reconnecting, dormant, displaced by another device (4000, with a button
+  that takes the session back), and the
+  [reload recipe](#reloading-after-a-server-restart). Positional arguments
+  are allowed origins and `--port=N` replaces the port
+  (`./serve https://<name>.trycloudflare.com`).
+
+## What's new in 2.1
+
+- [Serve mode](#serve-mode): `startApp(serve = true, port = ...,
+  allowedOrigins = ...)` runs the app as a persistent server without a
+  browser, reached through an SSH forward, a tunnel, or a reverse proxy.
+- A displaced connection (another tab or device taking a window over) now
+  closes with code 4000 (`CloseDisplaced`) instead of 1000. The shim's
+  behavior is unchanged (final, no reconnect); only the code reported to
+  `neel.onclose` differs.
+- On Windows, starting a second app on a fixed port that is already in use
+  now fails with `OSError`, as it already did on macOS and Linux.
 
 ## Migrating from Neel 1.x
 

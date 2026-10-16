@@ -8,8 +8,9 @@
 ## and shovels bytes.
 ##
 ## Surface:
-## - `newServer(hooks..., workers, queueCapacity, maxMessageSize)`,
-##   `listen(server, port = 0)` (binds `127.0.0.1` only; `port` is readable
+## - `newServer(hooks..., workers, queueCapacity, maxMessageSize,
+##   closeTimeoutMs, pingIntervalMs)`, `listen(server, port = 0)` (binds
+##   `127.0.0.1` only, exclusively on Windows; `port` is readable
 ##   afterwards), `shutdown(server)` (idempotent, joins every thread);
 ##   `shutdown(server, beforeJoin)` also runs a cleanup hook after all work
 ##   is done but before any Neel thread exits.
@@ -22,6 +23,11 @@
 ## - `send(server, conn, text)` queues a text frame from any thread;
 ##   `close(server, conn, code, reason)` starts the closing handshake.
 ## - `isWebSocketUpgrade(req)` so a handler can check before saying `upgrade()`.
+## - Keep-alive: with `pingIntervalMs > 0` the IO thread pings every upgraded
+##   connection that has neither read nor written anything for that long
+##   (proxies close silent WebSockets). Pongs are accepted and ignored; a
+##   peer that never answers is not closed for it. `0` (the default) sends
+##   no pings.
 ##
 ## Threading: the IO thread owns the sockets, parsers, and receive buffers.
 ## Workers reach a connection only through its `ConnId` and the server lock,
@@ -52,7 +58,7 @@ const
     ## on a POSIX host.
 
 when UseWinSockets:
-  from std/winlean import TCP_NODELAY, WSAEWOULDBLOCK
+  from std/winlean import TCP_NODELAY, WSAEWOULDBLOCK, SO_EXCLUSIVEADDRUSE
 else:
   # `nativesockets` already re-exports EAGAIN/EWOULDBLOCK/EINTR/MSG_NOSIGNAL
   # (and SO_NOSIGPIPE on macOS); a full `import std/posix` would clash with
@@ -146,6 +152,7 @@ type
     deadline: MonoTime
     hasStalled: bool
     stalled: Task             # task the pool could not take yet
+    lastActivity: MonoTime    # last read, write, upgrade, or queued ping
     # --- shared, guarded by ServerImpl.lock ---
     outbound: string
     pending: seq[Pending]
@@ -164,6 +171,7 @@ type
     onOpen: ConnectionHandler
     onClose: ConnectionHandler
     workers, queueCapacity, maxMessageSize, closeTimeoutMs: int
+    pingIntervalMs: int       # 0: no pings
     pool: Pool
     listenFd: SocketHandle
     port: int
@@ -281,13 +289,20 @@ proc raiseFdLimit() =
 
 proc openListener(port: int): (SocketHandle, int) =
   ## A non-blocking TCP listener on `127.0.0.1:port`; returns the handle and
-  ## the bound port (`port = 0` picks an ephemeral one). Raises `OSError`.
+  ## the bound port (`port = 0` picks an ephemeral one). Raises `OSError`,
+  ## also when another socket already listens on the port.
   let fd = createNativeSocket(nativesockets.AF_INET, nativesockets.SOCK_STREAM,
                               nativesockets.IPPROTO_TCP)
   if fd == osInvalidSocket:
     raiseOSError(osLastError())
   try:
-    setSockOptInt(fd, SOL_SOCKET, SO_REUSEADDR, 1)
+    when UseWinSockets:
+      # Windows `SO_REUSEADDR` lets a second socket bind a port that is
+      # already listening, so two servers would share it. Exclusive use
+      # refuses that and still rebinds a port with connections in TIME_WAIT.
+      setSockOptInt(fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1)
+    else:
+      setSockOptInt(fd, SOL_SOCKET, SO_REUSEADDR, 1)
     var sa: Sockaddr_in
     sa.sin_family = typeof(sa.sin_family)(toInt(nativesockets.AF_INET))
     sa.sin_port = htons(uint16(port))
@@ -439,6 +454,8 @@ proc flush(s: ptr ServerImpl; c: Conn): bool =
         break
       s.teardown(c)
       return false
+    if n > 0:
+      c.lastActivity = getMonoTime()
     c.writePos += n
   c.wantWrite = c.writePos < c.writeBuf.len
   if not c.wantWrite and c.closeAfterFlush:
@@ -549,6 +566,7 @@ proc readFrom(s: ptr ServerImpl; c: Conn): bool =
       return true
     s.teardown(c)
     return false
+  c.lastActivity = getMonoTime()
   if c.closeAfterFlush:
     return true # draining only; input is discarded
   let old = c.recvBuf.len
@@ -575,6 +593,7 @@ proc applyPending(s: ptr ServerImpl; c: Conn; p: Pending): bool =
     c.state = csWebSocket
     c.paused = c.hasStalled
     c.upgraded = true
+    c.lastActivity = getMonoTime()
     c.decoder = initFrameDecoder(frServer, s.maxMessageSize)
     c.assembler = initMessageAssembler(s.maxMessageSize)
     acquire s.lock
@@ -647,14 +666,42 @@ proc processDeadlines(s: ptr ServerImpl) =
   for c in expired:
     s.teardown(c)
 
+proc processPings(s: ptr ServerImpl) =
+  ## Queues a ping on every upgraded connection idle for `pingIntervalMs`.
+  ## Queueing restarts the idle time, so a peer that is not reading gets one
+  ## ping per interval rather than one per loop pass.
+  if s.pingIntervalMs == 0:
+    return
+  let now = getMonoTime()
+  let interval = initDuration(milliseconds = s.pingIntervalMs)
+  var due: seq[Conn]
+  for c in s.byFd.values:
+    if c.state == csWebSocket and now - c.lastActivity >= interval:
+      due.add c
+  for c in due:
+    c.lastActivity = now
+    let ping = encodePing()
+    acquire s.lock
+    let closing = c.closing # `close` from a worker may have queued its frame
+    if not closing:
+      c.outbound.add ping
+    release s.lock
+    if not closing:
+      discard s.flush(c)
+
 proc selectTimeout(s: ptr ServerImpl): int =
   result = IoTickMs
   if s.stalledConns > 0:
     result = min(result, StallRetryMs)
   let now = getMonoTime()
+  let interval = initDuration(milliseconds = s.pingIntervalMs)
   for c in s.byFd.values:
     if c.hasDeadline:
       let left = (c.deadline - now).inMilliseconds
+      result = min(result, int(max(left, 0)))
+    if s.pingIntervalMs > 0 and c.state == csWebSocket:
+      # Rounded up: waking a fraction of a millisecond early would spin.
+      let left = (c.lastActivity + interval - now).inMilliseconds + 1
       result = min(result, int(max(left, 0)))
 
 proc acceptAll(s: ptr ServerImpl) =
@@ -727,6 +774,7 @@ proc ioLoop(s: ptr ServerImpl) {.thread.} =
     s.processDirty()
     s.retryStalled()
     s.processDeadlines()
+    s.processPings()
   s.selector.unregister(s.listenFd)
   s.listenFd.close()
   s.teardownAll()
@@ -801,10 +849,13 @@ proc newServer*(onRequest: RequestHandler = nil;
                 workers = DefaultWorkers;
                 queueCapacity = DefaultQueueCapacity;
                 maxMessageSize = DefaultMaxMessageSize;
-                closeTimeoutMs = DefaultCloseTimeoutMs): Server =
+                closeTimeoutMs = DefaultCloseTimeoutMs;
+                pingIntervalMs = 0): Server =
   ## A server with the given hooks and limits. Nothing is bound or started
   ## until `listen`. A `nil` `onRequest` answers every request with 404; a
-  ## `nil` `onMessage` ignores messages.
+  ## `nil` `onMessage` ignores messages. `pingIntervalMs > 0` pings every
+  ## upgraded connection that has read and written nothing for that long;
+  ## `0` sends no pings.
   let impl = cast[ptr ServerImpl](allocShared0(sizeof(ServerImpl)))
   initLock impl.lock
   initCond impl.ioCond
@@ -816,13 +867,15 @@ proc newServer*(onRequest: RequestHandler = nil;
   impl.queueCapacity = queueCapacity
   impl.maxMessageSize = maxMessageSize
   impl.closeTimeoutMs = closeTimeoutMs
+  impl.pingIntervalMs = max(pingIntervalMs, 0)
   impl.listenFd = osInvalidSocket
   result = Server(impl: impl)
 
 proc listen*(s: Server; port = 0) =
   ## Binds `127.0.0.1:port` (`0` picks an ephemeral port, readable through
   ## `port` afterwards), starts the worker pool and the IO thread. Raises
-  ## `OSError` if the port cannot be bound. A server listens at most once.
+  ## `OSError` if the port cannot be bound, including when another socket
+  ## already listens on it. A server listens at most once.
   let impl = s.impl
   doAssert impl.state == ssNew, "listen called twice"
   raiseFdLimit()
@@ -842,6 +895,11 @@ proc listen*(s: Server; port = 0) =
 proc port*(s: Server): int =
   ## The bound port, or 0 before `listen`.
   s.impl.port
+
+proc pingIntervalMs*(s: Server): int =
+  ## The keep-alive ping interval given to `newServer` (`0`: no pings; a
+  ## negative value is stored as `0`).
+  s.impl.pingIntervalMs
 
 proc running*(s: Server): bool =
   ## `true` between `listen` and `shutdown`.

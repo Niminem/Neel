@@ -1,0 +1,58 @@
+body {
+  font: 16px/1.5 system-ui, sans-serif;
+  max-width: 40em;
+  margin: 2em auto;
+  padding: 0 1em;
+  color: #222;
+}
+
+section {
+  border-top: 1px solid #ddd;
+  padding-top: 0.5em;
+}
+
+textarea {
+  box-sizing: border-box;
+  width: 100%;
+  font: inherit;
+  padding: 0.4em 0.6em;
+}
+
+button {
+  font: inherit;
+  padding: 0.3em 0.9em;
+}
+
+output {
+  margin-left: 0.5em;
+  font-family: ui-monospace, monospace;
+}
+
+.status {
+  font-weight: bold;
+}
+
+#status[data-state="connected"] {
+  color: #1b6e20;
+}
+
+#status[data-state="reconnecting"],
+#status[data-state="waiting"] {
+  color: #8a5a00;
+}
+
+#status[data-state="dormant"],
+#status[data-state="displaced"],
+#status[data-state="closed"] {
+  color: #b00020;
+}
+
+.hint {
+  color: #555;
+  font-size: 0.9em;
+}
+
+.error {
+  color: #b00020;
+  font-family: ui-monospace, monospace;
+}

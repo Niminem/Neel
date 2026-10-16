@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Neel serve mode</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/neel.js"></script>
+  <script src="/main.js" defer></script>
+</head>
+<body>
+  <h1>Shared note</h1>
+
+  <p class="status">
+    <span id="status" data-state="connecting">connecting</span>
+    <button id="take-back" hidden>Use it here</button>
+  </p>
+  <p class="hint">
+    page loaded <span id="loaded-at">?</span>, reconnects: <span id="reconnects">0</span>
+  </p>
+
+  <section>
+    <textarea id="editor" rows="10" spellcheck="false"
+              placeholder="Type a note and press Save. Open this app on another device to see it there."></textarea>
+    <p>
+      <button id="save">Save</button>
+      <output id="saved-at"></output>
+    </p>
+  </section>
+
+  <section>
+    <h2>Server</h2>
+    <p>
+      pid <output id="pid">?</output>, started <output id="started-at">?</output>
+    </p>
+    <p><button id="stop">Stop server</button></p>
+    <p class="hint">
+      After a stop or a restart this page waits for the server and reloads
+      itself once it answers again. Opening the app on another device (or in
+      another tab) displaces this page; "Use it here" takes the session back.
+    </p>
+  </section>
+
+  <p id="error" class="error"></p>
+</body>
+</html>

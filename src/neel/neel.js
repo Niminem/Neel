@@ -1,9 +1,9 @@
-// neel.js - browser-side shim for Neel 2.0.
+// neel.js - browser-side shim for Neel 2.1.
 //
 // Plain ES2020, no build step, no dependencies. This file is a template:
-// before serving it at /neel.js, frontend.nim replaces the three placeholders
-// below (launch token, window id, exposed proc names) with JS literals, so
-// the unrendered file is not valid JS on its own.
+// before serving it at /neel.js, frontend.nim replaces the four placeholders
+// below (launch token, window id, exposed proc names, serve flag) with JS
+// literals, so the unrendered file is not valid JS on its own.
 //
 // Loading: include it as a classic script element, `<script src="/neel.js">`,
 // placed before the app's own script. It installs one global, `neel`
@@ -22,12 +22,14 @@
 //   neel.close()               -> deliberate close, no reconnect
 //   neel.connected             -> boolean, true while the socket is open
 //   neel.onclose(fn)           -> fn(code, reconnecting) after every close
-//   neel.onreconnect(fn)       -> fn() after every successful open but the first
+//   neel.onreconnect(fn)       -> fn() after every successful open but the one
+//                                 that resolves neel.ready
 //
 // Connection state for a page that wants to show it: `neel.ready` covers the
 // first open; `neel.onclose` fires after every close, including each failed
 // reconnect attempt, with the WebSocket close code (1006 for a lost
-// connection, 1000/1001 for a deliberate close) and whether another reconnect
+// connection, 1000/1001 for a deliberate close, 4000 when another tab or
+// device took over this window) and whether another reconnect
 // attempt follows; `neel.onreconnect` fires when such an attempt succeeds. A listener that throws is reported with console.warn and ignored.
 //
 // Errors: a rejected call carries an Error whose `name` (and `kind`) is the
@@ -42,11 +44,22 @@
 // positive integers starting at 1 per connection and are allocated when the
 // frame goes on the wire. Calls made before the socket is open (or while it
 // reconnects) are queued and flushed on open. On an abnormal close (anything
-// but 1000/1001 or neel.close()) in-flight promises are rejected with
+// but 1000/1001/4000 or neel.close()) in-flight promises are rejected with
 // NeelDisconnectedError and the shim reconnects up to MAX_RECONNECT_ATTEMPTS
 // times with exponential backoff (250, 500, 1000, 2000, 4000 ms), presenting
 // the same window id again. A close with 1000 or 1001 (server shutdown or
-// closeWindow) is final: no reconnect, and every later call rejects at once.
+// closeWindow) or CLOSE_DISPLACED (another connection bound this window) is
+// final: no reconnect, and every later call rejects at once. A displaced page
+// must not reconnect, or two open pages would displace each other forever.
+//
+// Running out of attempts is final too, unless SERVE is true (the app runs as
+// a persistent server, reached through a tunnel or proxy). Then the shim goes
+// dormant instead: the same rejections and onclose(code, false), and later
+// calls reject at once, but when the page becomes visible or the browser goes
+// back online it starts a new round of attempts, the first one at once. A
+// successful one fires onreconnect, so a page on a phone that slept or behind
+// a tunnel that dropped recovers when the user returns to it. Wake events
+// at any other time are ignored. neel.ready, once rejected, stays rejected.
 //
 // Wire format: docs/GUIDE.md, "The neel.js API" (Nim side: src/neel/protocol.nim).
 
@@ -61,9 +74,13 @@
   const TOKEN = __NEEL_TOKEN__;
   const WINDOW_ID = __NEEL_WINDOW_ID__;
   const EXPOSED = __NEEL_EXPOSED__;
+  const SERVE = __NEEL_SERVE__;
 
+  const CLOSE_DISPLACED = 4000;
   const MAX_RECONNECT_ATTEMPTS = 5;
   const RECONNECT_BASE_MS = 250;
+  const DORMANT_REASON = "neel: not connected; reconnects when the page becomes visible " +
+                         "or goes online";
   const DISCONNECTED = "NeelDisconnectedError";
   const UNKNOWN_FUNCTION = "NeelUnknownFunctionError";
   const RESERVED = new Set(["call", "send", "expose", "ready", "windowId", "close",
@@ -77,9 +94,10 @@
   let socket = null;          // the current WebSocket, null while disconnected
   let nextId = 1;             // reset for every connection
   let attempts = 0;           // reconnects since the last successful open
-  let everOpened = false;     // distinguishes the first open from a reconnect
+  let readySettled = false;   // neel.ready resolved or rejected; later opens are reconnects
   let timer = null;           // pending reconnect timer
-  let terminated = false;     // closed deliberately, by the server, or gave up
+  let terminated = false;     // closed deliberately, by the server, or gave up (not SERVE)
+  let dormant = false;        // SERVE only: gave up; wake() starts a new round of attempts
 
   let resolveReady;
   let rejectReady;
@@ -130,6 +148,10 @@
       if (settle !== null) settle.reject(neelError(DISCONNECTED, "neel: connection is closed"));
       return;
     }
+    if (dormant) {
+      if (settle !== null) settle.reject(neelError(DISCONNECTED, DORMANT_REASON));
+      return;
+    }
     if (isOpen()) transmit(name, args, settle);
     else queue.push({ name, args, settle });
   }
@@ -163,16 +185,29 @@
     }
   }
 
-  function terminate(reason, code) {
-    terminated = true;
+  function giveUp(reason, code) {
+    // Shared by terminate and goDormant; the caller sets its flag first, so
+    // calls made from an onclose listener already see the new state.
     if (timer !== null) {
       clearTimeout(timer);
       timer = null;
     }
     failPending(reason);
     failQueue(reason);
+    readySettled = true;
     rejectReady(neelError(DISCONNECTED, reason)); // no-op once resolved
     notify(closeListeners, code === undefined ? null : code, false);
+  }
+
+  function terminate(reason, code) {
+    terminated = true;
+    dormant = false;
+    giveUp(reason, code);
+  }
+
+  function goDormant(reason, code) {
+    dormant = true;
+    giveUp(reason, code);
   }
 
   function call(name, ...args) {
@@ -268,7 +303,9 @@
   function scheduleReconnect(code) {
     if (terminated) return;
     if (attempts >= MAX_RECONNECT_ATTEMPTS) {
-      terminate("neel: gave up reconnecting after " + MAX_RECONNECT_ATTEMPTS + " attempts", code);
+      const reason = "neel: gave up reconnecting after " + MAX_RECONNECT_ATTEMPTS + " attempts";
+      if (SERVE) goDormant(reason, code);
+      else terminate(reason, code);
       return;
     }
     attempts += 1;
@@ -285,8 +322,8 @@
     ws.onopen = () => {
       if (ws !== socket) return;
       attempts = 0;
-      const reconnected = everOpened;
-      everOpened = true;
+      const reconnected = readySettled;
+      readySettled = true;
       resolveReady();
       flushQueue();
       if (reconnected) notify(reconnectListeners);
@@ -312,13 +349,23 @@
       socket = null;
       failPending("neel: connection lost (close code " + event.code + ")");
       if (terminated) return;
-      if (event.code === 1000 || event.code === 1001) {
+      if (event.code === 1000 || event.code === 1001 || event.code === CLOSE_DISPLACED) {
         terminate("neel: server closed the connection (close code " + event.code + ")", event.code);
         return;
       }
       scheduleReconnect(event.code);
     };
     // onerror carries no information the following onclose does not; ignored.
+  }
+
+  function wake() {
+    // One new round of attempts, the first at once. Only a dormant shim
+    // wakes, so a second event during the round, or an event while
+    // connected, reconnecting, or terminated, does nothing.
+    if (!dormant) return;
+    dormant = false;
+    attempts = 0;
+    connect();
   }
 
   // --- public surface -----------------------------------------------------
@@ -388,5 +435,11 @@
   }
 
   globalThis.neel = neel;
+  if (SERVE) {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") wake();
+    });
+    globalThis.addEventListener("online", () => wake());
+  }
   connect();
 })();
