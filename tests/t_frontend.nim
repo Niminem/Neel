@@ -666,3 +666,127 @@ suite "frontend: requestRefusal, serve mode":
     for site in ["same-origin", "same-site", "none"]:
       check serveRefusal(NeelJsPath, PublicHost, ("Sec-Fetch-Site", site)) == ""
     check serveRefusal(NeelJsPath, PublicHost) == ""
+
+proc reqWith(httpMethod: HttpMethod; path: string;
+             headers: varargs[(string, string)]): HttpRequest =
+  ## `req` for another method; `rawMethod` is what the refusal text quotes.
+  HttpRequest(httpMethod: httpMethod, path: path, headers: @headers,
+              rawMethod: (if httpMethod == hmOther: "PROPFIND" else: $httpMethod))
+
+const
+  Unsafe = [hmPost, hmPut, hmPatch, hmDelete, hmOptions, hmOther]
+    ## Every method other than `GET` / `HEAD`.
+  SameOrigin = ("Sec-Fetch-Site", "same-origin")
+
+proc crossOrigin(httpMethod: HttpMethod): string =
+  "neel: refused: cross-origin " &
+    (if httpMethod == hmOther: "PROPFIND" else: $httpMethod) & " request"
+
+suite "frontend: requestRefusal, methods other than GET and HEAD":
+  test "a Neel page's own fetch or form submission passes":
+    for m in Unsafe:
+      check requestRefusal(reqWith(m, "/api", Own, OwnOrigin, SameOrigin), 8000, Local) == ""
+      check requestRefusal(reqWith(m, "/api", Own, OwnOrigin), 8000, Local) == ""
+      check requestRefusal(reqWith(m, "/api", Own, SameOrigin), 8000, Local) == ""
+      check requestRefusal(reqWith(m, "/api", Own, OwnOrigin,
+                                   ("Sec-Fetch-Site", "none")), 8000, Local) == ""
+
+  test "a request with neither Origin nor Sec-Fetch-Site (a program) passes":
+    for m in Unsafe:
+      check requestRefusal(reqWith(m, "/hooks/x", Own), 8000, Local) == ""
+      check requestRefusal(reqWith(m, "/hooks/x", Own,
+                                   ("Content-Type", "application/json")), 8000, Local) == ""
+
+  test "an Origin that is not this server's is refused":
+    for m in Unsafe:
+      for origin in ["", "null", "http://attacker.example", "http://127.0.0.1:8001",
+                     "https://127.0.0.1:8000", "http://localhost:8000",
+                     "http://127.0.0.1:8000/", "127.0.0.1:8000",
+                     "http://127.0.0.1:8000.attacker.example"]:
+        check requestRefusal(reqWith(m, "/api", Own, ("Origin", origin)), 8000, Local) ==
+          crossOrigin(m)
+        # ... whatever Sec-Fetch-Site claims.
+        check requestRefusal(reqWith(m, "/api", Own, ("Origin", origin), SameOrigin),
+                             8000, Local) == crossOrigin(m)
+
+  test "same-site is not enough: another local port, a sibling subdomain":
+    for m in Unsafe:
+      for site in ["same-site", "Same-Site", "bogus"]:
+        check requestRefusal(reqWith(m, "/api", Own, ("Sec-Fetch-Site", site)),
+                             8000, Local) == crossOrigin(m)
+        check requestRefusal(reqWith(m, "/api", Own, OwnOrigin, ("Sec-Fetch-Site", site)),
+                             8000, Local) == crossOrigin(m)
+      check requestRefusal(reqWith(m, "/api", Own, OwnOrigin,
+                                   ("Sec-Fetch-Site", "cross-site")), 8000, Local) ==
+        "neel: refused: cross-site request"
+
+  test "the Host check comes first":
+    for m in Unsafe:
+      check requestRefusal(reqWith(m, "/api", ("Host", "attacker.example:8000"),
+                                   OwnOrigin, SameOrigin), 8000, Local) ==
+        "neel: refused: the Host header must be 127.0.0.1:8000"
+
+  test "GET and HEAD are not subject to the Origin rule":
+    for m in [hmGet, hmHead]:
+      check requestRefusal(reqWith(m, "/api", Own, ("Origin", "http://attacker.example")),
+                           8000, Local) == ""
+      check requestRefusal(reqWith(m, "/api", Own, ("Sec-Fetch-Site", "same-site")),
+                           8000, Local) == ""
+
+  test "local mode ignores allowed origins for these methods too":
+    let localWithOrigins = initRequestFilter(serve = false, @["https://myapp.example.com"])
+    check requestRefusal(reqWith(hmPost, "/api", Own, PublicOrigin), 8000,
+                         localWithOrigins) == crossOrigin(hmPost)
+
+  test "/ws keeps its own rule whatever the method":
+    check requestRefusal(reqWith(hmPost, WsPath, Own), 8000, Local) ==
+      "neel: refused: the Origin header must be http://127.0.0.1:8000"
+    check requestRefusal(reqWith(hmPost, WsPath, Own, OwnOrigin), 8000, Local) == ""
+
+suite "frontend: requestRefusal, serve mode, methods other than GET and HEAD":
+  proc refusal(m: HttpMethod; path: string; headers: varargs[(string, string)]): string =
+    requestRefusal(reqWith(m, path, headers), ServePort, Serve)
+
+  test "a page at an allowed origin, or at Neel's own, may post":
+    for m in Unsafe:
+      check refusal(m, "/api", PublicHost, PublicOrigin, SameOrigin) == ""
+      check refusal(m, "/api", LoopHost, PublicOrigin) == ""       # Host rewritten
+      check refusal(m, "/api", LoopHost, LoopOrigin, SameOrigin) == ""  # SSH forward
+      check refusal(m, "/api", ("Host", "lan.example:8080"),
+                    ("Origin", "http://lan.example:8080")) == ""
+
+  test "a webhook (no Origin, no Sec-Fetch-Site) passes with the public or the rewritten Host":
+    check refusal(hmPost, "/hooks/slack", PublicHost,
+                  ("Content-Type", "application/json"),
+                  ("X-Slack-Signature", "v0=abc")) == ""
+    check refusal(hmPost, "/hooks/slack", LoopHost) == ""
+    check refusal(hmPost, "/hooks/slack", ("Host", "attacker.example")) ==
+      "neel: refused: the Host header must be 127.0.0.1:8080 or the host of an allowed origin"
+
+  test "other origins are refused, matching exactly":
+    for m in Unsafe:
+      for origin in ["", "null", "https://attacker.example",
+                     "https://evil.example.com", "http://myapp.example.com",
+                     "https://myapp.example.com:8443", "https://myapp.example.com/",
+                     "http://127.0.0.1:8081"]:
+        check refusal(m, "/api", PublicHost, ("Origin", origin)) == crossOrigin(m)
+      # A sibling subdomain is same-site to the browser.
+      check refusal(m, "/api", PublicHost, ("Sec-Fetch-Site", "same-site")) == crossOrigin(m)
+
+  test "a cross-site form submission is a top-level navigation, and is still refused":
+    for m in Unsafe:
+      check refusal(m, "/api", PublicHost, ("Origin", "https://attacker.example"),
+                    CrossSite, Navigate, ("Sec-Fetch-Dest", "document")) ==
+        "neel: refused: cross-site request"
+      check refusal(m, "/api", PublicHost, CrossSite, Navigate,
+                    ("Sec-Fetch-Dest", "document")) == "neel: refused: cross-site request"
+    # The same navigation with GET or HEAD passes, as before.
+    for m in [hmGet, hmHead]:
+      check refusal(m, "/api", PublicHost, CrossSite, Navigate,
+                    ("Sec-Fetch-Dest", "document")) == ""
+
+  test "with no allowed origins only Neel's own origin may post":
+    let bare = initRequestFilter(serve = true)
+    check requestRefusal(reqWith(hmPost, "/api", LoopHost, LoopOrigin), ServePort, bare) == ""
+    check requestRefusal(reqWith(hmPost, "/api", LoopHost, PublicOrigin), ServePort, bare) ==
+      crossOrigin(hmPost)

@@ -7,16 +7,18 @@
 ##
 ## Surface:
 ## - `HttpParser` + `parseRequest`: incremental parser (request line, headers,
-##   body skipped via `Content-Length`). Reports `psIncomplete`, `psComplete`
-##   with the number of bytes consumed (so pipelined requests work), or
-##   `psMalformed`. The scan position is kept between calls so a growing
-##   buffer is never re-scanned from the start.
+##   body framed by `Content-Length` and bounded by `maxBody`). Reports
+##   `psIncomplete`, `psComplete` with the number of bytes consumed (so
+##   pipelined requests work), or `psMalformed`. The scan position is kept
+##   between calls so a growing buffer is never re-scanned from the start.
 ## - `HttpRequest`: method, raw method token, path and query (split from the
-##   target), version, headers with case-insensitive lookup, and the keep-alive
-##   decision. Enough for the WebSocket upgrade check without re-parsing.
+##   target), version, headers with case-insensitive lookup, the body, and
+##   the keep-alive decision. Enough for the WebSocket upgrade check without
+##   re-parsing. `params` is left empty here; `routes.nim` fills it.
 ## - `HttpResponse` + `encodeResponse`: status line, headers, automatic
 ##   `Content-Length` and `Connection`, HEAD support (same headers, no body).
-##   Status helpers for 200, 400, 404, 405 (`Allow: GET, HEAD`), 206, and 416.
+##   Status helpers for 200, 400, 404, 405 (`Allow: GET, HEAD` unless told
+##   otherwise), 206, and 416.
 ## - `parseRange`: single byte range (`bytes=a-b`, `bytes=a-`, `bytes=-n`).
 ##   Multi-range and malformed headers are ignored (serve 200).
 ## - `contentTypeFor`: MIME lookup through `std/mimetypes` with overrides for
@@ -30,20 +32,25 @@ const
     ## Maximum size in bytes of the request line plus headers, including the
     ## terminating empty line. Larger header blocks are malformed.
   MaxRequestBody* = 1024 * 1024
-    ## Maximum `Content-Length` the parser is willing to skip. Neel only
-    ## serves `GET`/`HEAD`, so bodies are never used; this bound keeps a
-    ## client from making the server buffer an unbounded body before it can
-    ## answer 405. Larger values are malformed.
+    ## Default for the largest `Content-Length` the parser accepts (1 MiB;
+    ## `parseRequest`'s `maxBody`). The whole body is buffered before the
+    ## request is complete, so the bound keeps a client from making the
+    ## server hold an unbounded one. Larger values are malformed.
   OctetStream* = "application/octet-stream"
     ## MIME type returned for unknown extensions.
 
 type
   HttpMethod* = enum
-    ## Request method. Anything other than `GET`/`HEAD` is `hmOther`; the
-    ## original token is kept in `HttpRequest.rawMethod` and the server answers
-    ## 405.
+    ## Request method. A token that is none of the named ones (matched
+    ## case-sensitively, as HTTP requires) is `hmOther`; the original token
+    ## is kept in `HttpRequest.rawMethod`.
     hmGet = "GET"
     hmHead = "HEAD"
+    hmPost = "POST"
+    hmPut = "PUT"
+    hmPatch = "PATCH"
+    hmDelete = "DELETE"
+    hmOptions = "OPTIONS"
     hmOther = "OTHER"
 
   HttpVersion* = enum
@@ -56,8 +63,8 @@ type
     ## `value` has leading and trailing SP/HTAB removed.
 
   HttpRequest* = object
-    ## A fully parsed request head. The body (if any) has been skipped.
-    httpMethod*: HttpMethod ## `hmGet`, `hmHead`, or `hmOther`.
+    ## A fully parsed request: the head and the whole body.
+    httpMethod*: HttpMethod ## The method; `hmOther` for an unlisted token.
     rawMethod*: string      ## Method token as sent, e.g. `"POST"`.
     target*: string         ## Request target as sent, e.g. `"/a?b=1"`.
     path*: string           ## `target` up to the first `?` (not percent-decoded).
@@ -65,6 +72,10 @@ type
     version*: HttpVersion   ## `hv10` or `hv11`.
     headers*: seq[HttpHeader] ## Every header field in wire order.
     contentLength*: int     ## Declared body length, 0 when absent.
+    body*: string           ## The body, `contentLength` bytes (`""` when none).
+    params*: seq[tuple[name, value: string]]
+      ## Path parameters of the custom route that matched, percent-decoded,
+      ## in pattern order (see `routes.nim`). Empty outside a route handler.
 
   ParseStatus* = enum
     ## Outcome of one `parseRequest` call.
@@ -192,6 +203,11 @@ proc parseRequestLine(line: string; req: var HttpRequest): string =
     case parts[0]
     of "GET": hmGet
     of "HEAD": hmHead
+    of "POST": hmPost
+    of "PUT": hmPut
+    of "PATCH": hmPatch
+    of "DELETE": hmDelete
+    of "OPTIONS": hmOptions
     else: hmOther
   req.target = parts[1]
   let q = parts[1].find('?')
@@ -218,9 +234,9 @@ proc parseHeaderLine(line: string; req: var HttpRequest): string =
   req.headers.add((name, line[colon + 1 .. ^1].strip(chars = {' ', '\t'})))
   ""
 
-proc checkBodyFraming(req: var HttpRequest): string =
-  ## Validates `Content-Length` (digits, consistent if repeated, bounded) and
-  ## rejects `Transfer-Encoding`, which Neel does not frame.
+proc checkBodyFraming(req: var HttpRequest; maxBody: int): string =
+  ## Validates `Content-Length` (digits, consistent if repeated, at most
+  ## `maxBody`) and rejects `Transfer-Encoding`, which Neel does not frame.
   var length = -1
   for h in req.headers:
     if cmpIgnoreCase(h.name, "Content-Length") == 0:
@@ -232,12 +248,12 @@ proc checkBodyFraming(req: var HttpRequest): string =
       length = v
     elif cmpIgnoreCase(h.name, "Transfer-Encoding") == 0:
       return "Transfer-Encoding is not supported"
-  if length > MaxRequestBody:
+  if length > maxBody:
     return "request body too large"
   req.contentLength = max(length, 0)
   ""
 
-proc parseHeaderBlock(buf: openArray[char]; start, stop: int;
+proc parseHeaderBlock(buf: openArray[char]; start, stop, maxBody: int;
                       req: var HttpRequest): string =
   ## Parses the lines in `buf[start ..< stop + 2]`, where `stop` indexes the
   ## first byte of the terminating CRLFCRLF (so every line, including the
@@ -259,19 +275,22 @@ proc parseHeaderBlock(buf: openArray[char]; start, stop: int;
       return err
     first = false
     lineStart = j + 2
-  checkBodyFraming(req)
+  checkBodyFraming(req, maxBody)
 
 proc malformed(p: var HttpParser; why: string): ParseResult =
   p.reset()
   ParseResult(status: psMalformed, error: why)
 
-proc parseRequest*(p: var HttpParser; buf: openArray[char]): ParseResult =
+proc parseRequest*(p: var HttpParser; buf: openArray[char];
+                   maxBody = MaxRequestBody): ParseResult =
   ## Parses the request at the start of `buf`. Returns `psIncomplete` when
   ## more bytes are needed (append to `buf` and call again), `psComplete`
-  ## with `consumed` set to the request's length in bytes (including any
-  ## skipped body), or `psMalformed`. Empty lines before the request line are
-  ## ignored (RFC 7230 section 3.5). The header block is limited to
-  ## `MaxHeaderBlock` bytes and the body to `MaxRequestBody`.
+  ## with `consumed` set to the request's length in bytes (head and body;
+  ## the body is copied into `request.body`), or `psMalformed`. Empty lines
+  ## before the request line are ignored (RFC 7230 section 3.5). The header
+  ## block is limited to `MaxHeaderBlock` bytes and the body to `maxBody`
+  ## (zero or less allows none), which must not change between the calls
+  ## for one request.
   if p.headerEnd == 0:
     while p.start + 1 < buf.len and buf[p.start] == '\r' and buf[p.start + 1] == '\n':
       p.start += 2
@@ -293,14 +312,16 @@ proc parseRequest*(p: var HttpParser; buf: openArray[char]): ParseResult =
     let headerEnd = found + 4
     if headerEnd - p.start > MaxHeaderBlock:
       return p.malformed("header block exceeds " & $MaxHeaderBlock & " bytes")
-    let err = parseHeaderBlock(buf, p.start, found, p.request)
+    let err = parseHeaderBlock(buf, p.start, found, max(maxBody, 0), p.request)
     if err.len > 0:
       return p.malformed(err)
     p.headerEnd = headerEnd
   let total = p.headerEnd + p.request.contentLength
   if buf.len < total:
     return ParseResult(status: psIncomplete)
-  result = ParseResult(status: psComplete, consumed: total, request: p.request)
+  result = ParseResult(status: psComplete, consumed: total, request: move p.request)
+  if total > p.headerEnd:
+    result.request.body = sliceToString(buf, p.headerEnd, total)
   p.reset()
 
 # --- range -----------------------------------------------------------------
@@ -378,17 +399,30 @@ proc reasonPhrase*(status: int): string =
   case status
   of 101: "Switching Protocols"
   of 200: "OK"
+  of 201: "Created"
+  of 202: "Accepted"
   of 204: "No Content"
   of 206: "Partial Content"
+  of 301: "Moved Permanently"
+  of 302: "Found"
+  of 303: "See Other"
   of 304: "Not Modified"
+  of 307: "Temporary Redirect"
+  of 308: "Permanent Redirect"
   of 400: "Bad Request"
+  of 401: "Unauthorized"
   of 403: "Forbidden"
   of 404: "Not Found"
   of 405: "Method Not Allowed"
+  of 409: "Conflict"
   of 413: "Payload Too Large"
+  of 415: "Unsupported Media Type"
   of 416: "Range Not Satisfiable"
+  of 422: "Unprocessable Content"
+  of 429: "Too Many Requests"
   of 500: "Internal Server Error"
   of 501: "Not Implemented"
+  of 503: "Service Unavailable"
   else:
     case status div 100
     of 1: "Informational"
@@ -462,10 +496,10 @@ proc notFound*(): HttpResponse =
   ## 404 with a plain-text body.
   initResponse(404, "404 Not Found", "text/plain")
 
-proc methodNotAllowed*(): HttpResponse =
-  ## 405 with `Allow: GET, HEAD` and a plain-text body.
+proc methodNotAllowed*(allow = "GET, HEAD"): HttpResponse =
+  ## 405 with `Allow: <allow>` and a plain-text body.
   result = initResponse(405, "405 Method Not Allowed", "text/plain")
-  result.headers.add(("Allow", "GET, HEAD"))
+  result.headers.add(("Allow", allow))
 
 proc partialContent*(slice: string; contentType: string; r: ByteRange;
                      totalLen: int): HttpResponse =

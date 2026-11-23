@@ -396,6 +396,66 @@ suite "server: HTTP":
     check sock.readResponse().body == "hello ok"
     sock.close()
 
+suite "server: request bodies":
+  test "bodies reach the handler whole, in order, up to maxBodySize; larger is a 400":
+    const Limit = 200_000 # several read chunks (64 KiB each)
+    let echo: RequestHandler = proc(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
+      respond(okResponse($req.httpMethod & " " & req.path & " " & $req.body.len &
+                         ":" & req.body, "application/octet-stream"))
+    let srv = newServer(onRequest = echo, workers = 2, queueCapacity = 8,
+                        maxBodySize = Limit)
+    srv.listen(0)
+    try:
+      check srv.maxBodySize == Limit
+      let sock = connect(srv.port)
+      # A small body with the next request right behind it.
+      sock.send("POST /in HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\n\r\n" &
+                "helloGET /next HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+      check sock.readResponse().body == "POST /in 5:hello"
+      check sock.readResponse().body == "GET /next 0:"
+      # A body of exactly the limit, every byte value, sent in two pieces.
+      var big = newString(Limit)
+      for i in 0 ..< Limit:
+        big[i] = char(i mod 251)
+      sock.send("PUT /big HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: " & $Limit &
+                "\r\n\r\n" & big[0 ..< Limit div 2])
+      sleep(20)
+      sock.send(big[Limit div 2 .. ^1])
+      let echoed = sock.readResponse()
+      check echoed.status == 200
+      check echoed.body.len == "PUT /big ".len + ($Limit).len + 1 + Limit
+      check echoed.body == "PUT /big " & $Limit & ":" & big
+      # One byte over: refused from the header alone, and the connection ends.
+      sock.send("POST /over HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: " &
+                $(Limit + 1) & "\r\n\r\n")
+      let over = sock.readResponse()
+      check over.status == 400
+      check over.header("Connection") == "close"
+      check sock.atEof()
+      sock.close()
+    finally:
+      srv.shutdown()
+
+  test "maxBodySize defaults to MaxRequestBody; a negative value allows no body":
+    let byDefault = newServer()
+    check byDefault.maxBodySize == MaxRequestBody
+    byDefault.shutdown()
+    let hits: RequestHandler = proc(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
+      respond(okResponse("got " & $req.body.len, "text/plain"))
+    let srv = newServer(onRequest = hits, workers = 2, queueCapacity = 8,
+                        maxBodySize = -1)
+    srv.listen(0)
+    try:
+      check srv.maxBodySize == 0
+      let sock = connect(srv.port)
+      sock.send("POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n")
+      check sock.readResponse().body == "got 0"
+      sock.send("POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 1\r\n\r\nx")
+      check sock.readResponse().status == 400
+      sock.close()
+    finally:
+      srv.shutdown()
+
 suite "server: WebSocket":
   serverTest "upgrade handshake produces the RFC 6455 accept value":
     let sock = connect(srv.port)

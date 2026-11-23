@@ -1,4 +1,4 @@
-## neel.nim - public surface of Neel 2.1.
+## neel.nim - public surface of Neel 2.2.
 ##
 ## This is the only module an application imports. It provides `startApp`
 ## and re-exports the user-facing pieces of the internal modules under
@@ -6,7 +6,9 @@
 ## `closeWindow`, `windows`, `window`, `requireWindow`, `currentWindow`), the
 ## `Browser` enum and window size / position types, `quitApp`, the
 ## `CloseDisplaced` close code (what `neel.onclose` reports when another tab
-## or device takes a window over), and the `Neel*Error` exception types an
+## or device takes a window over), custom routes (`get`, `post`, `put`,
+## `patch`, `delete`, `route`, with `HttpRequest` / `HttpResponse` and their
+## helpers), and the `Neel*Error` exception types an
 ## application can see. It also re-exports `std/json` and `std/options`, because
 ## the API hands out `JsonNode` (`js.wait.foo(...)`) and `Option` (`window(id)`,
 ## `size = some((800, 600))`) values that an application needs to unpack.
@@ -30,7 +32,8 @@
 ## `127.0.0.1:<port>`, no `Sec-Fetch-Site: cross-site`, and for `/ws` an
 ## `Origin` of `http://127.0.0.1:<port>`; in serve mode the hosts and
 ## origins of `allowedOrigins` are accepted too, and cross-site top-level
-## navigations pass), otherwise 403:
+## navigations pass; a request with a method other than `GET` / `HEAD` must
+## also not come from another origin), otherwise 403. In this order:
 ## - `/ws`: the WebSocket upgrade; requires the launch token and a known
 ##   window id in the query, otherwise 403.
 ## - `/neel.js`: the browser shim rendered for one window (token, window id,
@@ -39,8 +42,19 @@
 ##   is not open, or when it names none and more than one window is open.
 ## - `/neel/no-browser`: the page shown when no browser was found and
 ##   `fallback = false`; 404 in serve mode.
+## - for `GET` / `HEAD`, a file of the web directory, when there is one for
+##   the path (`neel/assets`; never when the app has no web directory).
+##   Files come before routes, so a route with a parameter or a wildcard
+##   (`/@page`, `/*`) is a fallback and cannot hide the app's own assets.
+##   One exception: in serve mode, when `startPath` names another page, `/`
+##   is not served from `index.html` (see the redirect below).
+## - the application's custom routes (`routes`, see `neel/routes`): the
+##   first whose pattern and method match runs its handler on the worker,
+##   with the request's window as the current window (`routeWindowId`); a
+##   path that only matches for other methods is 405 with their `Allow`.
+## - anything left that is not `GET` / `HEAD`: 405.
 ## - `/` in serve mode, when `startPath` names another page: a 302 to it.
-## - everything else: the web directory through `neel/assets`.
+## - everything else: 404.
 ##
 ## Tests replace the browser launch and the exit-time profile sweep, and
 ## observe the server's ping interval, through `neel/testhooks`, which is
@@ -58,7 +72,7 @@ when (NimMajor, NimMinor, NimPatch) < (2, 2, 12):
 
 import std/[json, options, strutils, sysrand, uri, macros, os]
 import neel/[http, server, pool, protocol, expose, jsproxy, frontend, browser,
-             window, assets, testhooks, signals]
+             window, assets, testhooks, signals, routes]
 from neel/websocket import DefaultMaxMessageSize
 
 # --- re-exports ------------------------------------------------------------------
@@ -83,10 +97,18 @@ export Browser, NeelBrowserError, WindowSize, WindowPosition
 export CloseDisplaced
 export NeelTimeoutError, NeelDisconnectedError, NeelRemoteError
 export DefaultWorkers, DefaultQueueCapacity, DefaultMaxMessageSize
+# Custom routes: what a handler receives, returns, and is registered with.
+export HttpRequest, HttpResponse, HttpHeader, HttpMethod, HttpVersion,
+       initResponse, addHeader, setHeader, getHeader, hasHeader
+export Route, RouteHandler, route, routes.get, post, put, patch, routes.delete,
+       param, queryParam, htmlResponse, textResponse, jsonResponse,
+       redirectResponse
 
 const
-  NeelVersion* = "2.1.0"
+  NeelVersion* = "2.2.0"
     ## Library version string, kept in sync with `neel.nimble`.
+  DefaultMaxBodySize* = MaxRequestBody
+    ## Default `maxBodySize`: the largest HTTP request body, in bytes (1 MiB).
   TokenBytes = 16
     ## Random bytes in the launch token (rendered as 32 lowercase hex chars,
     ## so the `/ws` query needs no percent-decoding).
@@ -113,6 +135,7 @@ type
     filter: RequestFilter
     serve: bool
     rootRedirect: string   # `Location` for `GET /`; "" serves `/` as usual
+    routes: seq[Route]     # custom routes, in registration order
 
 var app: AppState
   ## Module global behind `startApp`; see `AppState`.
@@ -153,6 +176,25 @@ proc checkServeParams(serve: bool; port: int; allowedOrigins: seq[string]) =
       "(port = 0 picks a random one, which a tunnel or proxy cannot reach)")
   if not serve and allowedOrigins.len > 0:
     raise newException(ValueError, "neel: allowedOrigins requires serve = true")
+
+proc checkPages(assets: AssetSource; routes: seq[Route]): AssetSource =
+  ## What the app will serve, checked before anything is bound, and the
+  ## asset source to serve it from. The route list must be usable
+  ## (`checkRoutes`, with Neel's own paths reserved). A disk-mode web
+  ## directory must exist, with one exception: the default one (`optional`,
+  ## the caller named none) may be missing when the app has routes, and the
+  ## app then runs without a web directory. An app without a web directory
+  ## needs at least one route.
+  checkRoutes(routes, [WsPath, NeelJsPath, NoBrowserPath])
+  result = assets
+  if result.mode == amDisk and not dirExists(result.root):
+    if result.optional and routes.len > 0:
+      result = noAssets()
+    else:
+      raise newException(OSError, "neel: web directory not found: " & result.root)
+  if result.mode == amNone and routes.len == 0:
+    raise newException(ValueError, "neel: no web directory and no routes, " &
+      "so the app has nothing to serve")
 
 proc rootRedirectFor(startPath: string): string =
   ## Where serve mode sends `GET /`: `startPath` with a leading `/`, or `""`
@@ -262,6 +304,26 @@ proc handleWs(a: ptr AppState; conn: ConnId; req: HttpRequest): RequestAction =
       return upgrade()
   respond(initResponse(403, "403 Forbidden", "text/plain"))
 
+proc refererWindowId(req: HttpRequest): int =
+  ## The `window=` query of the page URL in `Referer`, or `NoWindow` when
+  ## there is no `Referer`, it does not parse, or it carries no valid id.
+  let referer = req.getHeader("Referer")
+  if referer.len > 0:
+    try:
+      result = windowIdIn(parseUri(referer).query)
+    except UriParseError:
+      discard
+
+proc openWindowFor(named: int): int =
+  ## The window a request belongs to, given the one it names: `named` when
+  ## that window is open; the single open window when it names none
+  ## (`NoWindow`) and exactly one is open; otherwise `NoWindow`. A request
+  ## that names a window which is *not* open never gets the fallback.
+  if named != NoWindow:
+    return if window(named).isSome: named else: NoWindow
+  let open = windows()
+  if open.len == 1: open[0].id else: NoWindow
+
 proc neelJsWindowId(req: HttpRequest): tuple[id, named: int] =
   ## The window `/neel.js` is being loaded for. `named` is the `window=`
   ## query of the page URL in `Referer` (`NoWindow` when there is no
@@ -273,19 +335,68 @@ proc neelJsWindowId(req: HttpRequest): tuple[id, named: int] =
   ## default-browser tab being refreshed), and handing it the shim of a
   ## window that is still open would let it bind as that window and displace
   ## the real page (see `docs/GUIDE.md` "Multiple windows").
-  let referer = req.getHeader("Referer")
-  if referer.len > 0:
-    try:
-      result.named = windowIdIn(parseUri(referer).query)
-    except UriParseError:
-      discard
-  if result.named != NoWindow:
-    if window(result.named).isSome:
-      result.id = result.named
-    return
-  let open = windows()
-  if open.len == 1:
-    result.id = open[0].id
+  result.named = refererWindowId(req)
+  result.id = openWindowFor(result.named)
+
+proc routeWindowId(req: HttpRequest): int =
+  ## The current window of a custom route's handler: the window the request
+  ## names (the `window=` of its own URL, as on the page load of a window
+  ## Neel opened; otherwise of the page URL in `Referer`, as on a `fetch`
+  ## or a form submission from such a page) when it is open, or the single
+  ## open window when the request names none (always the case in serve
+  ## mode, also for a webhook). `NoWindow` when it names a window that is
+  ## not open, or names none while several are open.
+  var named = windowIdIn(req.query)
+  if named == NoWindow:
+    named = refererWindowId(req)
+  openWindowFor(named)
+
+proc serveNeelJs(a: ptr AppState; req: HttpRequest): HttpResponse =
+  ## `/neel.js` for the window `neelJsWindowId` finds, or a 404 saying why
+  ## there is none.
+  let (id, named) = neelJsWindowId(req)
+  if id == NoWindow:
+    let reason =
+      if named != NoWindow:
+        "neel.js: window " & $named & " is not open; this page belongs " &
+        "to a window Neel has closed"
+      else:
+        "neel.js: cannot tell which window this page belongs to; open the " &
+        "page through Neel (its URL carries ?window=<id>)"
+    return initResponse(404, reason, "text/plain")
+  result = okResponse(renderNeelJs(a.token, id, a.exposed, a.serve),
+                      "application/javascript")
+  result.addHeader("Cache-Control", "no-store")
+
+proc serveNoBrowser(a: ptr AppState): HttpResponse =
+  ## `/neel/no-browser`: the error page in local mode, 404 in serve mode.
+  if a.serve:
+    return notFound()
+  result = okResponse(noBrowserPage(a.search, a.fallback), "text/html; charset=utf-8")
+  result.addHeader("Cache-Control", "no-store")
+
+proc runRoute(a: ptr AppState; m: RouteMatch; req: HttpRequest): HttpResponse =
+  ## Runs the handler of the matched custom route with the captured
+  ## parameters, under the request's window (`routeWindowId`). A
+  ## `CatchableError` it raises, or a result that cannot go on the wire
+  ## (`finishRouteResponse`), becomes a bare 500; debug builds say why on
+  ## stderr.
+  const failed = "500 Internal Server Error"
+  let what = "neel: route " & req.rawMethod & " " & req.path
+  # A plain proc pointer (`nimcall`): copying it shares nothing.
+  let handle = handler(a.routes[m.index])
+  var r = req
+  r.params = m.params
+  try:
+    withCurrentWindow(routeWindowId(req)):
+      result = handle(r)
+  except CatchableError as e:
+    debugLog(what & " raised " & $e.name & ": " & e.msg)
+    return initResponse(500, failed, "text/plain")
+  let problem = finishRouteResponse(result)
+  if problem.len > 0:
+    debugLog(what & " returned a response that cannot be sent: " & problem)
+    return initResponse(500, failed, "text/plain")
 
 proc handleRequest(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
   ## The route table (see the module header), behind `requestRefusal`.
@@ -295,36 +406,36 @@ proc handleRequest(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
     return respond(initResponse(403, refusal, "text/plain"))
   if req.path == WsPath:
     return handleWs(a, conn, req)
-  if req.httpMethod notin {hmGet, hmHead}:
+  let readOnly = req.httpMethod in {hmGet, hmHead}
+  if req.path == NeelJsPath or req.path == NoBrowserPath:
+    if not readOnly:
+      return respond(methodNotAllowed())
+    if req.path == NeelJsPath:
+      return respond(serveNeelJs(a, req))
+    return respond(serveNoBrowser(a))
+  # In serve mode with a `startPath` elsewhere, `/` is never `index.html`.
+  let redirectRoot = req.path == "/" and a.rootRedirect.len > 0
+  if readOnly and not redirectRoot and a.assets.mode != amNone:
+    # A file of the web directory comes before any route. Anything but a
+    # 404 (200, or 206 / 416 for a `Range`) means the file exists.
+    let asset = serveAsset(a.assets, req)
+    if asset.status != 404:
+      return respond(asset)
+  let m = findRoute(a.routes, req.httpMethod, req.path)
+  case m.kind
+  of rmFound:
+    return respond(runRoute(a, m, req))
+  of rmMethodNotAllowed:
+    return respond(methodNotAllowed(m.allow))
+  of rmNone:
+    discard
+  if not readOnly:
     return respond(methodNotAllowed())
-  if req.path == "/" and a.rootRedirect.len > 0:
+  if redirectRoot:
     var r = initResponse(302)
     r.addHeader("Location", a.rootRedirect)
     return respond(r)
-  case req.path
-  of NeelJsPath:
-    let (id, named) = neelJsWindowId(req)
-    if id == NoWindow:
-      let reason =
-        if named != NoWindow:
-          "neel.js: window " & $named & " is not open; this page belongs " &
-          "to a window Neel has closed"
-        else:
-          "neel.js: cannot tell which window this page belongs to; open the " &
-          "page through Neel (its URL carries ?window=<id>)"
-      return respond(initResponse(404, reason, "text/plain"))
-    var r = okResponse(renderNeelJs(a.token, id, a.exposed, a.serve),
-                       "application/javascript")
-    r.addHeader("Cache-Control", "no-store")
-    respond(r)
-  of NoBrowserPath:
-    if a.serve:
-      return respond(notFound())
-    var r = okResponse(noBrowserPage(a.search, a.fallback), "text/html; charset=utf-8")
-    r.addHeader("Cache-Control", "no-store")
-    respond(r)
-  else:
-    respond(serveAsset(a.assets, req))
+  respond(notFound())
 
 proc handleMessage(conn: ConnId; text: string) {.gcsafe.} =
   ## `call` -> dispatch under the connection's window and reply; `ret` /
@@ -383,7 +494,9 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
              size = none(WindowSize); position = none(WindowPosition);
              extraFlags: seq[string] = @[];
              onWindowOpen: WindowHook = nil;
-             onWindowClose: WindowHook = nil): ExitReason {.discardable.} =
+             onWindowClose: WindowHook = nil;
+             routes: seq[Route] = @[];
+             maxBodySize = DefaultMaxBodySize): ExitReason {.discardable.} =
   ## The proc behind `startApp`, which reaches it through `bindSym`. Blocks
   ## the calling thread and returns why the app ended. Sequence:
   ## `findBrowser` (fails fast on a bad `browserPath`), token,
@@ -399,7 +512,12 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   ## been opened in the default browser: it is served for `gracePeriodMs`,
   ## then the `NeelBrowserError` propagates after teardown. A disk-mode web
   ## directory that does not exist raises `OSError` before anything starts
-  ## (embedding already fails at compile time).
+  ## (embedding already fails at compile time), unless it is the default
+  ## one and the app has routes, which then runs without a web directory;
+  ## a route list that cannot work raises `ValueError` at the same point
+  ## (`checkPages`). `routes`
+  ## is stored for `handleRequest`; `maxBodySize` is the server's limit on
+  ## a request body.
   ##
   ## Serve mode (`serve = true`) first rejects `port = 0` and a malformed
   ## `allowedOrigins` entry (`ValueError`; `allowedOrigins` without `serve`
@@ -417,8 +535,7 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   doAssert not app.running, "startApp is already running in this process"
   checkServeParams(serve, port, allowedOrigins)
   let filter = initRequestFilter(serve, allowedOrigins)
-  if assets.mode == amDisk and not dirExists(assets.root):
-    raise newException(OSError, "neel: web directory not found: " & assets.root)
+  let assets = checkPages(assets, routes)
   let launcher = if serve: Launcher(noLaunch) else: testLauncher()
   let profileSweep = testProfileSweep()
   let pingObserver = testPingObserver()
@@ -426,13 +543,15 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   app = AppState(running: true, token: newToken(), search: search,
                  fallback: fallback, assets: assets, dispatch: dispatch,
                  exposed: exposed, filter: filter, serve: serve,
-                 rootRedirect: if serve: rootRedirectFor(startPath) else: "")
+                 rootRedirect: if serve: rootRedirectFor(startPath) else: "",
+                 routes: routes)
   app.tbl = newPendingTable()
   app.srv = newServer(onRequest = handleRequest, onMessage = handleMessage,
                       onOpen = connectionOpened, onClose = connectionClosed,
                       workers = workers, queueCapacity = queueCapacity,
                       maxMessageSize = maxMessageSize,
-                      pingIntervalMs = if serve: PingIntervalMs else: 0)
+                      pingIntervalMs = if serve: PingIntervalMs else: 0,
+                      maxBodySize = maxBodySize)
   try:
     if not pingObserver.isNil:
       pingObserver(app.srv.pingIntervalMs)
@@ -490,7 +609,10 @@ macro startApp*(args: varargs[untyped]): untyped =
   ## - `webDir = "web"`: the web directory, resolved against the directory
   ##   of the source file that calls `startApp` unless absolute (may also be
   ##   given as the single positional argument). Must be a constant when
-  ##   `embedAssets` is true.
+  ##   `embedAssets` is true. `""` means no web directory: every page comes
+  ##   from `routes`. When `webDir` is not given at all and the default
+  ##   `web` directory does not exist, an app that passes `routes` runs
+  ##   without one too; a directory you name must exist.
   ## - `embedAssets = defined(release)`: compile-time switch. `true` walks
   ##   `webDir` at compile time and embeds every file; `false` reads files
   ##   from disk on every request.
@@ -515,13 +637,24 @@ macro startApp*(args: varargs[untyped]): untyped =
   ##   `size = none(WindowSize)`, `position = none(WindowPosition)`,
   ##   `extraFlags: seq[string] = @[]`.
   ## - `onWindowOpen`, `onWindowClose: WindowHook = nil`.
+  ## - `routes: seq[Route] = @[]`: custom routes, built with `get`, `post`,
+  ##   `put`, `patch`, `delete`, or `route`. They answer the requests that
+  ##   no file of the web directory answers, by list order, on a worker
+  ##   thread. Raises `ValueError`
+  ##   for a route on a reserved path (`/ws`, `/neel.js`,
+  ##   `/neel/no-browser`) or one that an earlier route shadows.
+  ## - `maxBodySize = DefaultMaxBodySize` (1 MiB): the largest request body
+  ##   the server accepts; a larger one is answered 400.
   ##
   ## Everything except `webDir` and `embedAssets` is forwarded verbatim to
   ## the private `runApp`. Must come after every `{.expose.}` proc and after
   ## the imports of modules that contain them (a proc exposed later is not
   ## dispatched).
+  const DefaultWebDir = "web"
   let callerDir = parentDir(args.lineInfoObj.filename)
-  var webDir = newLit("web")
+  var webDir = newLit(DefaultWebDir)
+  var webDirGiven = false  # by keyword or position; else the default applies
+  var routesGiven = false
   var embed = newCall(ident"defined", ident"release")
   var forwarded: seq[NimNode]
   var positional = 0
@@ -530,8 +663,11 @@ macro startApp*(args: varargs[untyped]): untyped =
       let name = a[0]
       if name.kind != nnkIdent:
         error("startApp: expected `name = value`", a)
+      if name.eqIdent("routes"):
+        routesGiven = true
       if name.eqIdent("webDir"):
         webDir = a[1]
+        webDirGiven = true
       elif name.eqIdent("embedAssets"):
         embed = a[1]
       elif name.eqIdent("assets") or name.eqIdent("dispatch") or
@@ -545,6 +681,7 @@ macro startApp*(args: varargs[untyped]): untyped =
               "keyword arguments for everything else, e.g. " &
               "startApp(\"web\", port = 8000)", a)
       webDir = a
+      webDirGiven = true
       inc positional
   let dispatchName = ident"neelDispatch"
   dispatchName.copyLineInfo(args)
@@ -554,10 +691,21 @@ macro startApp*(args: varargs[untyped]): untyped =
                      newCall(bindSym"exposedNames"))
   for f in forwarded:
     call.add f
-  let embedded = newCall(bindSym"embeddedAssets",
-                         newCall(bindSym"embedWebDir", webDir, newLit(callerDir)))
-  let disk = newCall(bindSym"diskAssets",
-                     newCall(bindSym"resolveWebDir", newLit(callerDir), webDir))
+  # The default web directory is optional for an app with routes: when the
+  # caller named none and it does not exist, the app runs without one. Disk
+  # mode decides at run time (`checkPages`), where the route list is known.
+  # Embedding decides here: with a `routes` argument a missing default
+  # directory embeds nothing; without one it stays the compile error that
+  # `embedWebDir` raises. A directory the caller named must always exist.
+  let embedded =
+    if not webDirGiven and routesGiven and
+        not dirExists(resolveWebDir(callerDir, DefaultWebDir)):
+      newCall(bindSym"noAssets")
+    else:
+      newCall(bindSym"embeddedWebDirAssets", webDir,
+              newCall(bindSym"embedWebDir", webDir, newLit(callerDir)))
+  let disk = newCall(bindSym"webDirAssets", newLit(callerDir), webDir,
+                     newLit(not webDirGiven))
   result = quote do:
     block:
       `generate`

@@ -13,7 +13,14 @@
 ##   to an absolute, normalized root and reads files per request;
 ##   `embeddedAssets(files)` holds a table built at compile time by
 ##   `embedWebDir(dir, callerDir)`, keyed by the root-relative path with `/`
-##   separators (`"index.html"`, `"css/app.css"`).
+##   separators (`"index.html"`, `"css/app.css"`). `noAssets()` is the
+##   source of an app without a web directory (`webDir = ""`, every page
+##   comes from a custom route): every lookup is a 404. `startApp` builds
+##   its source through `webDirAssets` / `embeddedWebDirAssets`, which map
+##   an empty `webDir` to `noAssets()`. A disk source built for the default
+##   directory (the caller named none) is marked `optional`: `startApp`
+##   replaces it with `noAssets()` when the directory is missing and the
+##   app has routes.
 ## - `resolveAssetPath(rawPath)`: the pure request-path -> key step shared by
 ##   both modes. Percent-decodes (`std/uri.decodeUrl`), rejects anything
 ##   with a NUL byte, a backslash, or a `..` segment, drops `.` and empty
@@ -44,6 +51,7 @@ type
     ## Where `AssetSource` reads from.
     amDisk      ## Read the file under `root` on every request.
     amEmbedded  ## Serve from `files`, filled at compile time.
+    amNone      ## No web directory (`webDir = ""`): nothing is ever found.
 
   AssetSource* = object
     ## The application's web directory, either on disk or embedded. Built
@@ -55,6 +63,10 @@ type
       ## Absolute, normalized web root (`amDisk`); `""` when embedded.
     files*: Table[string, string]
       ## Root-relative key (`/` separators) -> file bytes (`amEmbedded`).
+    optional*: bool
+      ## `amDisk` only: this is the default web directory, which the caller
+      ## did not name. `startApp` lets an app with routes run without it
+      ## when it does not exist; a named directory must exist.
 
 const
   IndexFile* = "index.html"
@@ -89,7 +101,11 @@ macro embedWebDir*(dir, callerDir: static string): untyped =
   ## the binary), keyed by the path relative to `dir` with `/` separators. A
   ## relative `dir` is resolved against `callerDir` (the directory of the
   ## source file calling `startApp`). A missing directory is a compile
-  ## error. Pass the result to `embeddedAssets`.
+  ## error. Pass the result to `embeddedAssets`. An empty `dir` (no web
+  ## directory) expands to an empty `seq` without touching the disk.
+  if dir.len == 0:
+    return newCall(nnkBracketExpr.newTree(ident"newSeq",
+      nnkTupleConstr.newTree(bindSym"string", bindSym"string")))
   let root = normalizedPath(resolveWebDir(callerDir, dir))
   if not dirExists(root):
     error("neel: web directory not found for embedding: " & root &
@@ -106,6 +122,26 @@ macro embedWebDir*(dir, callerDir: static string): untyped =
       nnkTupleConstr.newTree(bindSym"string", bindSym"string")))
   else:
     result = prefix(items, "@")
+
+proc noAssets*(): AssetSource =
+  ## The source of an app without a web directory: every lookup is `none`,
+  ## so `serveAsset` answers 404 (405 for anything but `GET` / `HEAD`).
+  AssetSource(mode: amNone)
+
+proc webDirAssets*(callerDir, dir: string; optional = false): AssetSource =
+  ## What `startApp` serves in disk mode: `noAssets()` for an empty `dir`
+  ## (resolving `""` would otherwise serve the caller's source directory),
+  ## else `diskAssets(resolveWebDir(callerDir, dir))` marked `optional` as
+  ## given (`true` when `dir` is the default the caller did not name).
+  if dir.len == 0:
+    return noAssets()
+  result = diskAssets(resolveWebDir(callerDir, dir))
+  result.optional = optional
+
+proc embeddedWebDirAssets*(dir: string; files: openArray[(string, string)]): AssetSource =
+  ## What `startApp` serves in embedded mode: `noAssets()` for an empty
+  ## `dir`, else `embeddedAssets(files)` (`files` from `embedWebDir(dir, ...)`).
+  if dir.len == 0: noAssets() else: embeddedAssets(files)
 
 # --- path resolution -------------------------------------------------------------
 
@@ -144,6 +180,8 @@ proc lookupAsset*(src: AssetSource; key: string): Option[string] =
   ## when it does not exist, is a directory, or (disk mode) resolves outside
   ## the web root. Disk mode reads the file on every call.
   case src.mode
+  of amNone:
+    none(string)
   of amEmbedded:
     if src.files.hasKey(key):
       return some(src.files[key])

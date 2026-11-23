@@ -137,6 +137,12 @@ loads. Until the app is up, the tunnel answers 502.
   refused (see [Security in serve mode](GUIDE.md#security-in-serve-mode)).
 - **Idle connections.** Cloudflare closes a WebSocket after about 100
   seconds of silence; serve mode's pings every 30 seconds keep it open.
+- **Webhooks.** A webhook sender (Slack, GitHub) cannot log in, so Access
+  blocks it from your [custom routes](GUIDE.md#custom-routes). To our
+  knowledge the fix is a second Access application for the webhook's path
+  with a **Bypass** policy; unlike the rest of this document, this was not
+  tested. The handler must then
+  [verify the sender itself](GUIDE.md#requests-from-other-sites-and-webhooks).
 - **Restarts.** The hostname is fixed, so the app restarts with the same
   origin. A page that uses the
   [reload recipe](GUIDE.md#reloading-after-a-server-restart) reloads once

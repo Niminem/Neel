@@ -387,10 +387,10 @@ proc wait*(t: PendingTable; conn: ConnId; id: int; timeoutMs: int): JsonNode
     doAssert false, "wait for id " & $id & " on connection " & $conn &
                     " without a matching register"
   while e.state == psWaiting:
-    let remaining = (deadline - getMonoTime()).inMilliseconds
+    let remaining = remainingMs(deadline)
     if remaining <= 0:
       break
-    discard waitTimeout(e.cond, impl.lock, int(remaining))
+    discard waitTimeout(e.cond, impl.lock, remaining)
   remove(impl, conn, id)
   let state = e.state
   var value: JsonNode

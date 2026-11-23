@@ -215,7 +215,8 @@ proc routeFor(b: ptr JsBridge; windowId: int): WindowRoute =
     if target == NoWindow:
       raise newException(NeelNoWindowError,
         "no current window on this thread: `js.<fn>` works inside an " &
-        "exposed proc; use `win.js.<fn>` elsewhere")
+        "exposed proc, and inside a route handler whose request belongs to " &
+        "an open window; use `win.js.<fn>` elsewhere")
   result = b.resolveWindow(target)
   if result.ids.isNil:
     raise newException(NeelNoWindowError,

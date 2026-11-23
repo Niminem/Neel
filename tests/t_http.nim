@@ -93,7 +93,7 @@ suite "http parser":
     check buf.len == 0
     check p.parseRequest(buf).status == psIncomplete
 
-  test "body is skipped via Content-Length and pipelining continues":
+  test "the body is framed by Content-Length and pipelining continues":
     let first = "POST /a HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"
     let second = "GET /b HTTP/1.1\r\n\r\n"
     var buf = first & second
@@ -101,12 +101,14 @@ suite "http parser":
     let r1 = p.parseRequest(buf)
     check r1.status == psComplete
     check r1.consumed == first.len
-    check r1.request.httpMethod == hmOther
+    check r1.request.httpMethod == hmPost
     check r1.request.contentLength == 5
+    check r1.request.body == "hello"
     buf.delete(0 ..< r1.consumed)
     let r2 = p.parseRequest(buf)
     check r2.status == psComplete
     check r2.request.path == "/b"
+    check r2.request.body == ""
 
   test "incomplete body waits without re-parsing headers":
     var p: HttpParser
@@ -116,23 +118,67 @@ suite "http parser":
     let r = p.parseRequest(buf)
     check r.status == psComplete
     check r.consumed == buf.len
+    check r.request.body == "hello"
+
+  test "a body delivered one byte at a time arrives whole, binary bytes included":
+    let body = "\x00\x01\r\n\r\n\xFFGET / HTTP/1.1\r\n\r\n"
+    let text = "PUT /blob HTTP/1.1\r\nContent-Length: " & $body.len & "\r\n\r\n" & body
+    var p: HttpParser
+    var buf = ""
+    for i in 0 ..< text.len - 1:
+      buf.add text[i]
+      check p.parseRequest(buf).status == psIncomplete
+    buf.add text[^1]
+    let r = p.parseRequest(buf)
+    check r.status == psComplete
+    check r.consumed == text.len
+    check r.request.httpMethod == hmPut
+    check r.request.body == body
 
   test "Content-Length: 0 is accepted":
     let r = parseAll("GET / HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
     check r.status == psComplete
     check r.request.contentLength == 0
+    check r.request.body == ""
 
   test "HEAD":
     let req = parseAll("HEAD /x HTTP/1.1\r\n\r\n").request
     check req.httpMethod == hmHead
     check req.rawMethod == "HEAD"
 
-  test "POST parses as hmOther so the server can answer 405":
-    let r = parseAll("POST /x HTTP/1.1\r\n\r\n")
+  test "every routable method has its own value; anything else is hmOther":
+    for (token, want) in [("GET", hmGet), ("HEAD", hmHead), ("POST", hmPost),
+                          ("PUT", hmPut), ("PATCH", hmPatch),
+                          ("DELETE", hmDelete), ("OPTIONS", hmOptions),
+                          ("PROPFIND", hmOther), ("TRACE", hmOther),
+                          ("CONNECT", hmOther), ("post", hmOther),
+                          ("Get", hmOther), ("OTHER", hmOther)]:
+      let r = parseAll(token & " /x HTTP/1.1\r\n\r\n")
+      check r.status == psComplete
+      check r.request.httpMethod == want
+      check r.request.rawMethod == token
+    check $hmPost == "POST"
+    check $hmDelete == "DELETE"
+
+  test "maxBody bounds the body per call; the default is MaxRequestBody":
+    proc reason(length, maxBody: int): string =
+      var p: HttpParser
+      let r = p.parseRequest("POST / HTTP/1.1\r\nContent-Length: " & $length &
+                             "\r\n\r\n", maxBody)
+      if r.status == psMalformed: r.error else: $r.status
+    check reason(10, 10) == "psIncomplete"   # allowed, waiting for the body
+    check reason(11, 10) == "request body too large"
+    check reason(0, 0) == "psComplete"
+    check reason(1, 0) == "request body too large"
+    check reason(1, -5) == "request body too large"  # negative: no bodies
+    check reason(MaxRequestBody + 1, MaxRequestBody * 2) == "psIncomplete"
+    var p: HttpParser
+    let r = p.parseRequest("POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\nabc", 3)
     check r.status == psComplete
-    check r.request.httpMethod == hmOther
-    check r.request.rawMethod == "POST"
-    check encodeResponse(methodNotAllowed(), true).contains("Allow: GET, HEAD\r\n")
+    check r.request.body == "abc"
+
+  test "params is empty after parsing":
+    check parseAll("GET /a/b HTTP/1.1\r\n\r\n").request.params.len == 0
 
   test "empty lines before the request line are ignored":
     let data = "\r\n\r\nGET / HTTP/1.1\r\n\r\n"
@@ -271,6 +317,12 @@ suite "http response":
     check s.contains("Content-Length: 22\r\n")
     check s.endsWith("\r\n\r\n405 Method Not Allowed")
 
+  test "405 for a custom route carries that route's Allow":
+    let r = methodNotAllowed("POST, DELETE")
+    check r.status == 405
+    check r.getHeader("Allow") == "POST, DELETE"
+    check encodeResponse(r, true).count("Allow:") == 1
+
   test "400":
     let s = encodeResponse(badRequest(), false)
     check s.startsWith("HTTP/1.1 400 Bad Request\r\n")
@@ -328,6 +380,16 @@ suite "http response":
     check reasonPhrase(405) == "Method Not Allowed"
     check reasonPhrase(416) == "Range Not Satisfiable"
     check reasonPhrase(499) == "Client Error"
+    # What route handlers commonly answer with.
+    check reasonPhrase(201) == "Created"
+    check reasonPhrase(302) == "Found"
+    check reasonPhrase(303) == "See Other"
+    check reasonPhrase(401) == "Unauthorized"
+    check reasonPhrase(422) == "Unprocessable Content"
+    check reasonPhrase(503) == "Service Unavailable"
+    check reasonPhrase(299) == "Success"
+    check reasonPhrase(399) == "Redirection"
+    check reasonPhrase(599) == "Server Error"
 
 suite "http range":
   test "a-b":
