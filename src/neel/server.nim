@@ -9,13 +9,14 @@
 ##
 ## Surface:
 ## - `newServer(hooks..., workers, queueCapacity, maxMessageSize,
-##   closeTimeoutMs, pingIntervalMs)`, `listen(server, port = 0)` (binds
+##   closeTimeoutMs, pingIntervalMs, maxBodySize)`, `listen(server, port = 0)` (binds
 ##   `127.0.0.1` only, exclusively on Windows; `port` is readable
 ##   afterwards), `shutdown(server)` (idempotent, joins every thread);
 ##   `shutdown(server, beforeJoin)` also runs a cleanup hook after all work
 ##   is done but before any Neel thread exits.
 ## - Hooks, all run on pool workers and all `{.gcsafe.}`:
-##   `RequestHandler = proc(conn, req): RequestAction` answers a request with
+##   `RequestHandler = proc(conn, req): RequestAction` answers a request
+##   (any method; its body, at most `maxBodySize` bytes, is in `req.body`) with
 ##   `respond(response)` or asks for a WebSocket upgrade with `upgrade()`;
 ##   `MessageHandler = proc(conn, message)` receives complete text messages;
 ##   `ConnectionHandler = proc(conn)` for `onOpen` (after a successful
@@ -172,6 +173,7 @@ type
     onClose: ConnectionHandler
     workers, queueCapacity, maxMessageSize, closeTimeoutMs: int
     pingIntervalMs: int       # 0: no pings
+    maxBodySize: int          # largest request body, in bytes
     pool: Pool
     listenFd: SocketHandle
     port: int
@@ -497,7 +499,7 @@ proc processBuffer(s: ptr ServerImpl; c: Conn): bool {.gcsafe.} =
 
 proc processHttp(s: ptr ServerImpl; c: Conn): bool {.gcsafe.} =
   while c.state == csHttp and not c.paused:
-    let r = c.parser.parseRequest(c.recvBuf)
+    let r = c.parser.parseRequest(c.recvBuf, s.maxBodySize)
     case r.status
     of psIncomplete:
       break
@@ -850,12 +852,15 @@ proc newServer*(onRequest: RequestHandler = nil;
                 queueCapacity = DefaultQueueCapacity;
                 maxMessageSize = DefaultMaxMessageSize;
                 closeTimeoutMs = DefaultCloseTimeoutMs;
-                pingIntervalMs = 0): Server =
+                pingIntervalMs = 0;
+                maxBodySize = MaxRequestBody): Server =
   ## A server with the given hooks and limits. Nothing is bound or started
   ## until `listen`. A `nil` `onRequest` answers every request with 404; a
   ## `nil` `onMessage` ignores messages. `pingIntervalMs > 0` pings every
   ## upgraded connection that has read and written nothing for that long;
-  ## `0` sends no pings.
+  ## `0` sends no pings. A request whose `Content-Length` exceeds
+  ## `maxBodySize` is answered 400 and its connection closed, before any
+  ## of the body is buffered (a negative value is stored as `0`: no bodies).
   let impl = cast[ptr ServerImpl](allocShared0(sizeof(ServerImpl)))
   initLock impl.lock
   initCond impl.ioCond
@@ -868,6 +873,7 @@ proc newServer*(onRequest: RequestHandler = nil;
   impl.maxMessageSize = maxMessageSize
   impl.closeTimeoutMs = closeTimeoutMs
   impl.pingIntervalMs = max(pingIntervalMs, 0)
+  impl.maxBodySize = max(maxBodySize, 0)
   impl.listenFd = osInvalidSocket
   result = Server(impl: impl)
 
@@ -900,6 +906,11 @@ proc pingIntervalMs*(s: Server): int =
   ## The keep-alive ping interval given to `newServer` (`0`: no pings; a
   ## negative value is stored as `0`).
   s.impl.pingIntervalMs
+
+proc maxBodySize*(s: Server): int =
+  ## The largest request body accepted, as given to `newServer` (a negative
+  ## value is stored as `0`).
+  s.impl.maxBodySize
 
 proc running*(s: Server): bool =
   ## `true` between `listen` and `shutdown`.

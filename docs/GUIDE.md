@@ -32,12 +32,14 @@ Contents
 - [Browsers and fallback](#browsers-and-fallback)
 - [Lifecycle](#lifecycle)
 - [Assets and build modes](#assets-and-build-modes)
+- [Custom routes](#custom-routes)
 - [Threading model](#threading-model)
 - [`startApp` parameters](#startapp-parameters)
 - [Security](#security)
 - [Serve mode](#serve-mode)
 - [Caveats](#caveats)
 - [The examples](#the-examples)
+- [What's new since 2.1](#whats-new-since-21)
 - [What's new in 2.1](#whats-new-in-21)
 - [Migrating from Neel 1.x](#migrating-from-neel-1x)
 - [License](#license)
@@ -76,13 +78,16 @@ nim c -r examples/filepicker/filepicker.nim
 nim c -r examples/roundtrip/roundtrip.nim
 nim c -r examples/stresstest/stresstest.nim
 nim c -r examples/serve/serve.nim
+nim c -r examples/routes/routes.nim
 ```
 
 `serve` is a [serve-mode](#serve-mode) app: it opens no browser, prints
 `neel: serving http://127.0.0.1:5359 (allowed origins: none)`, and runs
 until you stop it (its page has a "Stop server" button, or press Ctrl-C);
 open that URL yourself. Its header comment shows how to reach it from
-another device. The rest of this section is about the other three.
+another device. `routes` has no `web/` directory: its pages come from
+[custom routes](#custom-routes). The rest of this section is about the
+other three.
 
 These are debug builds: the example's `web/` directory is served from disk,
 so edits to the page show up on refresh, and the app exits 3 s after its last
@@ -337,7 +342,9 @@ proc reenter(): int {.expose.} =
 `js.wait.foo(...).to(MyObject)` converts into a typed value.
 
 Which window: inside an exposed proc `js` targets the window whose page made
-the call (a thread-local that the dispatcher sets around every call). Anywhere
+the call (a thread-local that the dispatcher sets around every call). Inside
+a [route handler](#threads-and-the-current-window) it targets the window the
+request belongs to, when it belongs to one. Anywhere
 else (the main thread, a thread you started, an `onWindowOpen` hook) there is
 no current window and `js.*` raises `NeelNoWindowError`; target a window
 explicitly through its `Window` handle instead:
@@ -487,7 +494,7 @@ Each browser window is a `Window` handle: a copyable object with an `id`
 | `windows(): seq[Window]` | every window not yet closed, in id order, including windows still loading and windows whose connection dropped less than a grace period ago |
 | `window(id): Option[Window]` | the open window with this id, or `none` |
 | `requireWindow(id): Window` | the same, but raises `NeelNoWindowError` (`window 7 is not open`) for an unknown or closed id; use this in exposed procs so a stale id answers the page with a structured error instead of the `UnpackDefect` of `window(id).get` |
-| `currentWindow(): Option[Window]` | the window whose exposed proc is running on this thread; `none` outside an exposed proc |
+| `currentWindow(): Option[Window]` | the window whose exposed proc is running on this thread, or the window a [route handler](#threads-and-the-current-window)'s request belongs to; `none` anywhere else |
 | `currentWindowId(): int` | its id, or `NoWindow` (0) |
 | `isOpen(w)`, `isConnected(w)` | not closed; bound to a live WebSocket |
 | `connectionCount(): int` | number of open WebSocket connections |
@@ -675,7 +682,9 @@ the next connection, and only `quitApp()` or a stop signal ends the app.
 The `webDir` argument (default `"web"`) is resolved against the directory of
 the source file that calls `startApp`, in both asset modes, so `nim c -r
 examples/x/x.nim` works from any working directory. An absolute `webDir` is
-used as is.
+used as is. `webDir = ""` means the app has no web directory and serves
+every page from [custom routes](#custom-routes); the rest of this section
+does not apply to it.
 
 `embedAssets` is a compile-time switch whose default is `defined(release)`:
 
@@ -697,12 +706,15 @@ decoded (`/data%20file.json`). Single-range `Range` requests are honoured with
 `<audio>` seek. The content type comes from `std/mimetypes` by extension, with
 `.js` / `.mjs` as `application/javascript`, `.map` as `application/json`, and
 unknown extensions as `application/octet-stream`; no `charset` is appended.
-The reserved routes are `/neel.js`, `/ws`, and `/neel/no-browser`.
+The reserved routes are `/neel.js`, `/ws`, and `/neel/no-browser`. A
+[custom route](#custom-routes) is answered before the web directory, for
+any method it lists; these rules cover the paths no route claims.
 
 In serve mode two routes differ. `GET` and `HEAD /` answer `302` with
 `Location: <startPath>` when the path part of `startPath` (before any `?`
 or `#`) is not `/`; a `startPath` such as `/?tab=2` is not redirected to
 (the browser would land on `/` again), so `/` serves `index.html` then.
+A custom route for `/` takes precedence over the redirect.
 `/neel/no-browser` is a 404.
 
 Add `--app:gui` to release builds to avoid a visible terminal window:
@@ -710,13 +722,258 @@ on Windows this suppresses the console window; on macOS it produces an
 `.app` bundle that launches without a Terminal session. On Linux most
 window managers already hide the terminal of a backgrounded process.
 
+## Custom routes
+
+A route answers an HTTP request with a Nim proc instead of a file: a page
+rendered by a template engine, a JSON endpoint for `fetch`, a form target, a
+file from outside the web directory, a webhook. Routes work the same way on
+every platform, in local mode and in [serve mode](#serve-mode), and in debug
+and release builds.
+
+```nim
+import neel
+
+proc home(req: HttpRequest): HttpResponse =
+  htmlResponse("<!doctype html><script src=\"/neel.js\"></script><h1>Hello</h1>")
+
+proc user(req: HttpRequest): HttpResponse =
+  textResponse("user " & req.param("id") & ", tab " & req.queryParam("tab"))
+
+proc save(req: HttpRequest): HttpResponse =
+  let data = parseJson(req.body)          # raises on bad JSON: a 500
+  jsonResponse(%*{"saved": data["name"]}, 201)
+
+startApp(routes = @[
+  get("/", home),
+  get("/users/@id", user),
+  post("/api/save", save)])
+```
+
+### Registering routes
+
+`routes` is a `seq[Route]` given to `startApp`. The list is fixed for the
+life of the app: it is checked before anything starts and never changes
+afterwards, so there is nothing to lock around it.
+
+| Proc | Route for |
+|---|---|
+| `get(pattern, handler)` | `GET`, and `HEAD` (the handler runs, the body is not sent) |
+| `post(pattern, handler)`, `put(...)`, `patch(...)`, `delete(...)` | that method |
+| `route(methods, pattern, handler)` | a set of methods, e.g. `route({hmGet, hmPost}, "/form", form)`; the values are `hmGet`, `hmHead`, `hmPost`, `hmPut`, `hmPatch`, `hmDelete`, `hmOptions` |
+
+A handler is a top-level `proc(req: HttpRequest): HttpResponse`. It cannot
+be a closure that captures variables (that does not compile); state it needs
+lives in module-level variables, as for exposed procs
+(see [Shared state](#shared-state)).
+
+`get`, `post`, ... raise `ValueError` at once for a malformed pattern.
+`startApp` raises `ValueError`, before anything is bound, for a route on a
+reserved path (`/ws`, `/neel.js`, `/neel/no-browser`) and for a route that
+could never run because an earlier one matches the same paths with the same
+methods (`get("/u/@id", a)` followed by `get("/u/@name", b)`).
+
+### Patterns
+
+A pattern starts with `/` and is compared with the request path segment by
+segment, after percent-decoding, case-sensitively:
+
+| Segment | Matches | Example |
+|---|---|---|
+| literal text | exactly that segment | `/about`, `/api/v1/items` |
+| `@name` | any one non-empty segment, captured as `name` | `/users/@id` matches `/users/42` |
+| `*name` (last segment only) | the rest of the path, zero or more segments, captured as `name` | `/files/*path` matches `/files/a/b.txt` (`a/b.txt`) and `/files` (`""`) |
+| `*` (last segment only) | the same, captured as `*` | `/*` matches everything |
+
+- `/a` and `/a/` are different paths; register both if both should work.
+- Routes are tried in the order of the list and the first match wins, so
+  put `/users/me` before `/users/@id` and a catch-all `/*` last.
+- Two routes may share a pattern when their methods differ
+  (`get("/items", list)`, `post("/items", create)`).
+- A request path that contains a `.` or `..` segment, a backslash, an
+  encoded slash (`%2F`), or a NUL matches no route at all. A captured value
+  is therefore always a clean relative path: joined to a directory it
+  cannot climb out of it. (It can still name any file inside that
+  directory, including through symbolic links.)
+
+### The request
+
+`HttpRequest` fields and helpers:
+
+| Member | Meaning |
+|---|---|
+| `req.httpMethod`, `req.rawMethod` | the method as an enum value (`hmPost`) and as sent (`"POST"`) |
+| `req.path`, `req.query` | the path and the query string as sent, not decoded |
+| `req.param("id")` | a value captured by the pattern, percent-decoded; `""` when the pattern has no such parameter |
+| `req.queryParam("tab")` | the first `tab=` of the query string, decoded (`+` is a space); `""` when absent |
+| `req.getHeader("Content-Type")`, `req.hasHeader(...)` | a header, by case-insensitive name; `""` when absent |
+| `req.headers` | every header as `(name, value)`, in the order sent |
+| `req.body` | the whole request body, as bytes in a `string` |
+
+A form posted as `application/x-www-form-urlencoded` is decoded with
+`std/uri`: `for (key, value) in decodeQuery(req.body)`. `multipart/form-data`
+(file inputs) is not parsed; upload a file from the page with
+`fetch(url, {method: "POST", body: file})` and read `req.body`.
+
+### The response
+
+| Proc | Response |
+|---|---|
+| `htmlResponse(body, status = 200)` | `text/html; charset=utf-8` |
+| `textResponse(body, status = 200)` | `text/plain; charset=utf-8` |
+| `jsonResponse(node, status = 200)` | a `JsonNode` as `application/json` |
+| `redirectResponse(location, status = 302)` | a redirect; use 303 after a form `POST` so the browser loads the target with `GET` |
+| `initResponse(status, body = "", contentType = "")` | anything else, e.g. `initResponse(200, bytes, "application/pdf")` |
+
+`HttpResponse` is a plain object (`status`, `headers`, `body`);
+`addHeader(r, name, value)` appends a header and `setHeader` replaces one
+(`var r = htmlResponse(page); r.setHeader("Cache-Control", "no-store")`).
+`Content-Length` and `Connection` are added for you. A handler's result is
+sent as is, with these exceptions, which are answered with a bare
+`500 Internal Server Error` (a debug build prints the reason to stderr):
+
+- the handler raised a `CatchableError` (as with exposed procs, a Defect
+  ends the app);
+- the status is outside 200..599 (a status left at `0` is sent as 200);
+- a header name is not a valid token, or a header value contains a line
+  break or NUL. This is what stops user input placed in a header, such as a
+  redirect target, from adding headers of its own.
+
+### What is answered first
+
+1. Neel's reserved paths: `/ws`, `/neel.js`, `/neel/no-browser`.
+2. Your routes. When a path matches a pattern but not with the request's
+   method, the answer is 405 with `Allow` listing the methods that would
+   match; the web directory is not consulted.
+3. Any other request that is not `GET` or `HEAD`: 405 with `Allow: GET, HEAD`.
+4. In serve mode, the redirect of `/` to `startPath` (a route for `/` wins
+   over it).
+5. The web directory.
+
+So a route can replace a file (`get("/index.html", ...)`), and a file is
+served whenever no route claims its path.
+
+### An app without a web directory
+
+Pass `webDir = ""` when every page comes from a route. Nothing is read from
+disk or embedded, every path without a route is a 404, and `startApp`
+raises `ValueError` if there are no routes either.
+
+```nim
+startApp(webDir = "", routes = @[get("/", home), get("/settings", settings)])
+```
+
+The first window opens `startPath` (default `/`), so there must be a route
+for it. A page rendered by a route is bound to its window exactly like a
+static one: by loading `<script src="/neel.js"></script>`. Every page of a
+local-mode app must load it, also pages that call no exposed proc: a window
+whose page has no connection looks closed to Neel, and the app exits after
+the grace period. Everything in [Multiple windows](#multiple-windows) about
+the `?window=<id>` query applies unchanged.
+
+### Threads and the current window
+
+Handlers run on the worker pool, like exposed procs, and under the same
+rules (see [Threading model](#threading-model)): several run at once, they
+may block, each one occupies a worker until it returns, and shared state
+needs a `Lock`. A connection's next request is read only after the current
+one is answered.
+
+Inside a handler `currentWindow()` and the global `js` refer to the window
+the request belongs to:
+
+- the window named by `?window=<id>` in the request's own URL (the page
+  load of a window Neel opened), or else in the URL of the page it came
+  from (its `Referer`: a `fetch`, a form submission, a link);
+- when the request names none, the only open window, if exactly one is
+  open. That is always the case in serve mode, also for requests that do
+  not come from a page at all, such as a webhook.
+
+Otherwise there is no current window (`currentWindow()` is `none`, `js.*`
+raises `NeelNoWindowError`): the request names a window that is closed, or
+names none while several are open. Target a window explicitly then
+(`requireWindow(id).js...`, `for w in windows(): ...`).
+
+During a window's own page load its page is not connected yet, so `js.*`
+raises `NeelNoWindowError` there; it also does while no page is open in
+serve mode. A handler that pushes to the page should expect that:
+
+```nim
+proc hook(req: HttpRequest): HttpResponse =
+  store(req.body)
+  try:
+    js.refreshInbox()        # the open page, if there is one
+  except NeelNoWindowError:
+    discard                  # nobody is looking; shown on the next load
+  textResponse("ok")
+```
+
+### Requests from other sites, and webhooks
+
+A request with a method other than `GET` / `HEAD` is refused with a 403
+before it reaches a handler when a browser marks it as coming from
+somewhere else: its `Origin` is not `http://127.0.0.1:<port>` (in serve
+mode, nor one of `allowedOrigins`), or its `Sec-Fetch-Site` is anything but
+`same-origin` / `none`. Another website, a page served by another program
+on this machine, and a sibling subdomain behind your proxy can therefore
+not submit a form or `fetch` to your routes. Your own pages can, with
+nothing to configure.
+
+- **Change state only in routes for `POST`, `PUT`, `PATCH`, or `DELETE`.**
+  `GET` requests are not covered by this check: a link or an `<img>` on
+  another page can trigger one (and in serve mode cross-site top-level
+  navigations are allowed on purpose).
+- There is no CORS support: a page on another origin cannot call your
+  routes with `fetch`, and no `Access-Control-*` headers are added.
+- A request that carries neither header passes. Browsers always send
+  `Origin` with these methods, so such a request comes from a program:
+  `curl`, a script, another server calling a webhook.
+
+That last point is what makes webhooks work, and it means **Neel does not
+authenticate the caller of a route**. In local mode any program on the
+machine can call it, which is the trust model of the rest of Neel (see
+[Security](#security)). In serve mode, a route is as public as your tunnel
+or proxy makes it. For a webhook:
+
+- run in serve mode and list the public origin in `allowedOrigins` (the
+  request's `Host` must be that origin's host, or `127.0.0.1:<port>` when
+  the proxy rewrites it);
+- if an authenticating proxy protects the app (Cloudflare Access,
+  oauth2-proxy), exempt the webhook's path there: the sender cannot log in;
+- verify the sender in the handler before trusting the payload, usually an
+  HMAC signature computed over `req.body` with a shared secret (Slack's
+  `X-Slack-Signature`, GitHub's `X-Hub-Signature-256`), and compare it in
+  constant time;
+- answer quickly and hand slow work to another thread: senders time out
+  (Slack after 3 s) and retry.
+
+### Limits
+
+- A request body may be at most `maxBodySize` bytes (default
+  `DefaultMaxBodySize`, 1 MiB; a `startApp` parameter). A larger one is
+  answered 400 from its `Content-Length` alone and the connection is
+  closed. The whole body is held in memory before the handler runs.
+- Bodies must be sent with `Content-Length`; `Transfer-Encoding: chunked`
+  requests are answered 400. Browsers, `curl`, and webhook senders use
+  `Content-Length` for anything that is not a stream.
+- `Expect: 100-continue` is not answered. `curl` sends it for bodies over
+  1 KiB and then waits one second before sending the body anyway; pass
+  `-H "Expect:"` to skip the wait.
+- A response is one in-memory `string`: there is no streaming, chunked
+  output, or server-sent events. Push to the page with `js.*` instead,
+  which is what the WebSocket is for.
+- `Range` requests are honoured for the web directory only; a route that
+  serves media answers them itself or the `<video>` cannot seek.
+- There is no TLS and no HTTP/2; a proxy in front provides both.
+
 ## Threading model
 
 - The main thread blocks inside `startApp` until the app ends.
 - One IO thread owns every socket. It never runs user code.
 - A pool of worker threads (`workers`, default `DefaultWorkers` = 64, with a
   queue of `queueCapacity` = 1024 tasks) runs everything else: exposed procs,
-  `onWindowOpen`, and the asset handler. **Exposed procs run concurrently**,
+  [route handlers](#custom-routes), `onWindowOpen`, and the asset handler.
+  Route handlers follow every rule below that is stated for exposed procs.
+  **Exposed procs run concurrently**,
   including two calls from the same page issued back to back, so they must be
   `{.gcsafe.}` (the compiler enforces this; the error points at the proc) and
   must protect shared mutable state with a `Lock`, `Atomic`, or a channel.
@@ -730,8 +987,10 @@ window managers already hide the terminal of a backgrounded process.
   runs on until the reply, the timeout, or the disconnect. While a worker
   waits, other workers keep serving messages, including from the same page,
   which is what makes re-entrant calls (page -> Nim -> page -> Nim) work.
-- `js` has a current window only inside an exposed proc. From your own
-  threads use `win.js` with a `Window` you obtained earlier (from
+- `js` has a current window only inside an exposed proc, and inside a route
+  handler whose request belongs to an open window
+  (see [Threads and the current window](#threads-and-the-current-window)).
+  From your own threads use `win.js` with a `Window` you obtained earlier (from
   `currentWindow()` inside an exposed proc, `windows()`, or `openWindow`);
   `Window` is a plain object and can be passed to a `Thread`. A `js` call to
   a window that has gone away raises `NeelNoWindowError`.
@@ -792,7 +1051,7 @@ is that `webDir` may be given positionally (`startApp("web", port = 8000)`).
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `webDir` | `"web"` | web directory, relative to the calling source file unless absolute; a constant when embedding |
+| `webDir` | `"web"` | web directory, relative to the calling source file unless absolute; a constant when embedding; `""` for an app [without one](#an-app-without-a-web-directory) |
 | `embedAssets` | `defined(release)` | compile-time constant: embed `webDir` into the binary (`true`) or serve from disk (`false`) |
 | `startPath` | `"/"` | the page the first window opens (an `openWindow` path); in serve mode, where `/` redirects |
 | `port` | `0` | TCP port on `127.0.0.1`; 0 picks an ephemeral port (serve mode needs a fixed one) |
@@ -812,13 +1071,17 @@ is that `webDir` may be given positionally (`startApp("web", port = 8000)`).
 | `extraFlags` | `@[]` | extra command-line flags for app-mode windows (ignored in serve mode) |
 | `onWindowOpen` | `nil` | `WindowHook` fired when a window's page first connects (serve mode: once, on the first connection ever) |
 | `onWindowClose` | `nil` | `WindowHook` fired when a window is closed or retired (serve mode: once, at teardown) |
+| `routes` | `@[]` | [custom routes](#custom-routes): `seq[Route]` built with `get`, `post`, `put`, `patch`, `delete`, or `route`, answered before the web directory |
+| `maxBodySize` | `DefaultMaxBodySize` (1 048 576 = 1 MiB) | largest HTTP request body the server will accept; a larger one is answered 400 |
 
 `startApp` raises `NeelBrowserError` (no browser and `fallback = false`, or a
 bad `browserPath`), `OSError` (the port is taken, or the web directory does
 not exist in a debug build), or `ValueError` (a
 non-positive size; and, before anything is bound, `serve = true` with
-`port = 0`, `allowedOrigins` without `serve = true`, or a malformed
-`allowedOrigins` entry, see [Starting a server](#starting-a-server));
+`port = 0`, `allowedOrigins` without `serve = true`, a malformed
+`allowedOrigins` entry, see [Starting a server](#starting-a-server), a
+route on a reserved path or one that can never run, or `webDir = ""`
+without any route, see [Custom routes](#custom-routes));
 everything has been torn down when the exception leaves.
 
 Compile-time errors from the macro point at your `startApp(...)` line: a
@@ -840,7 +1103,13 @@ WebSocket, and every request is checked before it is served:
   top-level page loads pass, so that links and login redirects work);
 - the WebSocket upgrade must come from a page at `http://127.0.0.1:<port>`
   (its `Origin`), so the token is useless to any other website (in serve
-  mode an allowed origin is accepted too).
+  mode an allowed origin is accepted too);
+- a request with a method other than `GET` / `HEAD`, which only a
+  [custom route](#custom-routes) answers, must not come from another
+  origin: its `Origin`, when present, must be `http://127.0.0.1:<port>`
+  (in serve mode an allowed origin is accepted too), and its
+  `Sec-Fetch-Site`, when present, `same-origin` or `none`. See
+  [Requests from other sites, and webhooks](#requests-from-other-sites-and-webhooks).
 
 A refused request gets a 403. This keeps other websites open in the user's
 browser away from your app. It also means the app works only at the URL Neel
@@ -850,7 +1119,8 @@ also works at the origins in `allowedOrigins`; see
 
 Neel trusts the local machine. Other programs and users on the same computer
 can send any headers, fetch `/neel.js`, and read the browser's command line,
-so they can reach your exposed procs. An exposed proc can do anything your
+so they can reach your exposed procs, and they can call your routes
+directly. An exposed proc or a route handler can do anything your
 app can: treat its arguments as untrusted input, and do not expose procs that
 run arbitrary commands or touch arbitrary paths without checking them.
 
@@ -1163,8 +1433,14 @@ They do not authenticate the user.
 - Another site can open the app in a new tab, which displaces the user's
   current page. It cannot read or control that tab. This is accepted as low
   risk.
-- The HTTP server has request size limits (16 KiB of headers, 1 MiB of
-  body) but no idle timeout for plain HTTP connections. Always put a real
+- [Custom routes](#custom-routes) are reachable by whoever can reach the
+  server. Neel refuses requests that a browser sends from another origin,
+  but it authenticates no one: a route that must stay private needs the
+  proxy's login in front of it, and a webhook, which has to bypass that
+  login, must verify its sender's signature itself
+  (see [Requests from other sites, and webhooks](#requests-from-other-sites-and-webhooks)).
+- The HTTP server has request size limits (16 KiB of headers, `maxBodySize`
+  of body, 1 MiB by default) but no idle timeout for plain HTTP connections. Always put a real
   proxy or tunnel in front; never expose the port directly, for example
   with a plain TCP forward open to the network.
 - The proxy must forward WebSocket upgrades on `/ws` (some proxies need
@@ -1282,7 +1558,9 @@ manual reload. Step by step, including the dashboard, costs, and removal:
 - A message from the page (a call, or a reply to `js.wait`, as JSON text)
   may be at most `maxMessageSize` (default 16 MiB, configurable in
   `startApp`); messages from Nim to the page are not limited. An HTTP
-  request's header block may be at most 16 KiB.
+  request's header block may be at most 16 KiB and its body at most
+  `maxBodySize` (default 1 MiB); see [Limits](#limits) for what else
+  custom routes do not do.
 - A page must not set a `no-referrer` referrer policy and should not use a
   `window` query parameter of its own (see [Multiple windows](#multiple-windows)).
 - With `browsers = @[Default]` or after a fallback, the app runs in an
@@ -1345,6 +1623,33 @@ manual reload. Step by step, including the dashboard, costs, and removal:
   [reload recipe](#reloading-after-a-server-restart). Positional arguments
   are allowed origins and `--port=N` replaces the port
   (`./serve https://<name>.trycloudflare.com`).
+- [`examples/routes`](../examples/routes) - [custom routes](#custom-routes)
+  in an app with no web directory (`webDir = ""`): pages rendered in Nim, a
+  path parameter, a form that posts to a route and is redirected back, a
+  JSON endpoint, and a webhook that stores its payload and pushes it into
+  the open page with `js`. Runs on port 5360; `--serve` runs the same
+  routes in serve mode. Its header comment has the `curl` command for the
+  webhook.
+
+## What's new since 2.1
+
+Not released yet.
+
+- [Custom routes](#custom-routes): `startApp(routes = @[get("/", home),
+  post("/hooks/x", hook)])` answers HTTP requests with Nim procs, for any
+  method, with path parameters and request bodies, before the web
+  directory. `webDir = ""` runs an app without a web directory, and
+  `maxBodySize` bounds a request body (1 MiB by default, as before).
+- A request with a method other than `GET` / `HEAD` is now refused with a
+  403 when a browser sent it from another origin. Until now every such
+  request was answered 405, so nothing that worked before is affected.
+- `import neel` additionally exports `HttpRequest`, `HttpResponse`,
+  `HttpMethod` (`hmGet`, `hmPost`, ...), `Route`, `RouteHandler`, the route
+  constructors `get`, `post`, `put`, `patch`, `delete`, `route`, and the
+  helpers `param`, `queryParam`, `initResponse`, `addHeader`, `setHeader`,
+  `getHeader`, `hasHeader`, `htmlResponse`, `textResponse`, `jsonResponse`,
+  `redirectResponse`. They are overloads by argument type, so
+  `someOption.get` and `mySeq.delete(i)` keep working.
 
 ## What's new in 2.1
 

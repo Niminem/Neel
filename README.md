@@ -18,6 +18,7 @@ Features:
 - Multiple windows, each addressable from Nim
 - Browser discovery (Chrome, Chromium, Edge) with a default-browser fallback
 - Serve mode: the same app as a persistent server without a browser, opened from any of your devices through an SSH forward, a tunnel, or a reverse proxy
+- Custom routes: answer HTTP requests with your own Nim procs (rendered pages, JSON endpoints, form targets, webhooks), next to the web folder or instead of it
 - Frontend assets embedded into the binary in `release` builds
 - Zero dependencies: the Nim standard library only
 - Hardened against other websites open in the same browser
@@ -182,6 +183,7 @@ startApp(webDir = "web", size = some((1100, 800)), position = some((80, 80)),
 | `fallback`                      | `true`                      | open a default-browser tab when none of `browsers` is found (`false`: show an error page and raise `NeelBrowserError`) |
 | `gracePeriodMs`                 | 3 000 debug, 10 000 release | how long the app stays up after the last window closes                                                                 |
 | `onWindowOpen`, `onWindowClose` | `nil`                       | window hooks (see [Multiple Windows](#multiple-windows))                                                               |
+| `routes`                        | `@[]`                       | your own HTTP routes (see [Custom routes](#custom-routes)); with `webDir = ""` the app needs no web folder             |
 
 
 Every parameter (workers, timeouts, message size, extra browser flags, `browserPath`, ...): [`startApp` parameters](docs/GUIDE.md#startapp-parameters).
@@ -342,6 +344,42 @@ startApp(serve = true, port = 8080,
 
 Everything else (validation, stop signals, reconnecting, the reload recipe for server restarts, the security model, and setups): [Serve mode](docs/GUIDE.md#serve-mode). A runnable app: [`examples/serve`](examples/serve). Reaching it from anywhere behind a login: [Cloudflare Tunnel with Access](docs/CLOUDFLARE_ACCESS.md).
 
+## Custom routes
+
+A route answers an HTTP request with a Nim proc instead of a file from the web folder: a page rendered in Nim, a JSON endpoint, a form target, a webhook. Routes work in app mode and in serve mode, on every platform.
+
+```nim
+import neel
+
+proc home(req: HttpRequest): HttpResponse =
+  htmlResponse("<!doctype html><script src=\"/neel.js\"></script><h1>Hello</h1>")
+
+proc user(req: HttpRequest): HttpResponse =
+  textResponse("user " & req.param("id"))
+
+proc slackHook(req: HttpRequest): HttpResponse =
+  let event = parseJson(req.body)   # verify the sender's signature first
+  try:
+    js.showEvent(event)             # push it into the open page
+  except NeelNoWindowError:
+    discard                         # no page is open right now
+  textResponse("ok")
+
+startApp(routes = @[
+  get("/", home),
+  get("/users/@id", user),
+  post("/hooks/slack", slackHook)])
+```
+
+- Build routes with `get`, `post`, `put`, `patch`, `delete`, or `route({hmGet, hmPost}, ...)`. In a pattern, `@name` captures one path segment and a final `*name` captures the rest; read them with `req.param("name")`. The request body is `req.body`, a query value `req.queryParam("x")`.
+- Answer with `htmlResponse`, `textResponse`, `jsonResponse`, `redirectResponse`, or `initResponse(status, body, contentType)`.
+- Routes are answered before the web folder, in the order you list them. With `startApp(webDir = "", routes = ...)` the app has no web folder at all; a page rendered by a route becomes a Neel page by loading `/neel.js`.
+- Handlers run on worker threads like exposed procs: they may block, and shared state needs a `Lock`. Inside one, `js` and `currentWindow()` refer to the window the request came from.
+- A `POST`, `PUT`, `PATCH`, or `DELETE` sent by a browser from another origin is refused, so other websites cannot submit to your routes; keep state changes out of `GET` routes. Requests from programs (a webhook, `curl`) pass, and Neel authenticates no one: verify a webhook's signature in the handler.
+- Request bodies are limited to 1 MiB by default (`maxBodySize`); responses are sent whole, without streaming.
+
+Everything else (pattern rules, precedence, the current window, webhooks, limits): [Custom routes](docs/GUIDE.md#custom-routes). A runnable app without a web folder: [`examples/routes`](examples/routes).
+
 ## Before You Start
 
 Keep the following in mind when developing your Neel app:
@@ -378,6 +416,7 @@ Run them from the repository root with `nim c -r examples/<name>/<name>.nim`:
 
 - [File picker](examples/filepicker): the example above, and the one to start with; one exposed proc with a return value and two structured errors.
 - [Serve mode](examples/serve): a shared note served without a browser on port 5359, opened from your other devices through an SSH forward or a tunnel; shows every connection state a serve-mode page handles (displaced, dormant, server restarted).
+- [Custom routes](examples/routes): an app with no web folder; pages rendered in Nim, a form that posts to a route, and a webhook you can call with `curl` that pushes into the open page.
 
 The other two exist mostly for manual (and stress) testing of Neel itself, but they are interesting to read to see how Neel does things:
 
@@ -385,6 +424,13 @@ The other two exist mostly for manual (and stress) testing of Neel itself, but t
 - [Stress test](examples/stresstest): exercises every feature in one page, under load and in edge cases (every supported type, every error kind, hundreds of concurrent calls, large payloads, pushes from a plain thread).
 
 
+
+## What's New Since 2.1
+
+Not released yet.
+
+- [Custom routes](#custom-routes): `startApp(routes = @[get("/", home), post("/hooks/x", hook)])` answers HTTP requests with Nim procs, for any method, with path parameters and request bodies. `webDir = ""` runs an app without a web folder.
+- A request with a method other than `GET` / `HEAD` that a browser sent from another origin is refused with a 403 (every such request used to get a 405).
 
 ## What's New in 2.1
 
@@ -416,7 +462,7 @@ The vision for this library is to eventually have it be as full-fledged as Elect
 
 - [ ] **Brave, Opera, and Vivaldi.** They are already members of the `Browser` enum, reserved and skipped during discovery for now.
 - [ ] **Webview capabilities.** [Webview](https://github.com/webview/webview) is an MIT licensed cross-platform webview library for C/C++. Uses WebKit (GTK/Cocoa) and Edge WebView2 (Windows). Having a webview target will get us closer to a solid framework for shipping commercial builds.
-- [ ] **Custom routes.** Let an app answer HTTP requests with its own Nim handlers next to the web folder, so pages can be rendered with template engines and the like.
+- [x] **Custom routes.** Let an app answer HTTP requests with its own Nim handlers next to the web folder, so pages can be rendered with template engines and the like. Done: see [Custom routes](#custom-routes).
 - [ ] **Secure WebSockets (`wss:`).** The page side already switches to `wss:` when served over `https:`; the server does not speak TLS yet.
 
 

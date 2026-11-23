@@ -28,11 +28,13 @@
 ## `requestRefusal` is the other side of the same contract: every page Neel
 ## opens lives at `http://127.0.0.1:<port>`, so a request that does not look
 ## like it came from such a page (another `Host`, a cross-site fetch, a `/ws`
-## upgrade from another `Origin`) is refused before routing. Its
+## upgrade from another `Origin`, a `POST` or other state-changing request
+## from another origin to a custom route) is refused before routing. Its
 ## `RequestFilter` (built once by `initRequestFilter`, immutable afterwards)
 ## widens this in serve mode only: the hosts of the allowed origins
 ## (`normalizeOrigin`) are accepted as `Host`, the origins themselves on
-## `/ws`, and cross-site top-level document navigations pass.
+## `/ws` and on state-changing requests, and cross-site top-level document
+## navigations pass (with `GET` / `HEAD` only).
 
 import std/[json, strutils]
 import ./http
@@ -233,23 +235,43 @@ proc requestRefusal*(req: HttpRequest; port: int; filter: RequestFilter): string
   ##   including none: browsers always send `Origin` on a WebSocket
   ##   handshake and a page cannot forge it, so a token captured by another
   ##   site is useless to it. In serve mode an exact match in
-  ##   `filter.origins` is accepted too.
+  ##   `filter.origins` is accepted too;
+  ## - a request with any method other than `GET` / `HEAD` (the ones a
+  ##   custom route may change state on) that a browser marks as coming
+  ##   from elsewhere: a `Sec-Fetch-Site` other than `same-origin` / `none`,
+  ##   or an `Origin` that is not this server's (in serve mode, not an
+  ##   allowed one either). Another site, another local server's page (a
+  ##   different port is still `same-site`), and a sibling subdomain behind
+  ##   a proxy can therefore not `POST` to a route, and the serve-mode
+  ##   navigation exception above does not apply (a cross-site form
+  ##   submission is a top-level navigation). A request with neither header
+  ##   passes: browsers send `Origin` with every such request, so it comes
+  ##   from a program (a webhook, `curl`), which no rule here could stop.
   ## Pure.
+  const scheme = "http://"
   let widened = filter.serve and filter.origins.len > 0
+  let safeMethod = req.httpMethod in {hmGet, hmHead}
   let host = req.getHeader("Host")
   if not (isOwnHost(host, port) or (filter.serve and host in filter.hosts)):
     return "neel: refused: the Host header must be " & LoopbackHost & ":" & $port &
       (if widened: " or the host of an allowed origin" else: "")
-  if cmpIgnoreCase(req.getHeader("Sec-Fetch-Site"), "cross-site") == 0 and
-      not (filter.serve and isTopLevelNavigation(req)):
+  let site = req.getHeader("Sec-Fetch-Site")
+  if cmpIgnoreCase(site, "cross-site") == 0 and
+      not (filter.serve and safeMethod and isTopLevelNavigation(req)):
     return "neel: refused: cross-site request"
+  let origin = req.getHeader("Origin")
+  let knownOrigin =
+    (origin.startsWith(scheme) and isOwnHost(origin[scheme.len .. ^1], port)) or
+    (filter.serve and origin in filter.origins)
   if req.path == WsPath:
-    const scheme = "http://"
-    let origin = req.getHeader("Origin")
-    let own = origin.startsWith(scheme) and isOwnHost(origin[scheme.len .. ^1], port)
-    if not (own or (filter.serve and origin in filter.origins)):
+    if not knownOrigin:
       return "neel: refused: the Origin header must be " & scheme & LoopbackHost &
         ":" & $port & (if widened: " or an allowed origin" else: "")
+  elif not safeMethod:
+    if (site.len > 0 and cmpIgnoreCase(site, "same-origin") != 0 and
+        cmpIgnoreCase(site, "none") != 0) or
+        (req.hasHeader("Origin") and not knownOrigin):
+      return "neel: refused: cross-origin " & req.rawMethod & " request"
   ""
 
 static:

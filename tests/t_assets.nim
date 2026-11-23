@@ -248,3 +248,37 @@ suite "assets: disk and embedded modes":
 
   test "embedding a missing directory is a compile error":
     check not compiles(embedWebDir("no/such/dir", "/nonexistent-base"))
+
+suite "assets: no web directory":
+  test "noAssets serves only 404s and 405s":
+    let none = noAssets()
+    check none.mode == amNone
+    check none.serveAsset(request("/")).status == 404
+    check none.serveAsset(request("/index.html")).status == 404
+    check none.serveAsset(request("/", "POST")).status == 405
+    check lookupAsset(none, "index.html").isNone
+
+  test "an empty webDir is no web directory, never the caller's own directory":
+    # Resolving "" against the caller would name the directory that holds
+    # the application's sources.
+    let here = currentSourcePath().parentDir
+    check resolveWebDir(here, "") == here / ""
+    let disk = webDirAssets(here, "")
+    check disk.mode == amNone
+    check disk.root == ""
+    check disk.serveAsset(request("/t_assets.nim")).status == 404
+    const Nothing = embedWebDir("", currentSourcePath().parentDir)
+    check Nothing.len == 0
+    let embedded = embeddedWebDirAssets("", Nothing)
+    check embedded.mode == amNone
+    check embedded.serveAsset(request("/t_assets.nim")).status == 404
+
+  test "a named webDir still resolves as before":
+    let here = currentSourcePath().parentDir
+    let disk = webDirAssets(here, "fixtures/web")
+    check disk.mode == amDisk
+    check disk.root == FixtureDir.normalizedPath
+    check disk.serveAsset(request("/app.js")).status == 200
+    let embedded = embeddedWebDirAssets("fixtures/web", Embedded)
+    check embedded.mode == amEmbedded
+    check embedded.serveAsset(request("/app.js")).status == 200

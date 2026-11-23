@@ -12,7 +12,12 @@
 ## shim, never the surviving window's), and
 ## finally either calls `quitApp()` through an exposed proc (first run, disk
 ## assets) or just disconnects and lets the grace period end the app (second
-## run, embedded assets). Every wait and read is bounded (3 s max).
+## run, embedded assets). Custom routes get runs of their own: next to a web
+## directory in local mode (parameters, bodies, 405s, precedence over files,
+## failing handlers, the handler's current window, a webhook pushing into the
+## page), without a web directory in a disk and an embedded build, and in
+## serve mode (a route for `/`, a webhook through the proxy, posts only from
+## allowed origins). Every wait and read is bounded (3 s max).
 
 import std/[unittest, locks, os, monotimes, times, typedthreads, net,
             nativesockets, strutils, uri]
@@ -72,6 +77,69 @@ proc whichWindow(): int {.expose.} =
 
 proc stop() {.expose.} =
   quitApp()
+
+# --- custom routes -----------------------------------------------------------------
+
+const
+  DynamicPage = "<!doctype html>\n<html><head><meta charset=\"utf-8\">" &
+                "<script src=\"/neel.js\"></script></head>" &
+                "<body><p>rendered by a route</p></body></html>\n"
+    ## What `routeRoot` answers: a page that loads the shim like any other.
+  RouteBodyLimit = 4096
+    ## `maxBodySize` of the runs with routes.
+
+proc routeRoot(req: HttpRequest): HttpResponse =
+  htmlResponse(DynamicPage)
+
+proc routeHello(req: HttpRequest): HttpResponse =
+  textResponse("hello " & req.param("name") & " q=" & req.queryParam("q"))
+
+proc routeEcho(req: HttpRequest): HttpResponse =
+  jsonResponse(%*{"method": req.rawMethod, "type": req.getHeader("Content-Type"),
+                  "len": req.body.len, "body": req.body})
+
+proc routeWindow(req: HttpRequest): HttpResponse =
+  ## The handler's current window, as an exposed proc would see it.
+  let w = currentWindow()
+  textResponse(if w.isSome: $w.get.id else: "none")
+
+proc routeFiles(req: HttpRequest): HttpResponse =
+  textResponse("file:" & req.param("path"))
+
+proc routeShadow(req: HttpRequest): HttpResponse =
+  textResponse("from the route")
+
+proc routeBoom(req: HttpRequest): HttpResponse =
+  raise newException(ValueError, "route failure")
+
+proc routeBadHeader(req: HttpRequest): HttpResponse =
+  redirectResponse("/x\r\nSet-Cookie: injected=1")
+
+proc routeDefault(req: HttpRequest): HttpResponse =
+  HttpResponse(body: "status left at 0")
+
+proc routeHook(req: HttpRequest): HttpResponse =
+  ## A webhook: pushes the payload into the page, answers at once.
+  js.hookArrived(req.body)
+  textResponse("accepted", 202)
+
+proc localRoutes(): seq[Route] =
+  @[get("/hello/@name", routeHello),
+    route({hmPost, hmPut, hmPatch, hmDelete}, "/echo", routeEcho),
+    route({hmGet, hmPost}, "/which-window", routeWindow),
+    get("/files/*path", routeFiles),
+    get("/noext", routeShadow),          # also a file in the web directory
+    get("/boom", routeBoom),
+    get("/bad-header", routeBadHeader),
+    get("/default", routeDefault),
+    post("/hooks/demo", routeHook)]
+
+proc dynamicRoutes(): seq[Route] =
+  @[get("/", routeRoot), get("/hello/@name", routeHello)]
+
+proc serveRoutes(): seq[Route] =
+  @[get("/", routeRoot), post("/echo", routeEcho),
+    get("/which-window", routeWindow), post("/hooks/demo", routeHook)]
 
 # --- shared state between the app thread and the test thread -----------------------
 
@@ -214,6 +282,30 @@ proc appThread(run: int) {.thread.} =
                               startupTimeoutMs = 2000, callTimeoutMs = 2000,
                               workers = 4, queueCapacity = 32)
         finish(reason)
+      of 4:
+        # Routes next to a web directory.
+        let reason = startApp(webDir = "fixtures/web", embedAssets = false,
+                              browsers = @[], gracePeriodMs = Grace,
+                              startupTimeoutMs = 2000, callTimeoutMs = 2000,
+                              workers = 4, queueCapacity = 32,
+                              routes = localRoutes(), maxBodySize = RouteBodyLimit)
+        finish(reason)
+      of 5:
+        # No web directory, debug-style build.
+        let reason = startApp(webDir = "", embedAssets = false,
+                              browsers = @[], gracePeriodMs = Grace,
+                              startupTimeoutMs = 2000, callTimeoutMs = 2000,
+                              workers = 4, queueCapacity = 32,
+                              routes = dynamicRoutes())
+        finish(reason)
+      of 6:
+        # No web directory, release-style build (nothing to embed).
+        let reason = startApp("", embedAssets = true,
+                              browsers = @[], gracePeriodMs = Grace,
+                              startupTimeoutMs = 2000, callTimeoutMs = 2000,
+                              workers = 4, queueCapacity = 32,
+                              routes = dynamicRoutes())
+        finish(reason)
       else:
         let reason = startApp(webDir = "fixtures/web", embedAssets = false,
                               serve = false, startPath = "/sub/page.html",
@@ -254,6 +346,28 @@ proc serveThread(args: (int, string)) {.thread.} =
                             startupTimeoutMs = ServeStartupTimeout,
                             callTimeoutMs = 2000, workers = 4, queueCapacity = 32,
                             onWindowOpen = countOpen, onWindowClose = countClose)
+      finish(reason)
+    except CatchableError as e:
+      finish(erStartupTimeout, "startApp raised " & $e.name & ": " & e.msg)
+    finally:
+      setTestLauncher(nil)
+      setTestProfileSweep(nil)
+      setTestPingObserver(nil)
+
+proc serveRoutesThread(port: int) {.thread.} =
+  ## Serve mode with custom routes: `/` is a route although `startPath`
+  ## names another page, and `/hooks/demo` is a webhook.
+  {.cast(gcsafe).}:
+    setTestLauncher(fakeLaunch)
+    setTestProfileSweep(recordSweep)
+    setTestPingObserver(recordPingInterval)
+    try:
+      let reason = startApp(webDir = "fixtures/web", embedAssets = false,
+                            serve = true, port = port,
+                            allowedOrigins = ServeOrigins,
+                            startPath = "/sub/page.html",
+                            callTimeoutMs = 2000, workers = 4, queueCapacity = 32,
+                            routes = serveRoutes(), maxBodySize = RouteBodyLimit)
       finish(reason)
     except CatchableError as e:
       finish(erStartupTimeout, "startApp raised " & $e.name & ": " & e.msg)
@@ -359,9 +473,10 @@ proc ownHost(port: int): string =
   "127.0.0.1:" & $port
 
 proc http(port: int; target: string; httpMethod = "GET";
-          headers: seq[(string, string)] = @[]; host = ""): HttpReply =
+          headers: seq[(string, string)] = @[]; host = ""; body = ""): HttpReply =
   ## One request on its own connection (`Connection: close`), read to EOF.
-  ## `host` replaces the `Host` a Neel page would send.
+  ## `host` replaces the `Host` a Neel page would send; a non-empty `body`
+  ## is sent with its `Content-Length`.
   let sock = newSocket(buffered = false)
   defer: sock.close()
   sock.connect("127.0.0.1", Port(port))
@@ -370,7 +485,10 @@ proc http(port: int; target: string; httpMethod = "GET";
              "Connection: close\r\n"
   for (k, v) in headers:
     text.add k & ": " & v & "\r\n"
+  if body.len > 0:
+    text.add "Content-Length: " & $body.len & "\r\n"
   text.add "\r\n"
+  text.add body
   sock.send(text)
   var raw = ""
   let deadline = getMonoTime() + initDuration(milliseconds = IoTimeout)
@@ -481,6 +599,27 @@ template serveRun(port: int; startPath: string; body: untyped) =
   resetShared()
   var th: Thread[(int, string)]
   createThread(th, serveThread, (port, startPath))
+  try:
+    check waitUntil(IoTimeout, proc(): bool = isDone() or windows().len == 1)
+    acquire shared.lock
+    let early = shared.failure
+    release shared.lock
+    doAssert not isDone(), "serve-mode startApp ended early: " & early
+    body
+  finally:
+    if not waitUntil(IoTimeout, isDone):
+      quitApp()
+    joinThread(th)
+  acquire shared.lock
+  let failure = shared.failure
+  release shared.lock
+  check failure == ""
+
+template serveRoutesRun(port: int; body: untyped) =
+  ## `serveRun` for the serve-mode app with custom routes.
+  resetShared()
+  var th: Thread[int]
+  createThread(th, serveRoutesThread, port)
   try:
     check waitUntil(IoTimeout, proc(): bool = isDone() or windows().len == 1)
     acquire shared.lock
@@ -956,6 +1095,33 @@ suite "neel: startApp end to end":
     check NeelRemoteError is CatchableError
     check NeelBrowserError is CatchableError
     check NeelServeModeError is CatchableError
+    # Custom routes: `neel/http` and `neel/routes` are not imported here.
+    check DefaultMaxBodySize == 1024 * 1024
+    check compiles(get("/x/@id", routeHello))
+    check compiles(@[post("/x", routeEcho), put("/x", routeEcho),
+                     patch("/x", routeEcho), delete("/x", routeEcho),
+                     route({hmGet, hmOptions}, "/y", routeHello)])
+    check RouteHandler(routeHello) == routeHello
+    var answer = initResponse(201, "made", "text/plain")
+    answer.addHeader("X-A", "1")
+    answer.setHeader("X-A", "2")
+    check answer.getHeader("x-a") == "2"
+    check answer.hasHeader("X-A")
+    check htmlResponse("<p>").status == 200
+    check textResponse("x", 404).status == 404
+    check jsonResponse(%*{"a": 1}).body == "{\"a\":1}"
+    check redirectResponse("/next").getHeader("Location") == "/next"
+    let asked = HttpRequest(httpMethod: hmPost, query: "a=1",
+                            headers: @[(name: "X-B", value: "v")])
+    check asked.queryParam("a") == "1"
+    check asked.param("none") == ""
+    check asked.getHeader("x-b") == "v"
+    check asked.version == hv10
+    check not declared(findRoute)
+    check not declared(checkRoutes)
+    check not declared(finishRouteResponse)
+    check not declared(parseRequest)
+    check not declared(encodeResponse)
     # Qualified, so the `neel/frontend` import above cannot satisfy it.
     check neel.CloseDisplaced == 4000
     # Internal wiring stays internal. (`NeelProtocolError`, `NeelFrameError`,
@@ -1188,6 +1354,294 @@ suite "neel: serve mode":
       check http(port, "/").header("Location") == "/sub/page.html"
       quitApp()
       check waitUntil(IoTimeout, isDone)
+
+suite "neel: custom routes":
+  test "local mode: routes answer before the web directory, with parameters, bodies, and a window":
+    appRun(4):
+      let base = "http://127.0.0.1:" & $port
+      let own = @[("Origin", base), ("Sec-Fetch-Site", "same-origin")]
+
+      # A path parameter (percent-decoded) and a query value.
+      let hello = http(port, "/hello/J%C3%BCrgen?q=a+b%21")
+      check hello.status == 200
+      check hello.header("Content-Type") == "text/plain; charset=utf-8"
+      check hello.body == "hello J\xC3\xBCrgen q=a b!"
+      # HEAD on a GET route: the handler's headers, no body.
+      let head = http(port, "/hello/x", "HEAD")
+      check head.status == 200
+      check head.body == ""
+      check head.header("Content-Length") == $"hello x q=".len
+      # A route's path with another method: 405 naming what it accepts.
+      let wrong = http(port, "/hello/x", "POST")
+      check wrong.status == 405
+      check wrong.header("Allow") == "GET, HEAD"
+      let wrongEcho = http(port, "/echo")
+      check wrongEcho.status == 405
+      check wrongEcho.header("Allow") == "POST, PUT, PATCH, DELETE"
+      check http(port, "/echo", "PROPFIND").status == 405
+
+      # Bodies, for every method the route lists.
+      for m in ["POST", "PUT", "PATCH", "DELETE"]:
+        let r = http(port, "/echo", m, headers = @[("Content-Type", "application/json")],
+                     body = "{\"n\": 1}\r\n\r\n")
+        check r.status == 200
+        check r.header("Content-Type") == "application/json"
+        check parseJson(r.body) == %*{"method": m, "type": "application/json",
+                                      "len": 12, "body": "{\"n\": 1}\r\n\r\n"}
+      check parseJson(http(port, "/echo", "POST").body)["len"].getInt == 0
+      # `maxBodySize`: exactly the limit passes, one byte more is a 400.
+      let full = http(port, "/echo", "POST", body = repeat('x', RouteBodyLimit))
+      check full.status == 200
+      check parseJson(full.body)["len"].getInt == RouteBodyLimit
+      check http(port, "/echo", "POST", body = repeat('x', RouteBodyLimit + 1)).status == 400
+
+      # A route wins over a file of the same name; other files are served
+      # as before, and only with GET / HEAD.
+      check http(port, "/noext").body == "from the route"
+      check readFile(FixtureDir / "noext") != "from the route"
+      check http(port, "/app.js").body == readFile(FixtureDir / "app.js")
+      check http(port, "/").body == readFile(FixtureDir / "index.html")
+      let assetPost = http(port, "/app.js", "POST")
+      check assetPost.status == 405
+      check assetPost.header("Allow") == "GET, HEAD"
+      check http(port, "/missing").status == 404
+      check http(port, "/missing", "DELETE").status == 405
+
+      # The tail wildcard, and paths no route may match (they fall through
+      # to the web directory, which refuses them too).
+      check http(port, "/files/a/b%20c.txt").body == "file:a/b c.txt"
+      check http(port, "/files").body == "file:"
+      for escape in ["/files/../app.js", "/files/..%2Fapp.js", "/files/%2E%2E/app.js",
+                     "/files/..%5Capp.js", "/files/a%00b"]:
+        check http(port, escape).status == 404
+
+      # A handler that raises, or returns something that cannot be sent,
+      # is a bare 500; the app carries on.
+      let boom = http(port, "/boom")
+      check boom.status == 500
+      check boom.body == "500 Internal Server Error"
+      let bad = http(port, "/bad-header")
+      check bad.status == 500
+      check bad.header("Set-Cookie") == ""
+      check bad.header("Location") == ""
+      let byDefault = http(port, "/default")
+      check byDefault.status == 200
+      check byDefault.body == "status left at 0"
+      check http(port, "/hello/again").status == 200
+
+      # Neel's own paths stay Neel's.
+      let shim = http(port, NeelJsPath, headers = @[("Referer", base & "/?window=1")])
+      check shim.status == 200
+      let token = tokenIn(shim.body)
+      check http(port, NeelJsPath, "POST").status == 405
+      check http(port, NoBrowserPath).status == 200
+      check http(port, NoBrowserPath, "POST").status == 405
+
+      # Requests from elsewhere never reach a handler.
+      check http(port, "/echo", "POST", headers = own, body = "x").status == 200
+      for headers in [@[("Origin", "http://attacker.example")],
+                      @[("Origin", "http://127.0.0.1:" & $(port + 1))],
+                      @[("Origin", "null")],
+                      @[("Origin", base), ("Sec-Fetch-Site", "same-site")]]:
+        let refused = http(port, "/echo", "POST", headers = headers, body = "x")
+        check refused.status == 403
+        check refused.body == "neel: refused: cross-origin POST request"
+      check http(port, "/echo", "POST", headers = @[("Sec-Fetch-Site", "cross-site")],
+                 body = "x").body == "neel: refused: cross-site request"
+      check http(port, "/hello/x", host = "attacker.example:" & $port).status == 403
+
+      # The handler's current window: the one the request names, in its own
+      # URL or through the page it came from; the only one when it names none.
+      check http(port, "/which-window").body == "1"
+      check http(port, "/which-window?window=1").body == "1"
+      check http(port, "/which-window",
+                 headers = @[("Referer", base & "/?window=1")]).body == "1"
+      check http(port, "/which-window", "POST", headers = own).body == "1"
+      check http(port, "/which-window?window=9").body == "none"
+      check http(port, "/which-window",
+                 headers = @[("Referer", base & "/?window=9")]).body == "none"
+
+      var (c, status) = handshake(port, token, 1)
+      check status.startsWith("HTTP/1.1 101")
+      # A webhook pushes into the page: with one window open it is the target.
+      let hook = http(port, "/hooks/demo", "POST",
+                      headers = @[("Content-Type", "application/json")],
+                      body = "{\"text\":\"hi\"}")
+      check hook.status == 202
+      check hook.body == "accepted"
+      let pushed = c.readMsg()
+      check pushed.kind == msgCall
+      check pushed.name == "hookArrived"
+      check pushed.args == @[%"{\"text\":\"hi\"}"]
+
+      # With two windows open a request has to say which one it means.
+      c.sendMsg(callMsg("openSecond", @[], id = 1))
+      check c.readMsg() == retMsg(1, %2)
+      check http(port, "/which-window").body == "none"
+      check http(port, "/which-window?window=2").body == "2"
+      check http(port, "/which-window",
+                 headers = @[("Referer", base & "/?window=1")]).body == "1"
+      # `js` has no target then: NeelNoWindowError, so a 500.
+      check http(port, "/hooks/demo", "POST", body = "lost").status == 500
+      let named = http(port, "/hooks/demo?window=1", "POST", body = "named")
+      check named.status == 202
+      check c.readMsg().args == @[%"named"]
+      # The exposed procs are unaffected by all of it.
+      c.sendMsg(callMsg("add", @[%20, %22], id = 2))
+      check c.readMsg() == retMsg(2, %42)
+
+      c.sendMsg(callMsg("stop", @[], id = 3))
+      check c.readUntilClose() == CloseGoingAway
+      c.sock.close()
+      check waitUntil(IoTimeout, isDone)
+    check shared.reason == erQuit
+
+  test "no web directory: every page is a route, in disk and embedded builds":
+    for run in [5, 6]:
+      appRun(run):
+        let base = "http://127.0.0.1:" & $port
+        acquire shared.lock
+        check shared.launches == @[base & "/?window=1"]
+        release shared.lock
+        # The window's page comes from the route for `/`.
+        let page = http(port, "/?window=1")
+        check page.status == 200
+        check page.header("Content-Type") == "text/html; charset=utf-8"
+        check page.body == DynamicPage
+        check http(port, "/hello/there").body == "hello there q="
+        # It loads the shim and connects like a page from a web directory.
+        let shim = http(port, NeelJsPath, headers = @[("Referer", base & "/?window=1")])
+        check shim.status == 200
+        check "const WINDOW_ID = 1;" in shim.body
+        let token = tokenIn(shim.body)
+        var (c, status) = handshake(port, token, 1)
+        check status.startsWith("HTTP/1.1 101")
+        c.sendMsg(callMsg("add", @[%2, %3], id = 1))
+        check c.readMsg() == retMsg(1, %5)
+        c.sendMsg(callMsg("whichWindow", @[], id = 2))
+        check c.readMsg() == retMsg(2, %1)
+        # Nothing else is served: not an index, not the directory of the
+        # source file that called startApp (where "" would resolve to).
+        for path in ["/index.html", "/app.js", "/t_neel.nim", "/config.nims",
+                     "/fixtures/web/index.html", "/missing"]:
+          check http(port, path).status == 404
+        check http(port, "/missing", "POST").status == 405
+        check http(port, "/", "POST").header("Allow") == "GET, HEAD"
+        # The window goes away: the grace period ends the app as usual.
+        c.sock.close()
+        check waitUntil(IoTimeout, isDone)
+      check shared.reason == erLastWindowClosed
+
+  test "serve mode: a route for /, a webhook through the proxy, posts only from allowed origins":
+    let port = freePort()
+    serveRoutesRun(port):
+      const Public = "myapp.example.com"
+      # A route for `/` wins over the redirect to `startPath`.
+      let root = http(port, "/", host = Public)
+      check root.status == 200
+      check root.header("Location") == ""
+      check root.body == DynamicPage
+      check http(port, "/sub/page.html").body == readFile(FixtureDir / "sub" / "page.html")
+      # Serve mode has one window: every request belongs to it.
+      check http(port, "/which-window", host = Public).body == "1"
+      # A webhook arrives as its sender's server sends it: the public Host,
+      # no Origin, no Sec-Fetch-Site. It reaches the handler; while no page
+      # is connected `js` raises NeelNoWindowError there, as it does in an
+      # exposed proc, and this handler does not catch it.
+      check http(port, "/hooks/demo", "POST", host = Public, body = "early").status == 500
+
+      let token = tokenIn(http(port, NeelJsPath, host = Public).body)
+      var (a, stA) = handshake(port, token, 1, host = Public,
+                               origin = "https://" & Public)
+      check stA.startsWith("HTTP/1.1 101")
+      let hook = http(port, "/hooks/demo", "POST", host = Public,
+                      headers = @[("Content-Type", "application/json"),
+                                  ("X-Slack-Signature", "v0=abc")],
+                      body = "{\"type\":\"event_callback\"}")
+      check hook.status == 202
+      let pushed = a.readMsg()
+      check pushed.kind == msgCall
+      check pushed.name == "hookArrived"
+      check pushed.args == @[%"{\"type\":\"event_callback\"}"]
+      # A body over `maxBodySize` never reaches the handler.
+      check http(port, "/hooks/demo", "POST", host = Public,
+                 body = repeat('x', RouteBodyLimit + 1)).status == 400
+
+      # A page at an allowed origin may post; any other origin may not, and
+      # neither may a cross-site form (a top-level navigation).
+      let posted = http(port, "/echo", "POST", host = Public,
+                        headers = @[("Origin", "https://" & Public),
+                                    ("Sec-Fetch-Site", "same-origin")], body = "x")
+      check posted.status == 200
+      check parseJson(posted.body)["body"].getStr == "x"
+      check http(port, "/echo", "POST", headers = @[
+        ("Origin", "http://tunnel.example:8080")], body = "x").status == 200
+      for headers in [@[("Origin", "https://evil.example.com")],
+                      @[("Origin", "https://" & Public), ("Sec-Fetch-Site", "same-site")]]:
+        let refused = http(port, "/echo", "POST", host = Public, headers = headers,
+                           body = "x")
+        check refused.status == 403
+        check refused.body == "neel: refused: cross-origin POST request"
+      let form = http(port, "/echo", "POST", host = Public, body = "x", headers = @[
+        ("Origin", "https://evil.example.com"), ("Sec-Fetch-Site", "cross-site"),
+        ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Dest", "document")])
+      check form.status == 403
+      check form.body == "neel: refused: cross-site request"
+      # The same navigation with GET still reaches a route (a link, a login
+      # redirect).
+      check http(port, "/which-window", host = Public, headers = @[
+        ("Sec-Fetch-Site", "cross-site"), ("Sec-Fetch-Mode", "navigate"),
+        ("Sec-Fetch-Dest", "document")]).body == "1"
+
+      a.sendMsg(callMsg("stop", @[], id = 1))
+      check a.readUntilClose() == CloseGoingAway
+      a.sock.close()
+      check waitUntil(IoTimeout, isDone)
+    check shared.reason == erQuit
+
+  test "a route list that cannot work fails before anything starts":
+    proc refusal(which: int): string =
+      resetShared()
+      setTestLauncher(fakeLaunch)
+      setTestProfileSweep(recordSweep)
+      setTestPingObserver(recordPingInterval)
+      try:
+        case which
+        of 0:
+          startApp(webDir = "fixtures/web", embedAssets = false, browsers = @[],
+                   routes = @[get("/ok", routeHello), post("/neel.js", routeEcho)])
+        of 1:
+          startApp(webDir = "fixtures/web", embedAssets = false, browsers = @[],
+                   routes = @[get("/u/@id", routeHello), get("/u/@name", routeHello)])
+        of 2:
+          startApp(webDir = "fixtures/web", embedAssets = false, browsers = @[],
+                   routes = @[Route()])
+        of 3:
+          startApp(webDir = "", embedAssets = false, browsers = @[])
+        else:
+          startApp("", embedAssets = true, browsers = @[])
+      except ValueError as e:
+        result = e.msg
+      finally:
+        setTestLauncher(nil)
+        setTestProfileSweep(nil)
+        setTestPingObserver(nil)
+      acquire shared.lock
+      if shared.launches.len != 0 or shared.sweeps != 0:
+        result.add " (but something started)"
+      release shared.lock
+      if pingIntervals().len != 0:
+        result.add " (but a server was created)"
+    check refusal(0) == "neel: route \"/neel.js\" is reserved: Neel serves /neel.js itself"
+    check refusal(1) == "neel: route GET, HEAD \"/u/@name\" can never run: \"/u/@id\" " &
+      "comes before it and matches the same requests"
+    check refusal(2).startsWith("neel: routes[0] is empty")
+    for which in [3, 4]:
+      check refusal(which) == "neel: webDir is \"\" and there are no routes, so the " &
+        "app has nothing to serve"
+    # A malformed pattern fails where the route is built, before startApp.
+    expect ValueError:
+      discard get("no-slash", routeHello)
 
 template serveRunStoppedBy(stopAction: untyped) =
   ## A serve run with one connected device, ended by `stopAction` (with
