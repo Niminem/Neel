@@ -13,7 +13,7 @@
 ## finally either calls `quitApp()` through an exposed proc (first run, disk
 ## assets) or just disconnects and lets the grace period end the app (second
 ## run, embedded assets). Custom routes get runs of their own: next to a web
-## directory in local mode (parameters, bodies, 405s, precedence over files,
+## directory in local mode (parameters, bodies, 405s, files answered first,
 ## failing handlers, the handler's current window, a webhook pushing into the
 ## page), without a web directory in a disk and an embedded build, and in
 ## serve mode (a route for `/`, a webhook through the proxy, posts only from

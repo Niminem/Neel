@@ -84,6 +84,7 @@ web/                <-------- Web folder: "web" by default, any name via startAp
 - The web folder is resolved relative to the Nim source file that calls `startApp`, not the working directory, so the app runs from anywhere. An absolute path works too.
 - The web folder is served at `/`. The first window opens `/`, which serves `index.html` from the root of the web folder; to start on another page, pass `startPath` (`startApp(startPath = "/app.html")`), and `index.html` is then not needed.
 - Use absolute paths for assets in your pages: `<script src="/js/main.js">`, `<link rel="stylesheet" href="/css/style.css">`.
+- The web folder is optional for an app that answers its pages with [custom routes](#custom-routes).
 
 
 

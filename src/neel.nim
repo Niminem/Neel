@@ -512,8 +512,10 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   ## been opened in the default browser: it is served for `gracePeriodMs`,
   ## then the `NeelBrowserError` propagates after teardown. A disk-mode web
   ## directory that does not exist raises `OSError` before anything starts
-  ## (embedding already fails at compile time), and so does, with
-  ## `ValueError`, a route list that cannot work (`checkPages`). `routes`
+  ## (embedding already fails at compile time), unless it is the default
+  ## one and the app has routes, which then runs without a web directory;
+  ## a route list that cannot work raises `ValueError` at the same point
+  ## (`checkPages`). `routes`
   ## is stored for `handleRequest`; `maxBodySize` is the server's limit on
   ## a request body.
   ##

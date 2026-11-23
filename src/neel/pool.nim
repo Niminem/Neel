@@ -25,6 +25,12 @@
 ##   workers grew must be released there, not after `stop` returns.
 ## - `waitTimeout`: a timed condition-variable wait that `std/locks` lacks;
 ##   exported because `protocol.nim`'s pending-call table needs the same thing.
+## - `remainingMs(deadline)`: the time left until a `MonoTime` deadline in
+##   whole milliseconds, rounded up, which is what a loop around
+##   `waitTimeout` passes it. Rounded down, the last fraction of a
+##   millisecond would count as zero and the wait would end early (a 1 ms
+##   timeout would not wait at all). `submit` and the pending-call table's
+##   `wait` both use it.
 ##
 ## Every public proc is usable from `{.gcsafe.}` code: `Pool` is a `ref` to a
 ## one-field object whose only field points at shared memory, and no proc here

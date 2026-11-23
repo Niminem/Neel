@@ -697,6 +697,10 @@ the rest of this section does not apply to it.
   directory. `webDir` must be a constant then, and a missing directory is a
   compile error pointing at the `startApp` line.
 
+In both modes there is one exception to the missing-directory error: when
+`webDir` is not given and the app has routes, a missing `web` directory is
+not an error and the app runs without one.
+
 Serving rules, identical in both modes: `GET` and `HEAD` only (anything else is
 405 with `Allow: GET, HEAD`); `/` serves `index.html` and only `/` does
 (`/sub/` is a 404, not `/sub/index.html`); directories are never listed; a
@@ -1669,6 +1673,8 @@ manual reload. Step by step, including the dashboard, costs, and removal:
 - A request with a method other than `GET` / `HEAD` is now refused with a
   403 when a browser sent it from another origin. Until now every such
   request was answered 405, so nothing that worked before is affected.
+- A `js.wait` timeout no longer ends up to 1 ms early. A 1 ms timeout
+  (`js.wait(1).foo()`) used to not wait at all.
 - `import neel` additionally exports `HttpRequest`, `HttpResponse`,
   `HttpMethod` (`hmGet`, `hmPost`, ...), `Route`, `RouteHandler`, the route
   constructors `get`, `post`, `put`, `patch`, `delete`, `route`, and the
