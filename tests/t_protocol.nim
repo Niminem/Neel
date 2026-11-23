@@ -238,6 +238,7 @@ type
     errors: seq[string]
     lock: Lock
     go: Atomic[bool]
+    fireAt: MonoTime
 
 proc completer(c: ptr Ctx) {.thread.} =
   if c.delayMs > 0:
@@ -248,9 +249,12 @@ proc completer(c: ptr Ctx) {.thread.} =
   release c.lock
 
 proc gatedCompleter(c: ptr Ctx) {.thread.} =
-  ## Spins until the test flips `go`, then completes at once; this puts the
-  ## completion within microseconds of the waiter's deadline.
+  ## Spins until the test flips `go`, then until `fireAt` (set before `go`),
+  ## then completes at once; with `fireAt` on the waiter's deadline the
+  ## completion lands within microseconds of it.
   while not c.go.load(moAcquire):
+    cpuRelax()
+  while getMonoTime() < c.fireAt:
     cpuRelax()
   let ok = c.table[].complete(c.conn, c.id, c.reply)
   acquire c.lock
@@ -492,13 +496,34 @@ suite "pending table":
       var th: Thread[ptr Ctx]
       createThread(th, gatedCompleter, addr ctx)
       sleep(1)   # let the completer reach its spin loop
-      ctx.go.store(true, moRelease)
-      # A 0-3 ms deadline lands right on top of the completion; in practice
-      # 0-1 ms times out and 2-3 ms delivers, so both paths run every time.
+      # Which side wins a true race depends on the scheduler (on macOS the
+      # spinning completer wins almost always), so every third round forces
+      # each outcome and the rest race the completion against the deadline.
       var gotValue = false
       try:
-        let v = tbl.wait(connA, round, round mod 4)
-        check v == %round
+        case round mod 3
+        of 0:
+          # Forced timeout: the completer is released only after the wait.
+          try:
+            discard tbl.wait(connA, round, 1)
+          finally:
+            ctx.go.store(true, moRelease)
+        of 1:
+          # Forced delivery: the completer fires at once; the deadline is far.
+          ctx.go.store(true, moRelease)
+          check tbl.wait(connA, round, 2000) == %round
+        else:
+          # Race: the completion lands from 0.5 ms before to 1.5 ms after a
+          # 1-3 ms deadline, while the waiter is in its timed wait or
+          # re-checking the state (timed waits wake late, so the window
+          # leans past the deadline to straddle the actual wake-up).
+          let timeoutMs = 1 + (round div 3) mod 3
+          let offsetUs = (round * 37) mod 2001 - 500
+          ctx.fireAt = getMonoTime() +
+                       initDuration(milliseconds = timeoutMs,
+                                    microseconds = offsetUs)
+          ctx.go.store(true, moRelease)
+          check tbl.wait(connA, round, timeoutMs) == %round
         gotValue = true
         inc delivered
       except NeelTimeoutError:
@@ -513,10 +538,9 @@ suite "pending table":
       check tbl.pendingCount == 0
       deinitLock ctx.lock
     check timeouts + delivered == Rounds
-    # Both sides of the race must have happened for the test to mean anything
-    # (a 0 ms deadline cannot be beaten; a spinning completer beats 3 ms).
-    check timeouts > 0
-    check delivered > 0
+    # The forced rounds guarantee both outcomes whatever the races did.
+    check timeouts >= Rounds div 3
+    check delivered >= Rounds div 3
 
   test "entries that were never waited on are freed with the table":
     block:

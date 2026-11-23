@@ -106,6 +106,13 @@ proc waitTimeout*(cond: var Cond; lock: var Lock; timeoutMs: int): bool =
     ts.tv_nsec = int(nsec mod 1_000_000_000)
     pthreadCondTimedwait(cond, lock, ts) == 0
 
+proc remainingMs*(deadline: MonoTime): int =
+  ## Milliseconds left until `deadline`, rounded up, for `waitTimeout`;
+  ## `<= 0` once it has passed. Rounding down would turn the last fraction
+  ## of a millisecond into 0 and end a wait up to 1 ms early.
+  let ns = (deadline - getMonoTime()).inNanoseconds
+  int((ns + 999_999) div 1_000_000)
+
 # --- workers -------------------------------------------------------------------
 
 proc workerLoop(p: ptr PoolImpl) {.thread.} =
@@ -255,10 +262,10 @@ proc submit*(p: Pool; task: sink Task; timeoutMs = DefaultSubmitTimeoutMs): bool
   let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
   acquire impl.lock
   while impl.count == impl.queue.len and not impl.stopping:
-    let remaining = (deadline - getMonoTime()).inMilliseconds
+    let remaining = remainingMs(deadline)
     if remaining <= 0:
       break
-    discard waitTimeout(impl.notFull, impl.lock, int(remaining))
+    discard waitTimeout(impl.notFull, impl.lock, remaining)
   if impl.stopping or impl.count == impl.queue.len:
     release impl.lock
     return false
