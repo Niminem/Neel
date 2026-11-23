@@ -1,4 +1,4 @@
-// neel.js - browser-side shim for Neel 2.1.
+// neel.js - browser-side shim for Neel 2.2.
 //
 // Plain ES2020, no build step, no dependencies. This file is a template:
 // before serving it at /neel.js, frontend.nim replaces the four placeholders

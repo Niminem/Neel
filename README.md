@@ -6,7 +6,7 @@ Write the user interface in HTML, CSS, and JavaScript and everything else in Nim
 
 > Neel runs its own thread-based HTTP/WebSocket server on `127.0.0.1`, in the spirit of [Mummy](https://github.com/guzba/mummy): one IO thread owns the sockets, a pool of worker threads runs your procs, and there is no async anywhere. It opens Chrome, Chromium, or Edge in app mode on that server, so your app gets its own window without tabs or an address bar. When none of them is installed, or when you ask for it, the app opens in a tab of your default browser instead.
 
-**This README gets you started and very well may be all you need. Every detail (the full type list, error messages, browser discovery, lifecycle, threading, and caveats) is in the [Neel 2.1 guide](docs/GUIDE.md).**
+**This README gets you started and very well may be all you need. Every detail (the full type list, error messages, browser discovery, lifecycle, threading, and caveats) is in the [Neel 2.2 guide](docs/GUIDE.md).**
 
 Features:
 
@@ -41,7 +41,7 @@ The best visualization libraries that exist are in JavaScript, and the most powe
 - No Nimble dependencies, only the standard library.
 - Google Chrome, Chromium, or Microsoft Edge for app-mode windows; without one of them, any default browser, in a tab.
 
-Neel 2.1 is verified on macOS, Windows, and Linux (Ubuntu). Edge is verified on Windows only (as Edge is just edge-case browser on other OSs).
+Neel 2.2 is verified on macOS, Windows, and Linux (Ubuntu). Edge is verified on Windows only (as Edge is just edge-case browser on other OSs).
 
 ## Installation
 
@@ -183,7 +183,7 @@ startApp(webDir = "web", size = some((1100, 800)), position = some((80, 80)),
 | `fallback`                      | `true`                      | open a default-browser tab when none of `browsers` is found (`false`: show an error page and raise `NeelBrowserError`) |
 | `gracePeriodMs`                 | 3 000 debug, 10 000 release | how long the app stays up after the last window closes                                                                 |
 | `onWindowOpen`, `onWindowClose` | `nil`                       | window hooks (see [Multiple Windows](#multiple-windows))                                                               |
-| `routes`                        | `@[]`                       | your own HTTP routes (see [Custom routes](#custom-routes)); with `webDir = ""` the app needs no web folder             |
+| `routes`                        | `@[]`                       | your own HTTP routes (see [Custom routes](#custom-routes)); an app with routes needs no web folder                     |
 
 
 Every parameter (workers, timeouts, message size, extra browser flags, `browserPath`, ...): [`startApp` parameters](docs/GUIDE.md#startapp-parameters).
@@ -373,7 +373,7 @@ startApp(routes = @[
 
 - Build routes with `get`, `post`, `put`, `patch`, `delete`, or `route({hmGet, hmPost}, ...)`. In a pattern, `@name` captures one path segment and a final `*name` captures the rest; read them with `req.param("name")`. The request body is `req.body`, a query value `req.queryParam("x")`.
 - Answer with `htmlResponse`, `textResponse`, `jsonResponse`, `redirectResponse`, or `initResponse(status, body, contentType)`.
-- Routes are answered before the web folder, in the order you list them. With `startApp(webDir = "", routes = ...)` the app has no web folder at all; a page rendered by a route becomes a Neel page by loading `/neel.js`.
+- Routes are answered before the web folder, in the order you list them. An app with routes does not need a web folder: if there is no `web` folder next to your source file, the app runs from its routes alone (an app without routes still gets an error for a missing folder). `webDir = ""` says "no web folder" explicitly, and a folder you name yourself must exist. A page rendered by a route becomes a Neel page by loading `/neel.js`.
 - Handlers run on worker threads like exposed procs: they may block, and shared state needs a `Lock`. Inside one, `js` and `currentWindow()` refer to the window the request came from.
 - A `POST`, `PUT`, `PATCH`, or `DELETE` sent by a browser from another origin is refused, so other websites cannot submit to your routes; keep state changes out of `GET` routes. Requests from programs (a webhook, `curl`) pass, and Neel authenticates no one: verify a webhook's signature in the handler.
 - Request bodies are limited to 1 MiB by default (`maxBodySize`); responses are sent whole, without streaming.
@@ -425,11 +425,10 @@ The other two exist mostly for manual (and stress) testing of Neel itself, but t
 
 
 
-## What's New Since 2.1
+## What's New in 2.2
 
-Not released yet.
-
-- [Custom routes](#custom-routes): `startApp(routes = @[get("/", home), post("/hooks/x", hook)])` answers HTTP requests with Nim procs, for any method, with path parameters and request bodies. `webDir = ""` runs an app without a web folder.
+- [Custom routes](#custom-routes): `startApp(routes = @[get("/", home), post("/hooks/x", hook)])` answers HTTP requests with Nim procs, for any method, with path parameters and request bodies.
+- An app with routes needs no web folder: the default `web` folder is used when it exists and skipped when it does not, and `webDir = ""` runs without one in any case.
 - A request with a method other than `GET` / `HEAD` that a browser sent from another origin is refused with a 403 (every such request used to get a 405).
 
 ## What's New in 2.1

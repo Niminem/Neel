@@ -273,6 +273,16 @@ suite "assets: no web directory":
     check embedded.mode == amNone
     check embedded.serveAsset(request("/t_assets.nim")).status == 404
 
+  test "the default web directory is marked optional; a named one is not":
+    let here = currentSourcePath().parentDir
+    check not webDirAssets(here, "fixtures/web").optional
+    check not diskAssets(FixtureDir).optional
+    let byDefault = webDirAssets(here, "web", optional = true)
+    check byDefault.mode == amDisk          # still a disk source: startApp
+    check byDefault.optional                # decides once it knows the routes
+    check byDefault.root == (here / "web").normalizedPath
+    check not webDirAssets(here, "", optional = true).optional
+
   test "a named webDir still resolves as before":
     let here = currentSourcePath().parentDir
     let disk = webDirAssets(here, "fixtures/web")

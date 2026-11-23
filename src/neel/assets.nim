@@ -17,7 +17,10 @@
 ##   source of an app without a web directory (`webDir = ""`, every page
 ##   comes from a custom route): every lookup is a 404. `startApp` builds
 ##   its source through `webDirAssets` / `embeddedWebDirAssets`, which map
-##   an empty `webDir` to `noAssets()`.
+##   an empty `webDir` to `noAssets()`. A disk source built for the default
+##   directory (the caller named none) is marked `optional`: `startApp`
+##   replaces it with `noAssets()` when the directory is missing and the
+##   app has routes.
 ## - `resolveAssetPath(rawPath)`: the pure request-path -> key step shared by
 ##   both modes. Percent-decodes (`std/uri.decodeUrl`), rejects anything
 ##   with a NUL byte, a backslash, or a `..` segment, drops `.` and empty
@@ -60,6 +63,10 @@ type
       ## Absolute, normalized web root (`amDisk`); `""` when embedded.
     files*: Table[string, string]
       ## Root-relative key (`/` separators) -> file bytes (`amEmbedded`).
+    optional*: bool
+      ## `amDisk` only: this is the default web directory, which the caller
+      ## did not name. `startApp` lets an app with routes run without it
+      ## when it does not exist; a named directory must exist.
 
 const
   IndexFile* = "index.html"
@@ -121,11 +128,15 @@ proc noAssets*(): AssetSource =
   ## so `serveAsset` answers 404 (405 for anything but `GET` / `HEAD`).
   AssetSource(mode: amNone)
 
-proc webDirAssets*(callerDir, dir: string): AssetSource =
+proc webDirAssets*(callerDir, dir: string; optional = false): AssetSource =
   ## What `startApp` serves in disk mode: `noAssets()` for an empty `dir`
   ## (resolving `""` would otherwise serve the caller's source directory),
-  ## else `diskAssets(resolveWebDir(callerDir, dir))`.
-  if dir.len == 0: noAssets() else: diskAssets(resolveWebDir(callerDir, dir))
+  ## else `diskAssets(resolveWebDir(callerDir, dir))` marked `optional` as
+  ## given (`true` when `dir` is the default the caller did not name).
+  if dir.len == 0:
+    return noAssets()
+  result = diskAssets(resolveWebDir(callerDir, dir))
+  result.optional = optional
 
 proc embeddedWebDirAssets*(dir: string; files: openArray[(string, string)]): AssetSource =
   ## What `startApp` serves in embedded mode: `noAssets()` for an empty

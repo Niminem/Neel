@@ -1,4 +1,4 @@
-## neel.nim - public surface of Neel 2.1.
+## neel.nim - public surface of Neel 2.2.
 ##
 ## This is the only module an application imports. It provides `startApp`
 ## and re-exports the user-facing pieces of the internal modules under
@@ -100,7 +100,7 @@ export Route, RouteHandler, route, routes.get, post, put, patch, routes.delete,
        redirectResponse
 
 const
-  NeelVersion* = "2.1.0"
+  NeelVersion* = "2.2.0"
     ## Library version string, kept in sync with `neel.nimble`.
   DefaultMaxBodySize* = MaxRequestBody
     ## Default `maxBodySize`: the largest HTTP request body, in bytes (1 MiB).
@@ -172,17 +172,24 @@ proc checkServeParams(serve: bool; port: int; allowedOrigins: seq[string]) =
   if not serve and allowedOrigins.len > 0:
     raise newException(ValueError, "neel: allowedOrigins requires serve = true")
 
-proc checkPages(assets: AssetSource; routes: seq[Route]) =
-  ## What the app would serve, checked before anything is bound: the route
-  ## list must be usable (`checkRoutes`, with Neel's own paths reserved),
-  ## an app without a web directory needs at least one route, and a
-  ## disk-mode web directory must exist.
+proc checkPages(assets: AssetSource; routes: seq[Route]): AssetSource =
+  ## What the app will serve, checked before anything is bound, and the
+  ## asset source to serve it from. The route list must be usable
+  ## (`checkRoutes`, with Neel's own paths reserved). A disk-mode web
+  ## directory must exist, with one exception: the default one (`optional`,
+  ## the caller named none) may be missing when the app has routes, and the
+  ## app then runs without a web directory. An app without a web directory
+  ## needs at least one route.
   checkRoutes(routes, [WsPath, NeelJsPath, NoBrowserPath])
-  if assets.mode == amNone and routes.len == 0:
-    raise newException(ValueError, "neel: webDir is \"\" and there are no " &
-      "routes, so the app has nothing to serve")
-  if assets.mode == amDisk and not dirExists(assets.root):
-    raise newException(OSError, "neel: web directory not found: " & assets.root)
+  result = assets
+  if result.mode == amDisk and not dirExists(result.root):
+    if result.optional and routes.len > 0:
+      result = noAssets()
+    else:
+      raise newException(OSError, "neel: web directory not found: " & result.root)
+  if result.mode == amNone and routes.len == 0:
+    raise newException(ValueError, "neel: no web directory and no routes, " &
+      "so the app has nothing to serve")
 
 proc rootRedirectFor(startPath: string): string =
   ## Where serve mode sends `GET /`: `startPath` with a leading `/`, or `""`
@@ -513,7 +520,7 @@ proc runApp(assets: AssetSource; dispatch: DispatchProc; exposed: seq[string];
   doAssert not app.running, "startApp is already running in this process"
   checkServeParams(serve, port, allowedOrigins)
   let filter = initRequestFilter(serve, allowedOrigins)
-  checkPages(assets, routes)
+  let assets = checkPages(assets, routes)
   let launcher = if serve: Launcher(noLaunch) else: testLauncher()
   let profileSweep = testProfileSweep()
   let pingObserver = testPingObserver()
@@ -588,7 +595,9 @@ macro startApp*(args: varargs[untyped]): untyped =
   ##   of the source file that calls `startApp` unless absolute (may also be
   ##   given as the single positional argument). Must be a constant when
   ##   `embedAssets` is true. `""` means no web directory: every page comes
-  ##   from `routes`.
+  ##   from `routes`. When `webDir` is not given at all and the default
+  ##   `web` directory does not exist, an app that passes `routes` runs
+  ##   without one too; a directory you name must exist.
   ## - `embedAssets = defined(release)`: compile-time switch. `true` walks
   ##   `webDir` at compile time and embeds every file; `false` reads files
   ##   from disk on every request.
@@ -625,8 +634,11 @@ macro startApp*(args: varargs[untyped]): untyped =
   ## the private `runApp`. Must come after every `{.expose.}` proc and after
   ## the imports of modules that contain them (a proc exposed later is not
   ## dispatched).
+  const DefaultWebDir = "web"
   let callerDir = parentDir(args.lineInfoObj.filename)
-  var webDir = newLit("web")
+  var webDir = newLit(DefaultWebDir)
+  var webDirGiven = false  # by keyword or position; else the default applies
+  var routesGiven = false
   var embed = newCall(ident"defined", ident"release")
   var forwarded: seq[NimNode]
   var positional = 0
@@ -635,8 +647,11 @@ macro startApp*(args: varargs[untyped]): untyped =
       let name = a[0]
       if name.kind != nnkIdent:
         error("startApp: expected `name = value`", a)
+      if name.eqIdent("routes"):
+        routesGiven = true
       if name.eqIdent("webDir"):
         webDir = a[1]
+        webDirGiven = true
       elif name.eqIdent("embedAssets"):
         embed = a[1]
       elif name.eqIdent("assets") or name.eqIdent("dispatch") or
@@ -650,6 +665,7 @@ macro startApp*(args: varargs[untyped]): untyped =
               "keyword arguments for everything else, e.g. " &
               "startApp(\"web\", port = 8000)", a)
       webDir = a
+      webDirGiven = true
       inc positional
   let dispatchName = ident"neelDispatch"
   dispatchName.copyLineInfo(args)
@@ -659,9 +675,21 @@ macro startApp*(args: varargs[untyped]): untyped =
                      newCall(bindSym"exposedNames"))
   for f in forwarded:
     call.add f
-  let embedded = newCall(bindSym"embeddedWebDirAssets", webDir,
-                         newCall(bindSym"embedWebDir", webDir, newLit(callerDir)))
-  let disk = newCall(bindSym"webDirAssets", newLit(callerDir), webDir)
+  # The default web directory is optional for an app with routes: when the
+  # caller named none and it does not exist, the app runs without one. Disk
+  # mode decides at run time (`checkPages`), where the route list is known.
+  # Embedding decides here: with a `routes` argument a missing default
+  # directory embeds nothing; without one it stays the compile error that
+  # `embedWebDir` raises. A directory the caller named must always exist.
+  let embedded =
+    if not webDirGiven and routesGiven and
+        not dirExists(resolveWebDir(callerDir, DefaultWebDir)):
+      newCall(bindSym"noAssets")
+    else:
+      newCall(bindSym"embeddedWebDirAssets", webDir,
+              newCall(bindSym"embedWebDir", webDir, newLit(callerDir)))
+  let disk = newCall(bindSym"webDirAssets", newLit(callerDir), webDir,
+                     newLit(not webDirGiven))
   result = quote do:
     block:
       `generate`

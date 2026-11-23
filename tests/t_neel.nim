@@ -306,6 +306,23 @@ proc appThread(run: int) {.thread.} =
                               workers = 4, queueCapacity = 32,
                               routes = dynamicRoutes())
         finish(reason)
+      of 7:
+        # No `webDir` argument: the default `web` directory, which does not
+        # exist next to this file, is optional because there are routes.
+        let reason = startApp(embedAssets = false,
+                              browsers = @[], gracePeriodMs = Grace,
+                              startupTimeoutMs = 2000, callTimeoutMs = 2000,
+                              workers = 4, queueCapacity = 32,
+                              routes = dynamicRoutes())
+        finish(reason)
+      of 8:
+        # The same in a release-style build: nothing to embed, no error.
+        let reason = startApp(embedAssets = true,
+                              browsers = @[], gracePeriodMs = Grace,
+                              startupTimeoutMs = 2000, callTimeoutMs = 2000,
+                              workers = 4, queueCapacity = 32,
+                              routes = dynamicRoutes())
+        finish(reason)
       else:
         let reason = startApp(webDir = "fixtures/web", embedAssets = false,
                               serve = false, startPath = "/sub/page.html",
@@ -1064,7 +1081,7 @@ suite "neel: startApp end to end":
     release shared.lock
 
   test "the public surface re-exports what applications need":
-    check NeelVersion == "2.1.0"
+    check NeelVersion == "2.2.0"
     check DefaultGracePeriodMs >= MinGracePeriodMs
     check DefaultMaxMessageSize == 16 * 1024 * 1024
     check currentWindowId() == NoWindow
@@ -1497,7 +1514,10 @@ suite "neel: custom routes":
     check shared.reason == erQuit
 
   test "no web directory: every page is a route, in disk and embedded builds":
-    for run in [5, 6]:
+    # Runs 5 and 6 say so with `webDir = ""`; runs 7 and 8 name no web
+    # directory at all, and the default one (`tests/web`) does not exist.
+    check not dirExists(currentSourcePath().parentDir / "web")
+    for run in [5, 6, 7, 8]:
       appRun(run):
         let base = "http://127.0.0.1:" & $port
         acquire shared.lock
@@ -1618,10 +1638,24 @@ suite "neel: custom routes":
                    routes = @[Route()])
         of 3:
           startApp(webDir = "", embedAssets = false, browsers = @[])
-        else:
+        of 4:
           startApp("", embedAssets = true, browsers = @[])
-      except ValueError as e:
-        result = e.msg
+        of 5:
+          # The default web directory is missing and the route list is empty.
+          startApp(embedAssets = true, browsers = @[], routes = newSeq[Route]())
+        of 6:
+          # The default web directory is missing and there are no routes:
+          # the error an app without routes has always had.
+          startApp(embedAssets = false, browsers = @[])
+        of 7:
+          startApp(embedAssets = false, browsers = @[], routes = newSeq[Route]())
+        else:
+          # A directory the app names must exist, routes or not.
+          startApp(webDir = "fixtures/no-such-web", embedAssets = false,
+                   browsers = @[], routes = dynamicRoutes())
+      except ValueError, OSError:
+        let e = getCurrentException()
+        result = $e.name & ": " & e.msg
       finally:
         setTestLauncher(nil)
         setTestProfileSweep(nil)
@@ -1632,13 +1666,23 @@ suite "neel: custom routes":
       release shared.lock
       if pingIntervals().len != 0:
         result.add " (but a server was created)"
-    check refusal(0) == "neel: route \"/neel.js\" is reserved: Neel serves /neel.js itself"
-    check refusal(1) == "neel: route GET, HEAD \"/u/@name\" can never run: \"/u/@id\" " &
-      "comes before it and matches the same requests"
-    check refusal(2).startsWith("neel: routes[0] is empty")
-    for which in [3, 4]:
-      check refusal(which) == "neel: webDir is \"\" and there are no routes, so the " &
-        "app has nothing to serve"
+    check refusal(0) == "ValueError: neel: route \"/neel.js\" is reserved: Neel " &
+      "serves /neel.js itself"
+    check refusal(1) == "ValueError: neel: route GET, HEAD \"/u/@name\" can never " &
+      "run: \"/u/@id\" comes before it and matches the same requests"
+    check refusal(2).startsWith("ValueError: neel: routes[0] is empty")
+    for which in [3, 4, 5]:
+      check refusal(which) == "ValueError: neel: no web directory and no routes, " &
+        "so the app has nothing to serve"
+    for which in [6, 7, 8]:
+      let msg = refusal(which)
+      check msg.startsWith("OSError: neel: web directory not found: ")
+      check msg.endsWith(if which == 8: "no-such-web" else: "web")
+    # Without a `routes` argument a missing default directory cannot be
+    # embedded: that stays a compile error.
+    check not compiles(startApp(embedAssets = true, browsers = @[]))
+    check compiles(startApp(embedAssets = true, browsers = @[],
+                            routes = dynamicRoutes()))
     # A malformed pattern fails where the route is built, before startApp.
     expect ValueError:
       discard get("no-slash", routeHello)

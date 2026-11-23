@@ -4,7 +4,9 @@
 ##
 ## What it shows:
 ## - `startApp(webDir = "", routes = @[...])`: no `web/` folder; `get`,
-##   `post`, and path parameters (`/messages/@id`).
+##   `post`, and path parameters (`/messages/@id`). (Leaving `webDir` out
+##   works too, because there is no `web/` folder next to this file; `""`
+##   says it explicitly.)
 ## - A page rendered by a route is a Neel page like any other as long as it
 ##   loads `/neel.js`: `neel.clearInbox()` below is an ordinary exposed proc.
 ## - A form submission (`POST /messages`, urlencoded body) answered with a

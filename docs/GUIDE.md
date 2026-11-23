@@ -1,4 +1,4 @@
-# Neel 2.1 guide
+# Neel 2.2 guide
 
 The complete reference. For an introduction and a first app, start with the
 [README](../README.md).
@@ -39,7 +39,7 @@ Contents
 - [Serve mode](#serve-mode)
 - [Caveats](#caveats)
 - [The examples](#the-examples)
-- [What's new since 2.1](#whats-new-since-21)
+- [What's new in 2.2](#whats-new-in-22)
 - [What's new in 2.1](#whats-new-in-21)
 - [Migrating from Neel 1.x](#migrating-from-neel-1x)
 - [License](#license)
@@ -682,9 +682,10 @@ the next connection, and only `quitApp()` or a stop signal ends the app.
 The `webDir` argument (default `"web"`) is resolved against the directory of
 the source file that calls `startApp`, in both asset modes, so `nim c -r
 examples/x/x.nim` works from any working directory. An absolute `webDir` is
-used as is. `webDir = ""` means the app has no web directory and serves
-every page from [custom routes](#custom-routes); the rest of this section
-does not apply to it.
+used as is. An app with [custom routes](#custom-routes) can run without a
+web directory (`webDir = ""`, or simply no `web` directory next to the
+source file; see [An app without a web directory](#an-app-without-a-web-directory));
+the rest of this section does not apply to it.
 
 `embedAssets` is a compile-time switch whose default is `defined(release)`:
 
@@ -854,13 +855,25 @@ served whenever no route claims its path.
 
 ### An app without a web directory
 
-Pass `webDir = ""` when every page comes from a route. Nothing is read from
-disk or embedded, every path without a route is a 404, and `startApp`
-raises `ValueError` if there are no routes either.
+An app that passes `routes` does not need a web directory. What `startApp`
+does depends on `webDir`:
+
+| `webDir` | The directory exists | It does not exist |
+|---|---|---|
+| not given (the default, `web`) | served as usual, after the routes | with `routes`: the app runs without a web directory. Without `routes`: `OSError` in a debug build, a compile error when embedding, as always |
+| a directory you name | served as usual, after the routes | `OSError` in a debug build, a compile error when embedding, with or without routes (a typo should not go unnoticed) |
+| `""` | not looked at | the app runs without a web directory |
 
 ```nim
-startApp(webDir = "", routes = @[get("/", home), get("/settings", settings)])
+startApp(routes = @[get("/", home), get("/settings", settings)])   # no web/ folder next to this file
+startApp(webDir = "", routes = @[get("/", home)])                  # the same, said explicitly
 ```
+
+Without a web directory nothing is read from disk or embedded and every
+path without a route is a 404. If there are no routes either (the list is
+empty), `startApp` raises `ValueError`: the app would have nothing to serve.
+When embedding, "with `routes`" means that the `routes` argument is written
+in the `startApp` call, since the list itself is not known at compile time.
 
 The first window opens `startPath` (default `/`), so there must be a route
 for it. A page rendered by a route is bound to its window exactly like a
@@ -1051,7 +1064,7 @@ is that `webDir` may be given positionally (`startApp("web", port = 8000)`).
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `webDir` | `"web"` | web directory, relative to the calling source file unless absolute; a constant when embedding; `""` for an app [without one](#an-app-without-a-web-directory) |
+| `webDir` | `"web"` | web directory, relative to the calling source file unless absolute; a constant when embedding. With `routes`, the default directory may be missing and `""` means none: [an app without a web directory](#an-app-without-a-web-directory) |
 | `embedAssets` | `defined(release)` | compile-time constant: embed `webDir` into the binary (`true`) or serve from disk (`false`) |
 | `startPath` | `"/"` | the page the first window opens (an `openWindow` path); in serve mode, where `/` redirects |
 | `port` | `0` | TCP port on `127.0.0.1`; 0 picks an ephemeral port (serve mode needs a fixed one) |
@@ -1080,8 +1093,8 @@ not exist in a debug build), or `ValueError` (a
 non-positive size; and, before anything is bound, `serve = true` with
 `port = 0`, `allowedOrigins` without `serve = true`, a malformed
 `allowedOrigins` entry, see [Starting a server](#starting-a-server), a
-route on a reserved path or one that can never run, or `webDir = ""`
-without any route, see [Custom routes](#custom-routes));
+route on a reserved path or one that can never run, or no web directory
+and no route, see [Custom routes](#custom-routes));
 everything has been torn down when the exception leaves.
 
 Compile-time errors from the macro point at your `startApp(...)` line: a
@@ -1624,22 +1637,24 @@ manual reload. Step by step, including the dashboard, costs, and removal:
   are allowed origins and `--port=N` replaces the port
   (`./serve https://<name>.trycloudflare.com`).
 - [`examples/routes`](../examples/routes) - [custom routes](#custom-routes)
-  in an app with no web directory (`webDir = ""`): pages rendered in Nim, a
+  in an app with no web directory: pages rendered in Nim, a
   path parameter, a form that posts to a route and is redirected back, a
   JSON endpoint, and a webhook that stores its payload and pushes it into
   the open page with `js`. Runs on port 5360; `--serve` runs the same
   routes in serve mode. Its header comment has the `curl` command for the
   webhook.
 
-## What's new since 2.1
-
-Not released yet.
+## What's new in 2.2
 
 - [Custom routes](#custom-routes): `startApp(routes = @[get("/", home),
   post("/hooks/x", hook)])` answers HTTP requests with Nim procs, for any
   method, with path parameters and request bodies, before the web
-  directory. `webDir = ""` runs an app without a web directory, and
-  `maxBodySize` bounds a request body (1 MiB by default, as before).
+  directory. `maxBodySize` bounds a request body (1 MiB by default, as
+  before).
+- An app with routes needs no web directory: the default `web` directory
+  is used when it exists and skipped when it does not, and `webDir = ""`
+  runs without one in any case. An app without routes still fails when its
+  web directory is missing, as before.
 - A request with a method other than `GET` / `HEAD` is now refused with a
   403 when a browser sent it from another origin. Until now every such
   request was answered 405, so nothing that worked before is affected.
