@@ -249,13 +249,17 @@ proc completer(c: ptr Ctx) {.thread.} =
   release c.lock
 
 proc gatedCompleter(c: ptr Ctx) {.thread.} =
-  ## Spins until the test flips `go`, then until `fireAt` (set before `go`),
+  ## Waits until the test flips `go`, then until `fireAt` (set before `go`),
   ## then completes at once; with `fireAt` on the waiter's deadline the
-  ## completion lands within microseconds of it.
+  ## completion lands within a fraction of a millisecond of it. Both loops
+  ## give the CPU away with `sleep(0)` instead of spinning: a thread that
+  ## burns a core makes the timers of the other threads fire many times too
+  ## late on some virtual machines (seen with VirtualBox on top of Hyper-V,
+  ## where this test then took minutes instead of a second).
   while not c.go.load(moAcquire):
-    cpuRelax()
+    sleep(0)
   while getMonoTime() < c.fireAt:
-    cpuRelax()
+    sleep(0)
   let ok = c.table[].complete(c.conn, c.id, c.reply)
   acquire c.lock
   c.completed = ok
@@ -495,9 +499,9 @@ suite "pending table":
       initLock ctx.lock
       var th: Thread[ptr Ctx]
       createThread(th, gatedCompleter, addr ctx)
-      sleep(1)   # let the completer reach its spin loop
+      sleep(1)   # let the completer reach its wait loop
       # Which side wins a true race depends on the scheduler (on macOS the
-      # spinning completer wins almost always), so every third round forces
+      # completer wins almost always), so every third round forces
       # each outcome and the rest race the completion against the deadline.
       var gotValue = false
       try:
