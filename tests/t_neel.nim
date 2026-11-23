@@ -129,6 +129,7 @@ proc localRoutes(): seq[Route] =
     route({hmGet, hmPost}, "/which-window", routeWindow),
     get("/files/*path", routeFiles),
     get("/noext", routeShadow),          # also a file in the web directory
+    get("/sub/@name", routeHello),       # a directory of the web directory
     get("/boom", routeBoom),
     get("/bad-header", routeBadHeader),
     get("/default", routeDefault),
@@ -139,7 +140,8 @@ proc dynamicRoutes(): seq[Route] =
 
 proc serveRoutes(): seq[Route] =
   @[get("/", routeRoot), post("/echo", routeEcho),
-    get("/which-window", routeWindow), post("/hooks/demo", routeHook)]
+    get("/which-window", routeWindow), post("/hooks/demo", routeHook),
+    get("/*", routeShadow)]              # a catch-all, last
 
 # --- shared state between the app thread and the test thread -----------------------
 
@@ -1373,7 +1375,7 @@ suite "neel: serve mode":
       check waitUntil(IoTimeout, isDone)
 
 suite "neel: custom routes":
-  test "local mode: routes answer before the web directory, with parameters, bodies, and a window":
+  test "local mode: routes next to the web directory, with parameters, bodies, and a window":
     appRun(4):
       let base = "http://127.0.0.1:" & $port
       let own = @[("Origin", base), ("Sec-Fetch-Site", "same-origin")]
@@ -1412,10 +1414,19 @@ suite "neel: custom routes":
       check parseJson(full.body)["len"].getInt == RouteBodyLimit
       check http(port, "/echo", "POST", body = repeat('x', RouteBodyLimit + 1)).status == 400
 
-      # A route wins over a file of the same name; other files are served
-      # as before, and only with GET / HEAD.
-      check http(port, "/noext").body == "from the route"
+      # A file of the web directory comes before a route for the same path,
+      # so a route with a parameter is a fallback and cannot hide the app's
+      # own files. Files are served as before, and only with GET / HEAD.
+      check http(port, "/noext").body == readFile(FixtureDir / "noext")
       check readFile(FixtureDir / "noext") != "from the route"
+      check http(port, "/noext", "HEAD").header("Content-Length") ==
+        $readFile(FixtureDir / "noext").len
+      check http(port, "/sub/page.html").body == readFile(FixtureDir / "sub" / "page.html")
+      check http(port, "/sub/data%20with%20space.json").body ==
+        readFile(FixtureDir / "sub" / "data with space.json")
+      check http(port, "/sub/no-such-file").body == "hello no-such-file q="
+      let ranged = http(port, "/media/blob.bin", headers = @[("Range", "bytes=0-3")])
+      check ranged.status == 206
       check http(port, "/app.js").body == readFile(FixtureDir / "app.js")
       check http(port, "/").body == readFile(FixtureDir / "index.html")
       let assetPost = http(port, "/app.js", "POST")
@@ -1556,12 +1567,19 @@ suite "neel: custom routes":
     let port = freePort()
     serveRoutesRun(port):
       const Public = "myapp.example.com"
-      # A route for `/` wins over the redirect to `startPath`.
+      # `startPath` names another page, so `/` is not `index.html` here: the
+      # route for `/` answers it, in place of the redirect to `startPath`.
       let root = http(port, "/", host = Public)
       check root.status == 200
       check root.header("Location") == ""
       check root.body == DynamicPage
+      # Files come before routes, also before a catch-all: it only gets the
+      # paths that nothing else answers.
       check http(port, "/sub/page.html").body == readFile(FixtureDir / "sub" / "page.html")
+      check http(port, "/index.html").body == readFile(FixtureDir / "index.html")
+      check http(port, "/style.css").header("Content-Type") == "text/css"
+      check http(port, "/no/such/file").body == "from the route"
+      check http(port, "/no/such/file", "POST").header("Allow") == "GET, HEAD"
       # Serve mode has one window: every request belongs to it.
       check http(port, "/which-window", host = Public).body == "1"
       # A webhook arrives as its sender's server sends it: the public Host,

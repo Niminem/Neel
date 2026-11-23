@@ -4,10 +4,10 @@
 ## An application hands `startApp` a list of routes (`routes = @[get("/",
 ## home), post("/hooks/slack", slackHook)]`). `neel.nim` validates the list
 ## with `checkRoutes` before anything is bound, stores it, and asks
-## `findRoute` about every request that is not one of Neel's reserved paths;
-## the web directory is only consulted when no route's pattern matches the
-## path. The list never changes while the app runs, so the workers read it
-## without a lock.
+## `findRoute` about every request that is neither one of Neel's reserved
+## paths nor answered by a file of the web directory (files come first, so
+## a wildcard route cannot hide them). The list never changes while the app
+## runs, so the workers read it without a lock.
 ##
 ## Surface:
 ## - `RouteHandler = proc(req: HttpRequest): HttpResponse {.nimcall, gcsafe.}`:

@@ -42,14 +42,19 @@
 ##   is not open, or when it names none and more than one window is open.
 ## - `/neel/no-browser`: the page shown when no browser was found and
 ##   `fallback = false`; 404 in serve mode.
+## - for `GET` / `HEAD`, a file of the web directory, when there is one for
+##   the path (`neel/assets`; never when the app has no web directory).
+##   Files come before routes, so a route with a parameter or a wildcard
+##   (`/@page`, `/*`) is a fallback and cannot hide the app's own assets.
+##   One exception: in serve mode, when `startPath` names another page, `/`
+##   is not served from `index.html` (see the redirect below).
 ## - the application's custom routes (`routes`, see `neel/routes`): the
 ##   first whose pattern and method match runs its handler on the worker,
 ##   with the request's window as the current window (`routeWindowId`); a
 ##   path that only matches for other methods is 405 with their `Allow`.
 ## - anything left that is not `GET` / `HEAD`: 405.
 ## - `/` in serve mode, when `startPath` names another page: a 302 to it.
-## - everything else: the web directory through `neel/assets` (nothing but
-##   404s when `webDir = ""`).
+## - everything else: 404.
 ##
 ## Tests replace the browser launch and the exit-time profile sweep, and
 ## observe the server's ping interval, through `neel/testhooks`, which is
@@ -408,6 +413,14 @@ proc handleRequest(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
     if req.path == NeelJsPath:
       return respond(serveNeelJs(a, req))
     return respond(serveNoBrowser(a))
+  # In serve mode with a `startPath` elsewhere, `/` is never `index.html`.
+  let redirectRoot = req.path == "/" and a.rootRedirect.len > 0
+  if readOnly and not redirectRoot and a.assets.mode != amNone:
+    # A file of the web directory comes before any route. Anything but a
+    # 404 (200, or 206 / 416 for a `Range`) means the file exists.
+    let asset = serveAsset(a.assets, req)
+    if asset.status != 404:
+      return respond(asset)
   let m = findRoute(a.routes, req.httpMethod, req.path)
   case m.kind
   of rmFound:
@@ -418,11 +431,11 @@ proc handleRequest(conn: ConnId; req: HttpRequest): RequestAction {.gcsafe.} =
     discard
   if not readOnly:
     return respond(methodNotAllowed())
-  if req.path == "/" and a.rootRedirect.len > 0:
+  if redirectRoot:
     var r = initResponse(302)
     r.addHeader("Location", a.rootRedirect)
     return respond(r)
-  respond(serveAsset(a.assets, req))
+  respond(notFound())
 
 proc handleMessage(conn: ConnId; text: string) {.gcsafe.} =
   ## `call` -> dispatch under the connection's window and reply; `ret` /
@@ -623,8 +636,9 @@ macro startApp*(args: varargs[untyped]): untyped =
   ##   `extraFlags: seq[string] = @[]`.
   ## - `onWindowOpen`, `onWindowClose: WindowHook = nil`.
   ## - `routes: seq[Route] = @[]`: custom routes, built with `get`, `post`,
-  ##   `put`, `patch`, `delete`, or `route`. They are answered before the
-  ##   web directory, by list order, on a worker thread. Raises `ValueError`
+  ##   `put`, `patch`, `delete`, or `route`. They answer the requests that
+  ##   no file of the web directory answers, by list order, on a worker
+  ##   thread. Raises `ValueError`
   ##   for a route on a reserved path (`/ws`, `/neel.js`,
   ##   `/neel/no-browser`) or one that an earlier route shadows.
   ## - `maxBodySize = DefaultMaxBodySize` (1 MiB): the largest request body

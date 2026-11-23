@@ -707,15 +707,16 @@ decoded (`/data%20file.json`). Single-range `Range` requests are honoured with
 `<audio>` seek. The content type comes from `std/mimetypes` by extension, with
 `.js` / `.mjs` as `application/javascript`, `.map` as `application/json`, and
 unknown extensions as `application/octet-stream`; no `charset` is appended.
-The reserved routes are `/neel.js`, `/ws`, and `/neel/no-browser`. A
-[custom route](#custom-routes) is answered before the web directory, for
-any method it lists; these rules cover the paths no route claims.
+The reserved routes are `/neel.js`, `/ws`, and `/neel/no-browser`. A file
+of the web directory is served before any [custom route](#custom-routes);
+routes answer the requests that no file does, including every request with
+another method (see [What is answered first](#what-is-answered-first)).
 
 In serve mode two routes differ. `GET` and `HEAD /` answer `302` with
 `Location: <startPath>` when the path part of `startPath` (before any `?`
 or `#`) is not `/`; a `startPath` such as `/?tab=2` is not redirected to
 (the browser would land on `/` again), so `/` serves `index.html` then.
-A custom route for `/` takes precedence over the redirect.
+A custom route for `/` answers it in place of the redirect.
 `/neel/no-browser` is a 404.
 
 Add `--app:gui` to release builds to avoid a visible terminal window:
@@ -842,16 +843,26 @@ sent as is, with these exceptions, which are answered with a bare
 ### What is answered first
 
 1. Neel's reserved paths: `/ws`, `/neel.js`, `/neel/no-browser`.
-2. Your routes. When a path matches a pattern but not with the request's
-   method, the answer is 405 with `Allow` listing the methods that would
-   match; the web directory is not consulted.
-3. Any other request that is not `GET` or `HEAD`: 405 with `Allow: GET, HEAD`.
-4. In serve mode, the redirect of `/` to `startPath` (a route for `/` wins
-   over it).
-5. The web directory.
+2. For `GET` and `HEAD`, a file of the web directory, if there is one for
+   the path (`/` means `index.html`).
+3. Your routes, in list order. When a path matches a pattern but not with
+   the request's method, the answer is 405 with `Allow` listing the methods
+   that would match.
+4. Any other request that is not `GET` or `HEAD`: 405 with `Allow: GET, HEAD`.
+5. In serve mode, the redirect of `/` to `startPath`.
+6. 404.
 
-So a route can replace a file (`get("/index.html", ...)`), and a file is
-served whenever no route claims its path.
+Files come before routes, so a route never hides a file. That is what makes
+patterns with parameters and wildcards safe to use next to a web directory:
+`get("/@page", render)` or a catch-all `get("/*", notFound)` answers only
+the paths that are not files, and `/style.css` is still the stylesheet. It
+also means a route whose path is a file's path never runs for `GET`: with a
+`web/index.html`, the route for `/` is not used; delete or rename the file
+to serve that path from a route.
+
+One exception: in serve mode with a `startPath` that names another page,
+`/` is never `index.html` (it redirects to `startPath`), so a route for `/`
+answers it there in place of the redirect.
 
 ### An app without a web directory
 
@@ -860,8 +871,8 @@ does depends on `webDir`:
 
 | `webDir` | The directory exists | It does not exist |
 |---|---|---|
-| not given (the default, `web`) | served as usual, after the routes | with `routes`: the app runs without a web directory. Without `routes`: `OSError` in a debug build, a compile error when embedding, as always |
-| a directory you name | served as usual, after the routes | `OSError` in a debug build, a compile error when embedding, with or without routes (a typo should not go unnoticed) |
+| not given (the default, `web`) | served as usual; routes answer the rest | with `routes`: the app runs without a web directory. Without `routes`: `OSError` in a debug build, a compile error when embedding, as always |
+| a directory you name | served as usual; routes answer the rest | `OSError` in a debug build, a compile error when embedding, with or without routes (a typo should not go unnoticed) |
 | `""` | not looked at | the app runs without a web directory |
 
 ```nim
@@ -1084,7 +1095,7 @@ is that `webDir` may be given positionally (`startApp("web", port = 8000)`).
 | `extraFlags` | `@[]` | extra command-line flags for app-mode windows (ignored in serve mode) |
 | `onWindowOpen` | `nil` | `WindowHook` fired when a window's page first connects (serve mode: once, on the first connection ever) |
 | `onWindowClose` | `nil` | `WindowHook` fired when a window is closed or retired (serve mode: once, at teardown) |
-| `routes` | `@[]` | [custom routes](#custom-routes): `seq[Route]` built with `get`, `post`, `put`, `patch`, `delete`, or `route`, answered before the web directory |
+| `routes` | `@[]` | [custom routes](#custom-routes): `seq[Route]` built with `get`, `post`, `put`, `patch`, `delete`, or `route`; they answer what no file of the web directory does |
 | `maxBodySize` | `DefaultMaxBodySize` (1 048 576 = 1 MiB) | largest HTTP request body the server will accept; a larger one is answered 400 |
 
 `startApp` raises `NeelBrowserError` (no browser and `fallback = false`, or a
@@ -1648,9 +1659,9 @@ manual reload. Step by step, including the dashboard, costs, and removal:
 
 - [Custom routes](#custom-routes): `startApp(routes = @[get("/", home),
   post("/hooks/x", hook)])` answers HTTP requests with Nim procs, for any
-  method, with path parameters and request bodies, before the web
-  directory. `maxBodySize` bounds a request body (1 MiB by default, as
-  before).
+  method, with path parameters and request bodies. Files of the web
+  directory are served first; routes answer everything else. `maxBodySize`
+  bounds a request body (1 MiB by default, as before).
 - An app with routes needs no web directory: the default `web` directory
   is used when it exists and skipped when it does not, and `webDir = ""`
   runs without one in any case. An app without routes still fails when its
